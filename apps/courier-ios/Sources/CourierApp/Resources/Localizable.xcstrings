@@ -57,6 +57,34 @@
         "en": { "stringUnit": { "state": "translated", "value": "No network connection. Location samples queued locally." } },
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Sem conexão. Amostras de localização enfileiradas localmente." } }
       }
+    },
+    "courier_offer_address_privacy_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Exact customer street and number are revealed only after accepting the delivery offer." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "O logradouro e número exatos do cliente são exibidos apenas após o aceite da oferta de entrega." } }
+      }
+    },
+    "courier_gps_permission_denied_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Location permission is denied. Live route tracking is paused; please enable GPS or contact support." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Permissão de localização negada. O rastreamento em rota está pausado; ative o GPS ou acione o suporte." } }
+      }
+    },
+    "courier_pod_otp_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Enter 4-digit customer confirmation code" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Digite o código de confirmação de 4 dígitos do cliente" } }
+      }
+    },
+    "courier_offline_completion_blocked_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cannot finalize delivery while offline. Event queued for server verification." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Não é possível concluir a entrega offline. Evento enfileirado para validação no servidor." } }
+      }
     }
   }
 }

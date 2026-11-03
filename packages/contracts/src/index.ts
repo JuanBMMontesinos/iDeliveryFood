@@ -469,6 +469,120 @@ export interface AdminStaffScopeGrantRequestContract {
   justification: string;
 }
 
+export interface LedgerAccountBalanceContract {
+  accountId: string;
+  code: string;
+  name: string;
+  accountType: "ASSET" | "LIABILITY" | "REVENUE" | "EXPENSE";
+  organizationId: string | null;
+  courierId: string | null;
+  currencyCode: typeof CURRENCY_CODE;
+  totalDebitsCents: number;
+  totalCreditsCents: number;
+  netBalanceCents: number;
+}
+
+export interface LedgerJournalEntryLineContract {
+  accountCode: string;
+  direction: "DEBIT" | "CREDIT";
+  amountCents: number;
+}
+
+export interface LedgerJournalPostContract {
+  id: string;
+  referenceType:
+    | "ORDER_CAPTURE"
+    | "ORDER_REFUND"
+    | "MERCHANT_SETTLEMENT"
+    | "COURIER_PAYOUT"
+    | "PROMO_SUBSIDY"
+    | "REVERSAL";
+  referenceId: string;
+  description: string;
+  idempotencyKey: string;
+  postedBy: string;
+  entries: LedgerJournalEntryLineContract[];
+  totalDebitsCents: number;
+  totalCreditsCents: number;
+  createdAtIso: string;
+}
+
+export interface PspReconciliationRunContract {
+  id: string;
+  providerCode: string;
+  runDate: string;
+  matchedCount: number;
+  discrepancyCount: number;
+  discrepancyTotalCents: number;
+  status: "COMPLETED";
+  discrepancies: Array<{
+    orderId: string;
+    expectedCents: number;
+    pspReportedCents: number;
+    deltaCents: number;
+  }>;
+  createdAtIso: string;
+}
+
+export interface SettlementRecordContract {
+  id: string;
+  organizationId: string | null;
+  courierId: string | null;
+  periodStart: string;
+  periodEnd: string;
+  amountCents: number;
+  status: "SCHEDULED" | "APPROVED" | "PAID_CONFIRMED" | "BLOCKED_NO_PSP";
+  approvedBy: string | null;
+  externalPayoutReference: string | null;
+  createdAtIso: string;
+}
+
+export interface DeliveryTaskContract {
+  id: string;
+  orderId: string;
+  storeId: string;
+  fulfillmentModality: FulfillmentModality;
+  status: string;
+  pickupLatitude: number;
+  pickupLongitude: number;
+  dropoffLatitude: number;
+  dropoffLongitude: number;
+  dropoffNeighborhoodOnly: string;
+  dropoffFullAddress: string | null;
+  courierFeeCents: number;
+  distanceMeters: number;
+  estimatedEtaMinutes: number;
+  activeCourierId: string | null;
+  pickedUpAtIso: string | null;
+  completedAtIso: string | null;
+  createdAtIso: string;
+}
+
+export interface DeliveryOfferContract {
+  id: string;
+  deliveryTaskId: string;
+  courierId: string;
+  offeredFeeCents: number;
+  status: "OFFERED" | "ACCEPTED" | "DECLINED" | "EXPIRED";
+  pickupStoreName: string;
+  distanceMeters: number;
+  dropoffNeighborhoodOnly: string;
+  expiresAtIso: string;
+  respondedAtIso: string | null;
+}
+
+export interface CourierLocationSampleContract {
+  id: string;
+  courierId: string;
+  deliveryTaskId: string | null;
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  recordedAtIso: string;
+  expiresAtIso: string;
+  isStaleOrLowAccuracy: boolean;
+}
+
 export interface UserPreferencesContract {
   userId: string;
   locale: SupportedLocale;
@@ -617,6 +731,11 @@ export const I18N_MESSAGES = {
     "kitchen.queue.title": "Kitchen Order Console — Real-Time Queue & SLA",
     "kitchen.order.conflict_notice": "Order #{orderNumber} was already updated by another operator (version {version}). Queue refreshed.",
     "kitchen.sound.consent_label": "Enable audible alert for new incoming orders",
+    "finance.gmv_vs_revenue.notice": "Gross Merchandise Value ({gmv}) is distinct from Net Platform Revenue ({netRevenue}). Merchant and courier payables are segregated liabilities.",
+    "finance.payout.blocked_no_psp": "Settlement #{settlementId} ({amount}) cannot be liquidated: PSP payout provider ({providerCode}) is BLOCKED_MISSING_CREDENTIALS.",
+    "logistics.maps.fallback_notice": "Live map provider ({providerCode}) has no credentials configured. Displaying deterministic Haversine distance ({distance}m) and ETA ({eta} min) without simulated map.",
+    "courier.offer.address_privacy_notice": "Exact customer street and number are revealed only after accepting the delivery offer.",
+    "courier.gps.permission_denied_notice": "Location permission is denied. Live route tracking is paused; please enable GPS or contact support.",
     "courier.app.title": "iDeliveryFood Courier",
     "courier.status.online": "Online — Ready for dispatch offers",
     "courier.status.offline": "Offline"
@@ -678,6 +797,11 @@ export const I18N_MESSAGES = {
     "kitchen.queue.title": "Gestor Operacional de Pedidos — Fila em Tempo Real e SLA",
     "kitchen.order.conflict_notice": "O pedido #{orderNumber} já foi atualizado por outro operador (versão {version}). Fila sincronizada.",
     "kitchen.sound.consent_label": "Ativar alerta sonoro para novos pedidos",
+    "finance.gmv_vs_revenue.notice": "O Volume Bruto de Mercadorias ({gmv}) é distinto da Receita Líquida da Plataforma ({netRevenue}). Repasses de lojas e entregadores são passivos segregados.",
+    "finance.payout.blocked_no_psp": "O repasse #{settlementId} ({amount}) não pode ser liquidado: o provedor de pagamento ({providerCode}) está em BLOCKED_MISSING_CREDENTIALS.",
+    "logistics.maps.fallback_notice": "O provedor de mapa em tempo real ({providerCode}) está sem credenciais configuradas. Exibindo distância Haversine determinística ({distance}m) e ETA ({eta} min) sem mapa simulado.",
+    "courier.offer.address_privacy_notice": "O logradouro e número exatos do cliente são exibidos apenas após o aceite da oferta de entrega.",
+    "courier.gps.permission_denied_notice": "Permissão de localização negada. O rastreamento em rota está pausado; ative o GPS ou acione o suporte.",
     "courier.app.title": "iDeliveryFood Entregador",
     "courier.status.online": "Online — Pronto para ofertas de entrega",
     "courier.status.offline": "Offline"

@@ -2,15 +2,24 @@ import { authorizeStaffAction } from "@ideliveryfood/authz";
 import { inspectProviderReadiness, type ExternalProviderDescriptor } from "@ideliveryfood/config";
 import {
   DEFAULT_LOCALE,
+  formatBrlCents,
   translateMessage,
   type AdminGovernanceActionContract,
   type AdminStaffScopeGrantRequestContract,
   type AuthenticatedActorProfileContract,
+  type DeliveryTaskContract,
+  type OrderRecordContract,
+  type PspReconciliationRunContract,
+  type SettlementRecordContract,
   type StaffRole,
   type SupportedLocale,
 } from "@ideliveryfood/contracts";
 import {
+  buildBalancedOrderCaptureJournal,
   evaluateAdminGovernanceDecision,
+  evaluateFleetOperatorAccess,
+  evaluatePspReconciliationRun,
+  evaluateSettlementPayoutExecution,
   evaluateStaffScopeGrant,
 } from "@ideliveryfood/domain";
 import {
@@ -241,5 +250,256 @@ export function buildAdminAuditTrailExplorerModel<TLog>(params: {
     allowMutationOrDelete: false,
     readOnlyBadgeText: translateMessage("admin.audit.read_only_badge", locale),
     visibleLogs: decision.allowed ? params.logs : [],
+  };
+}
+
+// ============================================================================
+// M13: Financial Backoffice, Ledger Balance, Reconciliation & Payouts
+// ============================================================================
+
+export interface FinancialBackofficeScreenModel {
+  authorized: boolean;
+  banner: UiScreenStateBanner | null;
+  gmvCents: number;
+  netPlatformRevenueCents: number;
+  merchantPayablesCents: number;
+  courierPayablesCents: number;
+  gmvVsRevenueNoticeText: string;
+  reconciliationRun: PspReconciliationRunContract | null;
+  settlementResult: SettlementRecordContract | null;
+  settlementNoticeText: string | null;
+}
+
+/**
+ * Builds the M13 Financial Backoffice screen model, strictly separating GMV from Net Platform Revenue,
+ * generating balanced double-entry journals, running PSP reconciliation, and enforcing payout
+ * Segregation of Duties + honest BLOCKED_NO_PSP status.
+ */
+export function buildFinancialBackofficeModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  orders: readonly OrderRecordContract[];
+  pspReportedCaptures?: ReadonlyArray<{ orderId: string; capturedCents: number }>;
+  settlementToExecute?: {
+    settlement: SettlementRecordContract;
+    providerCode: string;
+    bankAccountApprovedByActorId?: string | null;
+    externalPayoutReference?: string | null;
+  };
+  env?: Record<string, string | undefined>;
+  locale?: SupportedLocale;
+}): FinancialBackofficeScreenModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const decision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["finance", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  if (!decision.allowed) {
+    const bannerKind =
+      decision.reasonCode === "DENIED_MFA_STEP_UP_REQUIRED" ? "mfa_required" : "forbidden";
+    return {
+      authorized: false,
+      banner: buildUiScreenStateBanner({ kind: bannerKind, locale }),
+      gmvCents: 0,
+      netPlatformRevenueCents: 0,
+      merchantPayablesCents: 0,
+      courierPayablesCents: 0,
+      gmvVsRevenueNoticeText: "",
+      reconciliationRun: null,
+      settlementResult: null,
+      settlementNoticeText: null,
+    };
+  }
+
+  let gmvCents = 0;
+  let netPlatformRevenueCents = 0;
+  let merchantPayablesCents = 0;
+  let courierPayablesCents = 0;
+
+  for (const ord of params.orders) {
+    // Verify every captured order produces a balanced double-entry journal
+    buildBalancedOrderCaptureJournal({
+      journalId: `jnl_${ord.id}`,
+      order: ord,
+      discountFundedBy: "NONE",
+      postedBy: params.actor.id,
+    });
+
+    gmvCents += ord.subtotalCents + ord.addonsCents;
+    netPlatformRevenueCents += ord.platformCommissionCents + ord.serviceFeeCents;
+    merchantPayablesCents += ord.merchantNetCents;
+    courierPayablesCents += ord.courierEarningsCents;
+  }
+
+  const gmvVsRevenueNoticeText = translateMessage("finance.gmv_vs_revenue.notice", locale, {
+    gmv: formatBrlCents(gmvCents, locale),
+    netRevenue: formatBrlCents(netPlatformRevenueCents, locale),
+  });
+
+  const reconciliationRun = params.pspReportedCaptures
+    ? evaluatePspReconciliationRun({
+        runId: `recon_${Date.now()}`,
+        providerCode: "stripe",
+        runDate: new Date().toISOString().slice(0, 10),
+        expectedOrders: params.orders.map((o) => ({ orderId: o.id, totalCents: o.totalCents })),
+        pspReportedCaptures: params.pspReportedCaptures,
+      })
+    : null;
+
+  let settlementResult: SettlementRecordContract | null = null;
+  let settlementNoticeText: string | null = null;
+
+  if (params.settlementToExecute) {
+    const providers = inspectProviderReadiness(params.env ?? {});
+    const psp = providers.find((p) => p.providerCode === params.settlementToExecute?.providerCode);
+    const pspStatus = psp?.status ?? "BLOCKED_MISSING_CREDENTIALS";
+
+    settlementResult = evaluateSettlementPayoutExecution({
+      settlement: params.settlementToExecute.settlement,
+      actorId: params.actor.id,
+      actorAal: params.actor.aal,
+      actorRoles: params.actor.staffScopes.map((s) => s.role),
+      bankAccountApprovedByActorId:
+        params.settlementToExecute.bankAccountApprovedByActorId ?? null,
+      pspProviderStatus: pspStatus,
+      externalPayoutReference: params.settlementToExecute.externalPayoutReference ?? null,
+    });
+
+    if (settlementResult.status === "BLOCKED_NO_PSP") {
+      settlementNoticeText = translateMessage("finance.payout.blocked_no_psp", locale, {
+        settlementId: settlementResult.id,
+        amount: formatBrlCents(settlementResult.amountCents, locale),
+        providerCode: params.settlementToExecute.providerCode,
+      });
+    }
+  }
+
+  return {
+    authorized: true,
+    banner: null,
+    gmvCents,
+    netPlatformRevenueCents,
+    merchantPayablesCents,
+    courierPayablesCents,
+    gmvVsRevenueNoticeText,
+    reconciliationRun,
+    settlementResult,
+    settlementNoticeText,
+  };
+}
+
+// ============================================================================
+// M14: Logistics & Dispatch Operational Console
+// ============================================================================
+
+export interface LogisticsDispatchConsoleModel {
+  authorized: boolean;
+  mapsProviderStatus: ExternalProviderDescriptor["status"];
+  mapsFallbackNoticeText: string | null;
+  tasks: readonly DeliveryTaskContract[];
+}
+
+/**
+ * Builds the M14 Logistics & Dispatch Operational Console model, rendering an explicit
+ * Haversine distance/ETA fallback notice when Google Maps / Mapbox credentials are absent.
+ */
+export function buildLogisticsDispatchConsoleModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  tasks: readonly DeliveryTaskContract[];
+  mapsProviderCode?: "google_maps" | "mapbox";
+  env?: Record<string, string | undefined>;
+  locale?: SupportedLocale;
+}): LogisticsDispatchConsoleModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const decision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["operations", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  if (!decision.allowed) {
+    return {
+      authorized: false,
+      mapsProviderStatus: "BLOCKED_MISSING_CREDENTIALS",
+      mapsFallbackNoticeText: null,
+      tasks: [],
+    };
+  }
+
+  const providerCode = params.mapsProviderCode ?? "google_maps";
+  const providers = inspectProviderReadiness(params.env ?? {});
+  const mapsProvider = providers.find((p) => p.providerCode === providerCode);
+  const status = mapsProvider?.status ?? "BLOCKED_MISSING_CREDENTIALS";
+
+  const firstTask = params.tasks[0];
+  const mapsFallbackNoticeText =
+    status === "BLOCKED_MISSING_CREDENTIALS"
+      ? translateMessage("logistics.maps.fallback_notice", locale, {
+          providerCode,
+          distance: firstTask?.distanceMeters ?? 1420,
+          eta: firstTask?.estimatedEtaMinutes ?? 18,
+        })
+      : null;
+
+  return {
+    authorized: true,
+    mapsProviderStatus: status,
+    mapsFallbackNoticeText,
+    tasks: params.tasks,
+  };
+}
+
+// ============================================================================
+// M15: Fleet & Logistics Operator Portal Model
+// ============================================================================
+
+export function buildFleetOperatorPortalModel(params: {
+  fleetOrganizationId: string;
+  actorOrganizationIds: readonly string[];
+  isFleetContractApproved: boolean;
+  couriers: ReadonlyArray<{
+    courierId: string;
+    courierName: string;
+    fleetOrganizationId: string | null;
+  }>;
+}): {
+  portalStatus:
+    | "ACTIVE"
+    | "DISABLED_PENDING_FLEET_CONTRACT"
+    | "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER";
+  visibleCouriers: ReadonlyArray<{
+    courierId: string;
+    courierName: string;
+    fleetOrganizationId: string | null;
+  }>;
+} {
+  if (!params.isFleetContractApproved) {
+    return {
+      portalStatus: "DISABLED_PENDING_FLEET_CONTRACT",
+      visibleCouriers: [],
+    };
+  }
+
+  if (!params.actorOrganizationIds.includes(params.fleetOrganizationId)) {
+    return {
+      portalStatus: "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER",
+      visibleCouriers: [],
+    };
+  }
+
+  const visibleCouriers = params.couriers.filter((c) => {
+    const check = evaluateFleetOperatorAccess({
+      fleetOrganizationId: params.fleetOrganizationId,
+      actorOrganizationIds: params.actorOrganizationIds,
+      targetCourierFleetOrgId: c.fleetOrganizationId,
+      isFleetContractApproved: params.isFleetContractApproved,
+    });
+    return check.allowed;
+  });
+
+  return {
+    portalStatus: "ACTIVE",
+    visibleCouriers,
   };
 }

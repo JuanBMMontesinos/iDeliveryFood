@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  acceptDeliveryOfferTransactional,
   assertExternalProviderReady,
+  buildBalancedOrderCaptureJournal,
   calculateHaversineDistanceMeters,
   calculateServerQuoteAndSplit,
   canTransitionDeliveryStatus,
@@ -10,13 +12,19 @@ import {
   computePspWebhookSignature,
   createOrderFromServerQuote,
   evaluateAccountDeletionRequest,
+  evaluateCourierLocationSample,
+  evaluateFleetOperatorAccess,
+  evaluatePspReconciliationRun,
   evaluateRefundRequest,
   evaluateServiceAreaEligibility,
+  evaluateSettlementPayoutExecution,
   evaluateSingleStoreCartAddition,
   evaluateStoreAvailability,
   executeOrderCommand,
+  hashDeliveryConfirmationCode,
   validateAndBuildQuoteItems,
   verifyAndProcessPspWebhook,
+  verifyDeliveryConfirmationCode,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -521,5 +529,231 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
         missingEnvVars: [],
       })
     );
+  });
+
+  it("enforces Fase D M13 double-entry journal balance, PSP reconciliation & payout Segregation of Duties", () => {
+    const now = new Date("2026-11-03T15:00:00Z");
+    const quote = {
+      id: "quote_m13",
+      customerId: "cust_001",
+      storeId: "store_201",
+      addressId: "addr_001",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      promotionCode: null,
+      currencyCode: "BRL" as const,
+      subtotalCents: 5000,
+      addonsCents: 0,
+      serviceFeeCents: 250,
+      deliveryFeeCents: 800,
+      discountCents: 500,
+      totalCents: 5550,
+      platformCommissionCents: 600,
+      merchantNetCents: 4400,
+      courierEarningsCents: 800,
+      distanceMeters: 1500,
+      estimatedPrepMinutes: 25,
+      estimatedDeliveryMinutes: 35,
+      itemsSnapshot: [
+        {
+          productId: "prod_1",
+          productNameEn: "Burger",
+          productNamePtBr: "Hambúrguer",
+          quantity: 1,
+          unitPriceCents: 5000,
+          addonsUnitPriceCents: 0,
+          totalLineCents: 5000,
+          selectedOptions: [],
+        },
+      ],
+      addressSnapshot: null,
+      idempotencyKey: "idem_q_m13",
+      expiresAtIso: "2026-11-03T15:15:00Z",
+      consumedAtIso: null,
+      createdAtIso: "2026-11-03T15:00:00Z",
+    };
+
+    const created = createOrderFromServerQuote({
+      orderId: "ord_m13_1",
+      orderNumber: 10050,
+      organizationId: "org_101",
+      quote,
+      actorCustomerId: "cust_001",
+      isStoreCurrentlyOpen: true,
+      discountFundedBy: "PLATFORM",
+      idempotencyKey: "idem_ord_m13_1",
+      now,
+    });
+
+    const journal = buildBalancedOrderCaptureJournal({
+      journalId: "jnl_m13_1",
+      order: created.order,
+      discountFundedBy: "PLATFORM",
+      postedBy: "staff_fin_1",
+      now,
+    });
+
+    // Total debits = 5550 (PSP clearing) + 500 (Platform promo subsidy) = 6050
+    // Total credits = 4400 (Merchant payable) + 800 (Courier payable) + 600 (Commission) + 250 (Service fee) = 6050
+    assert.equal(journal.totalDebitsCents, 6050);
+    assert.equal(journal.totalCreditsCents, 6050);
+
+    // PSP Reconciliation detects a 50-centavo discrepancy on a second order
+    const recon = evaluatePspReconciliationRun({
+      runId: "recon_1",
+      providerCode: "stripe",
+      runDate: "2026-11-03",
+      expectedOrders: [
+        { orderId: "ord_m13_1", totalCents: 5550 },
+        { orderId: "ord_m13_2", totalCents: 3200 },
+      ],
+      pspReportedCaptures: [
+        { orderId: "ord_m13_1", capturedCents: 5550 },
+        { orderId: "ord_m13_2", capturedCents: 3150 },
+      ],
+      now,
+    });
+    assert.equal(recon.matchedCount, 1);
+    assert.equal(recon.discrepancyCount, 1);
+    assert.equal(recon.discrepancyTotalCents, 50);
+
+    // Segregation of Duties: same staff member who approved bank account cannot execute payout
+    const settlementBase = {
+      id: "settle_1",
+      organizationId: "org_101",
+      courierId: null,
+      periodStart: "2026-11-01",
+      periodEnd: "2026-11-03",
+      amountCents: 44000,
+      status: "SCHEDULED" as const,
+      approvedBy: null,
+      externalPayoutReference: null,
+      createdAtIso: now.toISOString(),
+    };
+
+    assert.throws(
+      () =>
+        evaluateSettlementPayoutExecution({
+          settlement: settlementBase,
+          actorId: "staff_fin_1",
+          actorAal: "aal2",
+          actorRoles: ["finance"],
+          bankAccountApprovedByActorId: "staff_fin_1",
+          pspProviderStatus: "SANDBOX_READY",
+          externalPayoutReference: "po_stripe_12345",
+        }),
+      /SETTLEMENT_SEGREGATION_OF_DUTIES_VIOLATION/
+    );
+
+    // Honest BLOCKED_NO_PSP when PSP credentials are missing
+    const blockedSettlement = evaluateSettlementPayoutExecution({
+      settlement: settlementBase,
+      actorId: "staff_fin_2",
+      actorAal: "aal2",
+      actorRoles: ["finance"],
+      bankAccountApprovedByActorId: "staff_fin_1",
+      pspProviderStatus: "BLOCKED_MISSING_CREDENTIALS",
+    });
+    assert.equal(blockedSettlement.status, "BLOCKED_NO_PSP");
+    assert.equal(blockedSettlement.externalPayoutReference, null);
+  });
+
+  it("enforces Fase D M14/M11 transactional offer acceptance, address privacy, GPS staleness & M15 fleet isolation", () => {
+    const now = new Date("2026-11-03T15:00:00Z");
+    const task = {
+      id: "dtask_1",
+      orderId: "ord_1",
+      storeId: "store_201",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      status: "OFFERING",
+      pickupLatitude: -23.561414,
+      pickupLongitude: -46.655881,
+      dropoffLatitude: -23.56398,
+      dropoffLongitude: -46.66912,
+      dropoffNeighborhoodOnly: "Bela Vista",
+      dropoffFullAddress: null,
+      courierFeeCents: 850,
+      distanceMeters: 1420,
+      estimatedEtaMinutes: 18,
+      activeCourierId: null,
+      pickedUpAtIso: null,
+      completedAtIso: null,
+      createdAtIso: now.toISOString(),
+    };
+
+    const offer1 = {
+      id: "doff_1",
+      deliveryTaskId: "dtask_1",
+      courierId: "courier_1",
+      offeredFeeCents: 850,
+      status: "OFFERED" as const,
+      pickupStoreName: "Paulista Artisan Burger",
+      distanceMeters: 1420,
+      dropoffNeighborhoodOnly: "Bela Vista",
+      expiresAtIso: "2026-11-03T15:01:00Z",
+      respondedAtIso: null,
+    };
+
+    const accepted = acceptDeliveryOfferTransactional({
+      offer: offer1,
+      task,
+      actorCourierId: "courier_1",
+      isCourierOnline: true,
+      fullCustomerAddress: "Av. Paulista, 1578 - Apt 42, Bela Vista",
+      now,
+    });
+    assert.equal(accepted.updatedTask.activeCourierId, "courier_1");
+    assert.equal(
+      accepted.updatedTask.dropoffFullAddress,
+      "Av. Paulista, 1578 - Apt 42, Bela Vista"
+    );
+
+    // Concurrent second courier acceptance on already-assigned task throws DELIVERY_TASK_ALREADY_ASSIGNED
+    assert.throws(
+      () =>
+        acceptDeliveryOfferTransactional({
+          offer: { ...offer1, id: "doff_2", courierId: "courier_2" },
+          task: accepted.updatedTask,
+          actorCourierId: "courier_2",
+          isCourierOnline: true,
+          fullCustomerAddress: "Av. Paulista, 1578 - Apt 42, Bela Vista",
+          now,
+        }),
+      /DELIVERY_TASK_ALREADY_ASSIGNED/
+    );
+
+    // Stale GPS sample (>120s old) is flagged as isStaleOrLowAccuracy
+    const staleSample = evaluateCourierLocationSample({
+      sampleId: "loc_1",
+      courierId: "courier_1",
+      deliveryTaskId: "dtask_1",
+      activeCourierIdForTask: "courier_1",
+      latitude: -23.562,
+      longitude: -46.66,
+      accuracyMeters: 25,
+      recordedAtIso: "2026-11-03T14:55:00Z", // 5 minutes old
+      now,
+    });
+    assert.equal(staleSample.isStaleOrLowAccuracy, true);
+
+    // Proof-of-Delivery 4-digit OTP constant-time verification
+    const otpHash = hashDeliveryConfirmationCode("4829");
+    assert.equal(
+      verifyDeliveryConfirmationCode({ providedCode: "4829", expectedCodeHash: otpHash }),
+      true
+    );
+    assert.equal(
+      verifyDeliveryConfirmationCode({ providedCode: "9999", expectedCodeHash: otpHash }),
+      false
+    );
+
+    // M15 Fleet isolation: Fleet A manager cannot view independent courier or Fleet B courier
+    const independentAccess = evaluateFleetOperatorAccess({
+      fleetOrganizationId: "fleet_org_A",
+      actorOrganizationIds: ["fleet_org_A"],
+      targetCourierFleetOrgId: null,
+      isFleetContractApproved: true,
+    });
+    assert.equal(independentAccess.allowed, false);
+    assert.equal(independentAccess.reasonCode, "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER");
   });
 });

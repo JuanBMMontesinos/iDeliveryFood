@@ -10,4 +10,8 @@
     <string name="state_loading">Loading dispatch tasks...</string>
     <string name="state_error">Unable to sync courier state.</string>
     <string name="state_offline">No network connection. Location samples queued locally.</string>
+    <string name="courier_offer_address_privacy_notice">Exact customer street and number are revealed only after accepting the delivery offer.</string>
+    <string name="courier_gps_permission_denied_notice">Location permission is denied. Live route tracking is paused; please enable GPS or contact support.</string>
+    <string name="courier_pod_otp_label">Enter 4-digit customer confirmation code</string>
+    <string name="courier_offline_completion_blocked_notice">Cannot finalize delivery while offline. Event queued for server verification.</string>
 </resources>

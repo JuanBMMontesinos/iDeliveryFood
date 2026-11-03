@@ -23,7 +23,10 @@ import {
   type CartItemSelectionContract,
   type CatalogCategoryContract,
   type CatalogProductContract,
+  type CourierLocationSampleContract,
   type CustomerAddressContract,
+  type DeliveryOfferContract,
+  type DeliveryTaskContract,
   type FulfillmentModality,
   type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
@@ -31,9 +34,11 @@ import {
   type PaginatedResponse,
   type PaymentAttemptContract,
   type PaymentMethodCode,
+  type PspReconciliationRunContract,
   type PublishedStoreContract,
   type RefundRecordContract,
   type ServerQuoteRecordContract,
+  type SettlementRecordContract,
   type StaffRole,
   type StoreCatalogResponseContract,
   type StoreHourExceptionContract,
@@ -44,6 +49,7 @@ import {
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
 import {
+  acceptDeliveryOfferTransactional,
   assertExternalProviderReady,
   buildKitchenOrderQueue,
   calculateServerQuoteAndSplit,
@@ -51,14 +57,19 @@ import {
   createOrderFromServerQuote,
   evaluateAccountDeletionRequest,
   evaluateAdminGovernanceDecision,
+  evaluateCourierLocationSample,
+  evaluatePspReconciliationRun,
   evaluateRefundRequest,
   evaluateServiceAreaEligibility,
+  evaluateSettlementPayoutExecution,
   evaluateStaffScopeGrant,
   evaluateStoreAvailability,
   executeOrderCommand,
+  hashDeliveryConfirmationCode,
   validateAndBuildQuoteItems,
   validateStoreSettingsPatch,
   verifyAndProcessPspWebhook,
+  verifyDeliveryConfirmationCode,
   type OrderCommandType,
   type QuoteItemInput,
 } from "@ideliveryfood/domain";
@@ -233,6 +244,11 @@ export function createApiServer(deps: {
   const refundsByOrderId = new Map<string, RefundRecordContract[]>();
   const storeOverridesById = new Map<string, StoreSettingsPatchContract>();
   const bankChangeRequestsById = new Map<string, BankAccountChangeRequestContract>();
+  const settlementsById = new Map<string, SettlementRecordContract>();
+  const deliveryTasksById = new Map<string, DeliveryTaskContract>();
+  const deliveryTaskOtpHashById = new Map<string, string>();
+  const deliveryTaskFullAddressById = new Map<string, string>();
+  const deliveryOffersById = new Map<string, DeliveryOfferContract>();
   let orderSequence = 10010;
 
   return http.createServer(async (req, res) => {
@@ -1685,6 +1701,441 @@ export function createApiServer(deps: {
         }
         const logs = await deps.repository.getAuditLogs();
         sendJson(res, 200, correlationId, { data: logs });
+        return;
+      }
+
+      // 22. POST /v1/finance/reconciliation-runs (M13 — PSP Reconciliation in BRL cents; requires finance/tech_admin + MFA aal2)
+      if (method === "POST" && pathname === "/v1/finance/reconciliation-runs") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["finance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "PSP reconciliation requires finance or tech_admin role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const runResult = evaluatePspReconciliationRun({
+          runId: `recon_${Date.now()}`,
+          providerCode: String(body.providerCode ?? "stripe"),
+          runDate: String(body.runDate ?? new Date().toISOString().slice(0, 10)),
+          expectedOrders:
+            (body.expectedOrders as Array<{ orderId: string; totalCents: number }>) ?? [],
+          pspReportedCaptures:
+            (body.pspReportedCaptures as Array<{ orderId: string; capturedCents: number }>) ?? [],
+        });
+
+        await deps.repository.appendAuditLog({
+          id: `aud_${Date.now()}`,
+          actorId: actor.id,
+          action: "PSP_RECONCILIATION_RUN_COMPLETED",
+          targetType: "RECONCILIATION_RUN",
+          targetId: runResult.id,
+          correlationId,
+          reason: `Reconciled ${runResult.matchedCount} matched, ${runResult.discrepancyCount} discrepancies`,
+          redactedPayload: {
+            providerCode: runResult.providerCode,
+            matchedCount: runResult.matchedCount,
+            discrepancyCount: runResult.discrepancyCount,
+            discrepancyTotalCents: runResult.discrepancyTotalCents,
+          },
+          createdAt: runResult.createdAtIso,
+        });
+
+        sendJson(res, 201, correlationId, { data: runResult });
+        return;
+      }
+
+      // 23. POST /v1/finance/settlements/:settlementId/execute (M13 — Payout execution with Segregation of Duties & BLOCKED_NO_PSP)
+      const settlementExecMatch = pathname.match(/^\/v1\/finance\/settlements\/([^/]+)\/execute$/);
+      if (method === "POST" && settlementExecMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const settlementId = settlementExecMatch[1] ?? "";
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const providerCode = String(body.providerCode ?? "stripe");
+        const providerStatuses = inspectProviderReadiness(env);
+        const pspProvider = providerStatuses.find((p) => p.providerCode === providerCode);
+        const pspStatus = pspProvider?.status ?? "BLOCKED_MISSING_CREDENTIALS";
+
+        const existingSettlement: SettlementRecordContract = settlementsById.get(settlementId) ?? {
+          id: settlementId,
+          organizationId: body.organizationId ? String(body.organizationId) : "00000000-0000-4000-8000-000000000101",
+          courierId: body.courierId ? String(body.courierId) : null,
+          periodStart: "2026-11-01",
+          periodEnd: "2026-11-03",
+          amountCents: Number(body.amountCents ?? 42500),
+          status: "SCHEDULED",
+          approvedBy: null,
+          externalPayoutReference: null,
+          createdAtIso: new Date().toISOString(),
+        };
+
+        try {
+          const updatedSettlement = evaluateSettlementPayoutExecution({
+            settlement: existingSettlement,
+            actorId: actor.id,
+            actorAal: actor.aal,
+            actorRoles: actor.staffScopes.map((s) => s.role),
+            bankAccountApprovedByActorId: body.bankAccountApprovedByActorId
+              ? String(body.bankAccountApprovedByActorId)
+              : null,
+            pspProviderStatus: pspStatus,
+            externalPayoutReference: body.externalPayoutReference
+              ? String(body.externalPayoutReference)
+              : null,
+          });
+          settlementsById.set(settlementId, updatedSettlement);
+
+          await deps.repository.appendAuditLog({
+            id: `aud_${Date.now()}`,
+            actorId: actor.id,
+            action: `SETTLEMENT_PAYOUT_${updatedSettlement.status}`,
+            targetType: "SETTLEMENT",
+            targetId: settlementId,
+            correlationId,
+            reason: `Settlement payout evaluated with status ${updatedSettlement.status}`,
+            redactedPayload: {
+              amountCents: updatedSettlement.amountCents,
+              status: updatedSettlement.status,
+              externalPayoutReference: updatedSettlement.externalPayoutReference,
+            },
+            createdAt: new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, { data: updatedSettlement });
+          return;
+        } catch (settleErr) {
+          const msg = settleErr instanceof Error ? settleErr.message : "Settlement execution denied";
+          const code = msg.split(":")[0] ?? "SETTLEMENT_ERROR";
+          const status =
+            code.includes("FORBIDDEN") ||
+            code.includes("MFA") ||
+            code.includes("SEGREGATION_OF_DUTIES")
+              ? 403
+              : 400;
+          sendError(res, status, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 24. POST /v1/logistics/offers (M14 — Create delivery task & courier offer with neighborhood-only privacy)
+      if (method === "POST" && pathname === "/v1/logistics/offers") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const dispatchDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!dispatchDecision.allowed) {
+          sendError(
+            res,
+            403,
+            dispatchDecision.reasonCode,
+            "Only logistics operations staff can create delivery offers.",
+            correlationId
+          );
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const taskId = String(body.deliveryTaskId ?? `dtask_${Date.now()}`);
+        const offerId = String(body.offerId ?? `doff_${Date.now()}`);
+        const fullAddress = String(
+          body.dropoffFullAddress ?? "Av. Paulista, 1578 - Apt 42, Bela Vista"
+        );
+        const confirmationCode = String(body.confirmationCode ?? "4829");
+
+        const existingTask = deliveryTasksById.get(taskId);
+        const task: DeliveryTaskContract = existingTask ?? {
+          id: taskId,
+          orderId: String(body.orderId ?? "ord_10011"),
+          storeId: String(body.storeId ?? "00000000-0000-4000-8000-000000000201"),
+          fulfillmentModality: "PLATFORM_DELIVERY",
+          status: "OFFERING",
+          pickupLatitude: Number(body.pickupLatitude ?? -23.561414),
+          pickupLongitude: Number(body.pickupLongitude ?? -46.655881),
+          dropoffLatitude: Number(body.dropoffLatitude ?? -23.56398),
+          dropoffLongitude: Number(body.dropoffLongitude ?? -46.66912),
+          dropoffNeighborhoodOnly: String(body.dropoffNeighborhoodOnly ?? "Bela Vista"),
+          dropoffFullAddress: null, // Hidden until accepted!
+          courierFeeCents: Number(body.offeredFeeCents ?? 850),
+          distanceMeters: Number(body.distanceMeters ?? 1420),
+          estimatedEtaMinutes: Number(body.estimatedEtaMinutes ?? 18),
+          activeCourierId: null,
+          pickedUpAtIso: null,
+          completedAtIso: null,
+          createdAtIso: new Date().toISOString(),
+        };
+        deliveryTasksById.set(task.id, task);
+        deliveryTaskFullAddressById.set(task.id, fullAddress);
+        deliveryTaskOtpHashById.set(task.id, hashDeliveryConfirmationCode(confirmationCode));
+
+        const offer: DeliveryOfferContract = {
+          id: offerId,
+          deliveryTaskId: task.id,
+          courierId: String(body.courierId ?? actor.id),
+          offeredFeeCents: Number(body.offeredFeeCents ?? 850),
+          status: "OFFERED",
+          pickupStoreName: String(body.pickupStoreName ?? "Paulista Artisan Burger"),
+          distanceMeters: task.distanceMeters,
+          dropoffNeighborhoodOnly: task.dropoffNeighborhoodOnly,
+          expiresAtIso: String(
+            body.expiresAtIso ?? new Date(Date.now() + 60 * 1000).toISOString()
+          ),
+          respondedAtIso: null,
+        };
+        deliveryOffersById.set(offer.id, offer);
+
+        sendJson(res, 201, correlationId, { data: { offer, task } });
+        return;
+      }
+
+      // 25. POST /v1/logistics/offers/:offerId/accept (M14/M11 — Transactional single-courier assignment & address reveal)
+      const offerAcceptMatch = pathname.match(/^\/v1\/logistics\/offers\/([^/]+)\/accept$/);
+      if (method === "POST" && offerAcceptMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const offerId = offerAcceptMatch[1] ?? "";
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const offer = deliveryOffersById.get(offerId);
+        if (!offer) {
+          sendError(res, 404, "DELIVERY_OFFER_NOT_FOUND", `Offer ${offerId} not found.`, correlationId);
+          return;
+        }
+        const task = deliveryTasksById.get(offer.deliveryTaskId);
+        if (!task) {
+          sendError(res, 404, "DELIVERY_TASK_NOT_FOUND", `Task ${offer.deliveryTaskId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const fullAddress =
+          deliveryTaskFullAddressById.get(task.id) ?? "Av. Paulista, 1578 - Apt 42, Bela Vista";
+
+        try {
+          const accepted = acceptDeliveryOfferTransactional({
+            offer,
+            task,
+            actorCourierId: actor.id,
+            isCourierOnline: body.isCourierOnline !== false,
+            fullCustomerAddress: fullAddress,
+          });
+          deliveryOffersById.set(offer.id, accepted.updatedOffer);
+          deliveryTasksById.set(task.id, accepted.updatedTask);
+
+          sendJson(res, 200, correlationId, {
+            data: {
+              offer: accepted.updatedOffer,
+              task: accepted.updatedTask,
+            },
+          });
+          return;
+        } catch (acceptErr) {
+          const msg = acceptErr instanceof Error ? acceptErr.message : "Offer acceptance failed";
+          const code = msg.split(":")[0] ?? "DELIVERY_OFFER_ERROR";
+          const status = code === "DELIVERY_OFFER_FORBIDDEN" ? 403 : 409;
+          sendError(res, status, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 26. POST /v1/logistics/location-samples (M14/M11 — GPS telemetry validation with staleness & accuracy flags)
+      if (method === "POST" && pathname === "/v1/logistics/location-samples") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const deliveryTaskId = body.deliveryTaskId ? String(body.deliveryTaskId) : null;
+        const task = deliveryTaskId ? (deliveryTasksById.get(deliveryTaskId) ?? null) : null;
+        if (deliveryTaskId && !task) {
+          sendError(
+            res,
+            404,
+            "DELIVERY_TASK_NOT_FOUND",
+            `Task ${deliveryTaskId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        try {
+          const sample = evaluateCourierLocationSample({
+            sampleId: `loc_${Date.now()}`,
+            courierId: actor.id,
+            deliveryTaskId,
+            activeCourierIdForTask: task ? task.activeCourierId : null,
+            latitude: Number(body.latitude ?? 0),
+            longitude: Number(body.longitude ?? 0),
+            accuracyMeters: Number(body.accuracyMeters ?? 10),
+            recordedAtIso: String(body.recordedAtIso ?? new Date().toISOString()),
+          });
+          sendJson(res, 201, correlationId, { data: sample });
+          return;
+        } catch (locErr) {
+          const msg = locErr instanceof Error ? locErr.message : "Invalid location sample";
+          const code = msg.split(":")[0] ?? "LOCATION_SAMPLE_ERROR";
+          const status = code.includes("FORBIDDEN") ? 403 : 400;
+          sendError(res, status, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 27. POST /v1/logistics/tasks/:taskId/complete (M14/M11 — Proof-of-Delivery 4-digit OTP Verification)
+      const taskCompleteMatch = pathname.match(/^\/v1\/logistics\/tasks\/([^/]+)\/complete$/);
+      if (method === "POST" && taskCompleteMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const taskId = taskCompleteMatch[1] ?? "";
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const task = deliveryTasksById.get(taskId);
+        if (!task) {
+          sendError(res, 404, "DELIVERY_TASK_NOT_FOUND", `Task ${taskId} not found.`, correlationId);
+          return;
+        }
+        const isLogisticsStaff = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "tech_admin"],
+          requireMfaAal2: false,
+        }).allowed;
+        if (task.activeCourierId !== actor.id && !isLogisticsStaff) {
+          sendError(
+            res,
+            403,
+            "DELIVERY_TASK_FORBIDDEN",
+            "Only the assigned courier or logistics staff can complete this task.",
+            correlationId
+          );
+          return;
+        }
+        if (task.status === "DELIVERED" || task.completedAtIso !== null) {
+          sendError(
+            res,
+            409,
+            "DELIVERY_TASK_ALREADY_COMPLETED",
+            `Task ${taskId} was already completed.`,
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const providedCode = String(body.confirmationCode ?? "");
+        const expectedHash = deliveryTaskOtpHashById.get(taskId);
+        if (!expectedHash) {
+          sendError(
+            res,
+            409,
+            "DELIVERY_OTP_NOT_PROVISIONED",
+            "No proof-of-delivery code was provisioned for this task.",
+            correlationId
+          );
+          return;
+        }
+
+        if (
+          !verifyDeliveryConfirmationCode({
+            providedCode,
+            expectedCodeHash: expectedHash,
+          })
+        ) {
+          sendError(
+            res,
+            409,
+            "DELIVERY_INVALID_OTP_CODE",
+            "Invalid 4-digit proof-of-delivery confirmation code.",
+            correlationId
+          );
+          return;
+        }
+
+        const completedTask: DeliveryTaskContract = {
+          ...task,
+          status: "DELIVERED",
+          completedAtIso: new Date().toISOString(),
+        };
+        deliveryTasksById.set(taskId, completedTask);
+
+        sendJson(res, 200, correlationId, { data: completedTask });
         return;
       }
 

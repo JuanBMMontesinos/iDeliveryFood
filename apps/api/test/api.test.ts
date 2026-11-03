@@ -94,6 +94,25 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
         },
       ],
     },
+    "00000000-0000-4000-8000-000000000091": {
+      id: "00000000-0000-4000-8000-000000000091",
+      email: "staff.finance@test.ideliveryfood.invalid",
+      fullName: "Rafael Finance Controller",
+      phone: "+5511900000091",
+      preferredLocale: "en",
+      status: "ACTIVE",
+      mfaEnforced: true,
+      aal: "aal1",
+      organizationMemberships: [],
+      staffScopes: [
+        {
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 0,
+          requiresMfa: true,
+        },
+      ],
+    },
   };
 
   const repository: ApiDataRepository = {
@@ -591,5 +610,244 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(auditLogsRes.status, 200);
     const auditLogsJson = (await auditLogsRes.json()) as { data: unknown[] };
     assert.ok(auditLogsJson.data.length >= 2);
+  });
+
+  it("verifies Fase D (M13, M14, M11) HTTP flows: PSP reconciliation, payout Segregation of Duties, transactional offer acceptance, GPS telemetry & 4-digit OTP completion", async () => {
+    // 0. Operations staff (non-finance) is denied PSP reconciliation even at aal2 (M13 RBAC)
+    const reconDeniedRes = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
+        "X-Actor-Aal": "aal2",
+        "X-Idempotency-Key": "idem_recon_denied_001",
+      },
+      body: JSON.stringify({ providerCode: "stripe", expectedOrders: [], pspReportedCaptures: [] }),
+    });
+    assert.equal(reconDeniedRes.status, 403);
+
+    // 0b. Finance staff at aal1 is denied (MFA aal2 step-up required)
+    const reconAal1Res = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000091",
+        "X-Actor-Aal": "aal1",
+        "X-Idempotency-Key": "idem_recon_aal1_001",
+      },
+      body: JSON.stringify({ providerCode: "stripe", expectedOrders: [], pspReportedCaptures: [] }),
+    });
+    assert.equal(reconAal1Res.status, 403);
+
+    // 1. Finance Staff runs PSP Reconciliation at aal2 (M13)
+    const reconRes = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000091",
+        "X-Actor-Aal": "aal2",
+        "X-Idempotency-Key": "idem_recon_run_001",
+      },
+      body: JSON.stringify({
+        providerCode: "stripe",
+        runDate: "2026-11-03",
+        expectedOrders: [
+          { orderId: "ord_101", totalCents: 4500 },
+          { orderId: "ord_102", totalCents: 3800 },
+        ],
+        pspReportedCaptures: [
+          { orderId: "ord_101", capturedCents: 4500 },
+          { orderId: "ord_102", capturedCents: 3700 },
+        ],
+      }),
+    });
+    assert.equal(reconRes.status, 201);
+    const reconJson = (await reconRes.json()) as {
+      data: { matchedCount: number; discrepancyCount: number; discrepancyTotalCents: number };
+    };
+    assert.equal(reconJson.data.matchedCount, 1);
+    assert.equal(reconJson.data.discrepancyCount, 1);
+    assert.equal(reconJson.data.discrepancyTotalCents, 100);
+
+    // 2. Settlement Payout Execution: Segregation of Duties violation returns 403
+    const sodViolationRes = await fetch(`${baseUrl}/finance/settlements/settle_001/execute`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000091",
+        "X-Actor-Aal": "aal2",
+        "X-Idempotency-Key": "idem_settle_sod_001",
+      },
+      body: JSON.stringify({
+        providerCode: "stripe",
+        bankAccountApprovedByActorId: "00000000-0000-4000-8000-000000000091", // Same actor!
+      }),
+    });
+    assert.equal(sodViolationRes.status, 403);
+
+    // 3. Settlement Payout Execution with different approver & unconfigured PSP returns honest BLOCKED_NO_PSP
+    const blockedSettleRes = await fetch(`${baseUrl}/finance/settlements/settle_001/execute`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000091",
+        "X-Actor-Aal": "aal2",
+        "X-Idempotency-Key": "idem_settle_ok_001",
+      },
+      body: JSON.stringify({
+        providerCode: "stripe",
+        bankAccountApprovedByActorId: "00000000-0000-4000-8000-000000000099",
+      }),
+    });
+    assert.equal(blockedSettleRes.status, 200);
+    const blockedSettleJson = (await blockedSettleRes.json()) as {
+      data: { status: string; externalPayoutReference: string | null };
+    };
+    assert.equal(blockedSettleJson.data.status, "BLOCKED_NO_PSP");
+    assert.equal(blockedSettleJson.data.externalPayoutReference, null);
+
+    // 4a. A courier/customer actor (no staff scope) cannot create dispatch offers
+    const offerForbiddenRes = await fetch(`${baseUrl}/logistics/offers`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+      },
+      body: JSON.stringify({ deliveryTaskId: "dtask_forbidden", offerId: "doff_forbidden" }),
+    });
+    assert.equal(offerForbiddenRes.status, 403);
+
+    // 4. Create delivery task and offer (M14): full customer address is hidden prior to acceptance
+    const offerCreateRes = await fetch(`${baseUrl}/logistics/offers`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
+        "X-Actor-Aal": "aal2",
+      },
+      body: JSON.stringify({
+        deliveryTaskId: "dtask_http_1",
+        offerId: "doff_http_1",
+        courierId: "00000000-0000-4000-8000-000000000001",
+        dropoffNeighborhoodOnly: "Bela Vista",
+        dropoffFullAddress: "Av. Paulista, 1578 - Apt 42, Bela Vista",
+        confirmationCode: "4829",
+        offeredFeeCents: 890,
+      }),
+    });
+    assert.equal(offerCreateRes.status, 201);
+    const offerCreateJson = (await offerCreateRes.json()) as {
+      data: { task: { dropoffFullAddress: string | null } };
+    };
+    assert.equal(offerCreateJson.data.task.dropoffFullAddress, null);
+
+    // 5. Courier accepts offer transactionally (M11/M14): reveals full dropoff address
+    const acceptOfferRes = await fetch(`${baseUrl}/logistics/offers/doff_http_1/accept`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_accept_doff_1",
+      },
+      body: JSON.stringify({
+        isCourierOnline: true,
+      }),
+    });
+    assert.equal(acceptOfferRes.status, 200);
+    const acceptOfferJson = (await acceptOfferRes.json()) as {
+      data: { task: { activeCourierId: string; dropoffFullAddress: string } };
+    };
+    assert.equal(acceptOfferJson.data.task.activeCourierId, "00000000-0000-4000-8000-000000000001");
+    assert.equal(
+      acceptOfferJson.data.task.dropoffFullAddress,
+      "Av. Paulista, 1578 - Apt 42, Bela Vista"
+    );
+
+    // 6. Second offer acceptance on the same task returns 409 Conflict
+    const acceptDuplicateRes = await fetch(`${baseUrl}/logistics/offers/doff_http_1/accept`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_accept_doff_dup",
+      },
+      body: JSON.stringify({
+        isCourierOnline: true,
+      }),
+    });
+    assert.equal(acceptDuplicateRes.status, 409);
+
+    // 7. Submit courier GPS location sample (M11/M14)
+    const locRes = await fetch(`${baseUrl}/logistics/location-samples`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_loc_sample_001",
+      },
+      body: JSON.stringify({
+        deliveryTaskId: "dtask_http_1",
+        latitude: -23.5625,
+        longitude: -46.6612,
+        accuracyMeters: 12,
+        recordedAtIso: new Date().toISOString(),
+      }),
+    });
+    assert.equal(locRes.status, 201);
+
+    // 8. Complete delivery task with wrong OTP returns 409, then right OTP ("4829") returns 200 DELIVERED
+    const wrongOtpRes = await fetch(`${baseUrl}/logistics/tasks/dtask_http_1/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_complete_wrong_otp",
+      },
+      body: JSON.stringify({ confirmationCode: "0000" }),
+    });
+    assert.equal(wrongOtpRes.status, 409);
+
+    const validOtpRes = await fetch(`${baseUrl}/logistics/tasks/dtask_http_1/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_complete_valid_otp",
+      },
+      body: JSON.stringify({ confirmationCode: "4829" }),
+    });
+    assert.equal(validOtpRes.status, 200);
+    const validOtpJson = (await validOtpRes.json()) as { data: { status: string } };
+    assert.equal(validOtpJson.data.status, "DELIVERED");
+
+    // 9. Re-completing an already delivered task returns 409 (no double completion)
+    const replayCompleteRes = await fetch(`${baseUrl}/logistics/tasks/dtask_http_1/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_complete_replay_otp",
+      },
+      body: JSON.stringify({ confirmationCode: "4829" }),
+    });
+    assert.equal(replayCompleteRes.status, 409);
+
+    // 10. GPS sample referencing a nonexistent task returns 404 (never silently accepted)
+    const ghostLocRes = await fetch(`${baseUrl}/logistics/location-samples`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+        "X-Idempotency-Key": "idem_loc_ghost_001",
+      },
+      body: JSON.stringify({
+        deliveryTaskId: "dtask_does_not_exist",
+        latitude: -23.5625,
+        longitude: -46.6612,
+        accuracyMeters: 12,
+        recordedAtIso: new Date().toISOString(),
+      }),
+    });
+    assert.equal(ghostLocRes.status, 404);
   });
 });

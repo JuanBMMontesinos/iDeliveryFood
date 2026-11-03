@@ -8,15 +8,22 @@ import {
   type BankAccountChangeRequestContract,
   type CartItemSelectionContract,
   type CatalogProductContract,
+  type CourierLocationSampleContract,
+  type DeliveryOfferContract,
+  type DeliveryTaskContract,
   type FulfillmentModality,
   type KitchenOrderCardContract,
   type KitchenQueueColumnStatus,
+  type LedgerJournalEntryLineContract,
+  type LedgerJournalPostContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type ProviderReadinessStatus,
+  type PspReconciliationRunContract,
   type QuoteItemSnapshotContract,
   type ServerQuoteRecordContract,
   type ServiceAreaEligibilityContract,
+  type SettlementRecordContract,
   type StaffRole,
   type StoreAvailabilityEvaluationContract,
   type StoreHourExceptionContract,
@@ -1721,4 +1728,371 @@ export function evaluateAdminGovernanceDecision(params: {
     reason: params.reason.trim(),
     createdAtIso: (params.now ?? new Date()).toISOString(),
   };
+}
+
+// ============================================================================
+// M13: Financial Backoffice, Double-Entry Ledger, PSP Reconciliation & Payouts
+// ============================================================================
+
+/**
+ * Builds an immutable, balanced double-entry journal for an order capture (M13).
+ * Explicitly separates GMV from Net Platform Revenue and segregates Merchant & Courier liabilities.
+ */
+export function buildBalancedOrderCaptureJournal(params: {
+  journalId: string;
+  order: OrderRecordContract;
+  discountFundedBy: "PLATFORM" | "MERCHANT" | "NONE";
+  postedBy: string;
+  now?: Date;
+}): LedgerJournalPostContract {
+  const entries: LedgerJournalEntryLineContract[] = [];
+
+  if (params.order.totalCents > 0) {
+    entries.push({
+      accountCode: "PSP_CLEARING_RECEIVABLE",
+      direction: "DEBIT",
+      amountCents: params.order.totalCents,
+    });
+  }
+
+  if (params.discountFundedBy === "PLATFORM" && params.order.discountCents > 0) {
+    entries.push({
+      accountCode: "PLATFORM_PROMO_SUBSIDY_EXPENSE",
+      direction: "DEBIT",
+      amountCents: params.order.discountCents,
+    });
+  }
+
+  if (params.order.merchantNetCents > 0) {
+    entries.push({
+      accountCode: `MERCHANT_PAYABLE:${params.order.organizationId}`,
+      direction: "CREDIT",
+      amountCents: params.order.merchantNetCents,
+    });
+  }
+
+  if (params.order.courierEarningsCents > 0) {
+    entries.push({
+      accountCode: "COURIER_PAYABLE_POOL",
+      direction: "CREDIT",
+      amountCents: params.order.courierEarningsCents,
+    });
+  }
+
+  if (params.order.platformCommissionCents > 0) {
+    entries.push({
+      accountCode: "PLATFORM_COMMISSION_REVENUE",
+      direction: "CREDIT",
+      amountCents: params.order.platformCommissionCents,
+    });
+  }
+
+  if (params.order.serviceFeeCents > 0) {
+    entries.push({
+      accountCode: "PLATFORM_SERVICE_FEE_REVENUE",
+      direction: "CREDIT",
+      amountCents: params.order.serviceFeeCents,
+    });
+  }
+
+  const totalDebitsCents = entries
+    .filter((e) => e.direction === "DEBIT")
+    .reduce((sum, e) => sum + e.amountCents, 0);
+  const totalCreditsCents = entries
+    .filter((e) => e.direction === "CREDIT")
+    .reduce((sum, e) => sum + e.amountCents, 0);
+
+  if (totalDebitsCents !== totalCreditsCents || totalDebitsCents <= 0) {
+    throw new Error(
+      `LEDGER_UNBALANCED_JOURNAL: Debits (${totalDebitsCents}) do not equal Credits (${totalCreditsCents}).`
+    );
+  }
+
+  return {
+    id: params.journalId,
+    referenceType: "ORDER_CAPTURE",
+    referenceId: params.order.id,
+    description: `Order #${params.order.orderNumber} capture split posting`,
+    idempotencyKey: `jnl_capture_${params.order.id}`,
+    postedBy: params.postedBy,
+    entries,
+    totalDebitsCents,
+    totalCreditsCents,
+    createdAtIso: (params.now ?? new Date()).toISOString(),
+  };
+}
+
+/**
+ * Reconciles internal captured order totals against PSP settlement records in integer BRL centavos (M13).
+ */
+export function evaluatePspReconciliationRun(params: {
+  runId: string;
+  providerCode: string;
+  runDate: string;
+  expectedOrders: ReadonlyArray<{ orderId: string; totalCents: number }>;
+  pspReportedCaptures: ReadonlyArray<{ orderId: string; capturedCents: number }>;
+  now?: Date;
+}): PspReconciliationRunContract {
+  const reportedByOrderId = new Map<string, number>();
+  for (const item of params.pspReportedCaptures) {
+    reportedByOrderId.set(item.orderId, item.capturedCents);
+  }
+
+  let matchedCount = 0;
+  const discrepancies: PspReconciliationRunContract["discrepancies"] = [];
+
+  for (const exp of params.expectedOrders) {
+    const pspAmount = reportedByOrderId.get(exp.orderId) ?? 0;
+    const deltaCents = pspAmount - exp.totalCents;
+    if (deltaCents === 0) {
+      matchedCount += 1;
+    } else {
+      discrepancies.push({
+        orderId: exp.orderId,
+        expectedCents: exp.totalCents,
+        pspReportedCents: pspAmount,
+        deltaCents,
+      });
+    }
+  }
+
+  const discrepancyTotalCents = discrepancies.reduce(
+    (sum, d) => sum + Math.abs(d.deltaCents),
+    0
+  );
+
+  return {
+    id: params.runId,
+    providerCode: params.providerCode,
+    runDate: params.runDate,
+    matchedCount,
+    discrepancyCount: discrepancies.length,
+    discrepancyTotalCents,
+    status: "COMPLETED",
+    discrepancies,
+    createdAtIso: (params.now ?? new Date()).toISOString(),
+  };
+}
+
+/**
+ * Evaluates settlement payout execution (M13): enforces finance/tech_admin role + MFA aal2,
+ * segregation of duties (actor who registered/approved the bank account cannot execute the payout),
+ * and honest BLOCKED_NO_PSP status when PSP credentials are not configured.
+ */
+export function evaluateSettlementPayoutExecution(params: {
+  settlement: SettlementRecordContract;
+  actorId: string;
+  actorAal: "aal1" | "aal2";
+  actorRoles: readonly StaffRole[];
+  bankAccountApprovedByActorId?: string | null;
+  pspProviderStatus: ProviderReadinessStatus;
+  externalPayoutReference?: string | null;
+}): SettlementRecordContract {
+  if (!params.actorRoles.includes("finance") && !params.actorRoles.includes("tech_admin")) {
+    throw new Error("SETTLEMENT_FORBIDDEN: Only finance or tech_admin staff can execute payouts.");
+  }
+  if (params.actorAal !== "aal2") {
+    throw new Error("SETTLEMENT_MFA_AAL2_REQUIRED: Multi-factor authentication (aal2) is required.");
+  }
+  if (
+    params.bankAccountApprovedByActorId &&
+    params.bankAccountApprovedByActorId === params.actorId
+  ) {
+    throw new Error(
+      "SETTLEMENT_SEGREGATION_OF_DUTIES_VIOLATION: The actor who approved the bank account cannot execute the payout liquidation."
+    );
+  }
+
+  if (
+    params.pspProviderStatus === "BLOCKED_MISSING_CREDENTIALS" ||
+    params.pspProviderStatus === "DISABLED"
+  ) {
+    return {
+      ...params.settlement,
+      status: "BLOCKED_NO_PSP",
+      approvedBy: params.actorId,
+      externalPayoutReference: null,
+    };
+  }
+
+  if (!params.externalPayoutReference || params.externalPayoutReference.trim().length < 4) {
+    throw new Error(
+      "SETTLEMENT_EXTERNAL_REF_REQUIRED: Confirmed payout requires a verified PSP payout reference."
+    );
+  }
+
+  return {
+    ...params.settlement,
+    status: "PAID_CONFIRMED",
+    approvedBy: params.actorId,
+    externalPayoutReference: params.externalPayoutReference.trim(),
+  };
+}
+
+// ============================================================================
+// M14 & M11: Logistics Dispatch, Offer Acceptance, GPS Validation & POD OTP
+// ============================================================================
+
+/**
+ * Executes transactional courier offer acceptance (M14/M11):
+ * - Rejects if courier is offline, offer is expired, or task already has an active courier (409 conflict).
+ * - Reveals the customer's full dropoff address ONLY after the assignment is confirmed.
+ */
+export function acceptDeliveryOfferTransactional(params: {
+  offer: DeliveryOfferContract;
+  task: DeliveryTaskContract;
+  actorCourierId: string;
+  isCourierOnline: boolean;
+  fullCustomerAddress: string;
+  now?: Date;
+}): {
+  updatedOffer: DeliveryOfferContract;
+  updatedTask: DeliveryTaskContract;
+} {
+  const now = params.now ?? new Date();
+  if (!params.isCourierOnline) {
+    throw new Error("COURIER_OFFLINE: Courier must be ONLINE to accept delivery offers.");
+  }
+  if (params.offer.courierId !== params.actorCourierId) {
+    throw new Error("DELIVERY_OFFER_FORBIDDEN: Offer belongs to a different courier.");
+  }
+  if (params.offer.status !== "OFFERED") {
+    throw new Error(`DELIVERY_OFFER_INVALID_STATE: Offer is already ${params.offer.status}.`);
+  }
+  if (new Date(params.offer.expiresAtIso).getTime() <= now.getTime()) {
+    throw new Error(`DELIVERY_OFFER_EXPIRED: Offer expired at ${params.offer.expiresAtIso}.`);
+  }
+  if (params.task.activeCourierId !== null) {
+    throw new Error(
+      `DELIVERY_TASK_ALREADY_ASSIGNED: Task ${params.task.id} is already assigned to courier ${params.task.activeCourierId}.`
+    );
+  }
+
+  const nowIso = now.toISOString();
+  const updatedOffer: DeliveryOfferContract = {
+    ...params.offer,
+    status: "ACCEPTED",
+    respondedAtIso: nowIso,
+  };
+
+  const updatedTask: DeliveryTaskContract = {
+    ...params.task,
+    status: "ASSIGNED",
+    activeCourierId: params.actorCourierId,
+    dropoffFullAddress: params.fullCustomerAddress,
+  };
+
+  return { updatedOffer, updatedTask };
+}
+
+/**
+ * Validates a courier GPS location sample (M14/M11):
+ * - Prevents tracking unassigned tasks.
+ * - Flags stale timestamps (> 120s) or poor GPS accuracy (> 150m) so uncertain GPS is never treated as sole proof.
+ * - Enforces short retention window (24h).
+ */
+export function evaluateCourierLocationSample(params: {
+  sampleId: string;
+  courierId: string;
+  deliveryTaskId: string | null;
+  activeCourierIdForTask: string | null;
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  recordedAtIso: string;
+  now?: Date;
+  maxAgeSeconds?: number;
+  maxAccuracyMeters?: number;
+}): CourierLocationSampleContract {
+  if (
+    params.deliveryTaskId !== null &&
+    params.activeCourierIdForTask !== params.courierId
+  ) {
+    throw new Error(
+      "DELIVERY_TASK_ACCESS_FORBIDDEN: Courier is not assigned to the specified delivery task."
+    );
+  }
+  if (params.latitude < -90 || params.latitude > 90 || params.longitude < -180 || params.longitude > 180) {
+    throw new Error("INVALID_GPS_COORDINATES: Latitude/longitude out of bounds.");
+  }
+
+  const now = params.now ?? new Date();
+  const recordedMs = new Date(params.recordedAtIso).getTime();
+  const ageSeconds = (now.getTime() - recordedMs) / 1000;
+  const maxAgeSeconds = params.maxAgeSeconds ?? 120;
+  const maxAccuracyMeters = params.maxAccuracyMeters ?? 150;
+
+  const isStaleOrLowAccuracy =
+    ageSeconds > maxAgeSeconds || ageSeconds < -30 || params.accuracyMeters > maxAccuracyMeters;
+
+  const expiresAtIso = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+  return {
+    id: params.sampleId,
+    courierId: params.courierId,
+    deliveryTaskId: params.deliveryTaskId,
+    latitude: params.latitude,
+    longitude: params.longitude,
+    accuracyMeters: params.accuracyMeters,
+    recordedAtIso: params.recordedAtIso,
+    expiresAtIso,
+    isStaleOrLowAccuracy,
+  };
+}
+
+/**
+ * Computes SHA-256 hash of a 4-digit delivery confirmation code (M11/M14).
+ */
+export function hashDeliveryConfirmationCode(code: string): string {
+  return crypto.createHash("sha256").update(code.trim(), "utf8").digest("hex");
+}
+
+/**
+ * Verifies a 4-digit proof-of-delivery confirmation code in constant time (M11/M14).
+ */
+export function verifyDeliveryConfirmationCode(params: {
+  providedCode: string;
+  expectedCodeHash: string;
+}): boolean {
+  if (!/^\d{4}$/.test(params.providedCode.trim())) {
+    return false;
+  }
+  const actualHash = hashDeliveryConfirmationCode(params.providedCode);
+  const bufA = Buffer.from(actualHash, "utf8");
+  const bufB = Buffer.from(params.expectedCodeHash, "utf8");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
+// ============================================================================
+// M15: Tenant-Scoped Fleet Operator Portal Guard
+// ============================================================================
+
+/**
+ * Evaluates fleet manager access to courier and delivery records (M15):
+ * - Returns DISABLED_PENDING_FLEET_CONTRACT if the fleet contract is not approved.
+ * - Blocks Fleet A manager from viewing independent couriers or couriers belonging to Fleet B.
+ */
+export function evaluateFleetOperatorAccess(params: {
+  fleetOrganizationId: string;
+  actorOrganizationIds: readonly string[];
+  targetCourierFleetOrgId: string | null;
+  isFleetContractApproved: boolean;
+}): {
+  allowed: boolean;
+  reasonCode:
+    | "ALLOWED"
+    | "DISABLED_PENDING_FLEET_CONTRACT"
+    | "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER";
+} {
+  if (!params.isFleetContractApproved) {
+    return { allowed: false, reasonCode: "DISABLED_PENDING_FLEET_CONTRACT" };
+  }
+  if (
+    !params.actorOrganizationIds.includes(params.fleetOrganizationId) ||
+    params.targetCourierFleetOrgId === null ||
+    params.targetCourierFleetOrgId !== params.fleetOrganizationId
+  ) {
+    return { allowed: false, reasonCode: "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER" };
+  }
+  return { allowed: true, reasonCode: "ALLOWED" };
 }

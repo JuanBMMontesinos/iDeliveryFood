@@ -250,6 +250,54 @@ paths:
       responses:
         "200":
           description: List of audit log records
+  /finance/reconciliation-runs:
+    post:
+      operationId: runPspReconciliation
+      summary: Execute PSP vs internal ledger reconciliation run in BRL integer cents (M13)
+      responses:
+        "201":
+          description: Reconciliation run completed with matched and discrepancy counts
+  /finance/settlements/{settlementId}/execute:
+    post:
+      operationId: executeSettlementPayout
+      summary: Execute merchant or courier settlement payout enforcing MFA aal2, segregation of duties, and honest BLOCKED_NO_PSP status (M13)
+      responses:
+        "200":
+          description: Settlement status updated (PAID_CONFIRMED or BLOCKED_NO_PSP)
+        "403":
+          description: Segregation of duties violation or missing MFA aal2
+  /logistics/offers:
+    post:
+      operationId: createDeliveryOffer
+      summary: Create a delivery task and courier offer hiding exact street until accepted (M14)
+      responses:
+        "201":
+          description: Delivery offer created
+  /logistics/offers/{offerId}/accept:
+    post:
+      operationId: acceptDeliveryOffer
+      summary: Accept a delivery offer transactionally enforcing single active courier and revealing full customer address (M14/M11)
+      responses:
+        "200":
+          description: Offer accepted and full dropoff address revealed
+        "409":
+          description: Offer expired, courier offline, or task already assigned to another courier
+  /logistics/location-samples:
+    post:
+      operationId: submitCourierLocationSample
+      summary: Record courier GPS location sample with staleness and accuracy validation (M14/M11)
+      responses:
+        "201":
+          description: Location sample recorded with isStaleOrLowAccuracy flag
+  /logistics/tasks/{taskId}/complete:
+    post:
+      operationId: completeDeliveryTaskWithOtp
+      summary: Complete a delivery task by verifying the 4-digit customer OTP proof-of-delivery code (M14/M11)
+      responses:
+        "200":
+          description: Delivery task marked DELIVERED
+        "409":
+          description: Invalid 4-digit OTP code
 components:
   schemas:
     ApiErrorEnvelope:

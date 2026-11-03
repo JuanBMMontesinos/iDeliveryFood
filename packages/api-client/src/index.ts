@@ -5,16 +5,21 @@ import {
   type ApiErrorEnvelope,
   type BankAccountChangeRequestContract,
   type CartItemSelectionContract,
+  type CourierLocationSampleContract,
   type CustomerAddressContract,
+  type DeliveryOfferContract,
+  type DeliveryTaskContract,
   type FulfillmentModality,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type PaginatedResponse,
   type PaymentAttemptContract,
   type PaymentMethodCode,
+  type PspReconciliationRunContract,
   type PublishedStoreContract,
   type RefundRecordContract,
   type ServerQuoteRecordContract,
+  type SettlementRecordContract,
   type ServiceAreaEligibilityContract,
   type StoreAvailabilityEvaluationContract,
   type StoreCatalogResponseContract,
@@ -394,6 +399,107 @@ export class IDeliveryApiClient {
         targetId: params.targetId,
         decision: params.decision,
         reason: params.reason,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async runPspReconciliation(params: {
+    providerCode: string;
+    runDate: string;
+    expectedOrders: Array<{ orderId: string; totalCents: number }>;
+    pspReportedCaptures: Array<{ orderId: string; capturedCents: number }>;
+    idempotencyKey: string;
+  }): Promise<{ data: PspReconciliationRunContract }> {
+    return this.request<{ data: PspReconciliationRunContract }>({
+      path: "/finance/reconciliation-runs",
+      method: "POST",
+      body: {
+        providerCode: params.providerCode,
+        runDate: params.runDate,
+        expectedOrders: params.expectedOrders,
+        pspReportedCaptures: params.pspReportedCaptures,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async executeSettlementPayout(params: {
+    settlementId: string;
+    providerCode: string;
+    bankAccountApprovedByActorId?: string | null;
+    externalPayoutReference?: string | null;
+    idempotencyKey: string;
+  }): Promise<{ data: SettlementRecordContract }> {
+    return this.request<{ data: SettlementRecordContract }>({
+      path: `/finance/settlements/${encodeURIComponent(params.settlementId)}/execute`,
+      method: "POST",
+      body: {
+        providerCode: params.providerCode,
+        bankAccountApprovedByActorId: params.bankAccountApprovedByActorId ?? null,
+        externalPayoutReference: params.externalPayoutReference ?? null,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async acceptDeliveryOffer(params: {
+    offerId: string;
+    isCourierOnline: boolean;
+    idempotencyKey: string;
+  }): Promise<{
+    data: {
+      offer: DeliveryOfferContract;
+      task: DeliveryTaskContract;
+    };
+  }> {
+    return this.request({
+      path: `/logistics/offers/${encodeURIComponent(params.offerId)}/accept`,
+      method: "POST",
+      body: {
+        isCourierOnline: params.isCourierOnline,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async submitCourierLocationSample(params: {
+    deliveryTaskId: string | null;
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+    recordedAtIso: string;
+    idempotencyKey: string;
+  }): Promise<{ data: CourierLocationSampleContract }> {
+    return this.request<{ data: CourierLocationSampleContract }>({
+      path: "/logistics/location-samples",
+      method: "POST",
+      body: {
+        deliveryTaskId: params.deliveryTaskId,
+        latitude: params.latitude,
+        longitude: params.longitude,
+        accuracyMeters: params.accuracyMeters,
+        recordedAtIso: params.recordedAtIso,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async completeDeliveryTaskWithOtp(params: {
+    taskId: string;
+    confirmationCode: string;
+    idempotencyKey: string;
+  }): Promise<{ data: DeliveryTaskContract }> {
+    return this.request<{ data: DeliveryTaskContract }>({
+      path: `/logistics/tasks/${encodeURIComponent(params.taskId)}/complete`,
+      method: "POST",
+      body: {
+        confirmationCode: params.confirmationCode,
       },
       idempotencyKey: params.idempotencyKey,
       requireIdempotency: true,

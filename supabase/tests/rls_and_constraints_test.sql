@@ -16,6 +16,8 @@
 -- 12. Security-invoker catalog view (public.store_catalog_v) exposes published products & option groups.
 -- 13. Webhook event log (public.payment_provider_events) enforces (provider_code, external_event_id) deduplication.
 -- 14. Staff self-grant protection (trg_guard_staff_scope_self_grant) blocks staff from granting scopes to themselves (42501).
+-- 15. Security-invoker ledger balances view (public.ledger_account_balances_v) computes integer BRL centavo balances with RLS segregation.
+-- 16. Single active courier assignment partial unique index (uq_delivery_assignments_one_active) blocks duplicate active assignments (23505).
 -- ============================================================================
 
 DO $$
@@ -251,7 +253,42 @@ BEGIN
   IF NOT v_caught_error THEN
     RAISE EXCEPTION 'TEST FAILED [Staff Self-Grant Prohibition]: expected insufficient_privilege (42501)';
   END IF;
+
+  -- 15. Verify ledger_account_balances_v under Partner Operator (0 rows) vs Staff Finance aal2 (6 rows)
+  PERFORM set_config(
+    'request.jwt.claims',
+    '{"sub":"00000000-0000-4000-8000-000000000011","role":"authenticated","aal":"aal1"}',
+    true
+  );
+  SELECT count(*) INTO v_count FROM public.ledger_account_balances_v;
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED [Partner Operator ledger_account_balances_v]: expected 0 rows, got %', v_count;
+  END IF;
+
+  PERFORM set_config(
+    'request.jwt.claims',
+    '{"sub":"00000000-0000-4000-8000-000000000091","role":"authenticated","aal":"aal2"}',
+    true
+  );
+  SELECT count(*) INTO v_count FROM public.ledger_account_balances_v;
+  IF v_count <> 6 THEN
+    RAISE EXCEPTION 'TEST FAILED [Staff Finance aal2 ledger_account_balances_v]: expected 6 rows, got %', v_count;
+  END IF;
+
+  -- 16. Verify uq_delivery_assignments_one_active prevents a second ACTIVE assignment for the same delivery_task_id
+  PERFORM set_config('role', 'postgres', true);
+  v_caught_error := false;
+  BEGIN
+    INSERT INTO public.delivery_assignments (delivery_task_id, courier_id, status, is_test_data)
+    VALUES ('00000000-0000-4000-8000-000000001201', '00000000-0000-4000-8000-000000000030', 'ACTIVE', true);
+  EXCEPTION WHEN unique_violation THEN
+    v_caught_error := true;
+  END;
+
+  IF NOT v_caught_error THEN
+    RAISE EXCEPTION 'TEST FAILED [Single Active Delivery Assignment]: expected unique_violation (23505)';
+  END IF;
 END;
 $$;
 
-SELECT 'ALL_14_SECURITY_AND_FASE_ABC_INVARIANTS_PASSED' AS verification_status;
+SELECT 'ALL_16_SECURITY_AND_FASE_ABCD_INVARIANTS_PASSED' AS verification_status;

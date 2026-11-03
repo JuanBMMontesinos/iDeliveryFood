@@ -5,6 +5,9 @@ import {
   buildAdminAuditTrailExplorerModel,
   buildAdminGovernanceScreenModel,
   buildAdminRoleNavigationModules,
+  buildFinancialBackofficeModel,
+  buildFleetOperatorPortalModel,
+  buildLogisticsDispatchConsoleModel,
   executeAdminCadastreGovernanceAction,
   executeAdminStaffScopeGrant,
 } from "../src/index.js";
@@ -158,5 +161,142 @@ describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider 
     assert.equal(auditExplorer.isReadOnly, true);
     assert.equal(auditExplorer.allowMutationOrDelete, false);
     assert.equal(auditExplorer.visibleLogs.length, 1);
+  });
+
+  it("validates M13 Financial Backoffice (GMV vs Net Revenue notice & BLOCKED_NO_PSP), M14 Maps fallback & M15 Fleet isolation", () => {
+    const financeAdminAal2: AuthenticatedActorProfileContract = {
+      ...staffAdminAal1,
+      aal: "aal2",
+      staffScopes: [
+        {
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 200000,
+          requiresMfa: true,
+        },
+        {
+          role: "operations",
+          regionCode: null,
+          maxRefundApprovalCents: 50000,
+          requiresMfa: true,
+        },
+      ],
+    };
+
+    const sampleOrder = {
+      id: "ord_fin_1",
+      orderNumber: 10088,
+      customerId: "cust_1",
+      organizationId: "org_101",
+      storeId: "store_201",
+      quoteId: "quote_1",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      orderStatus: "DELIVERED",
+      paymentStatus: "CAPTURED",
+      deliveryStatus: "DELIVERED",
+      currencyCode: "BRL" as const,
+      subtotalCents: 4000,
+      addonsCents: 500,
+      serviceFeeCents: 225,
+      deliveryFeeCents: 700,
+      discountCents: 0,
+      totalCents: 5425,
+      platformCommissionCents: 540,
+      merchantNetCents: 3960,
+      courierEarningsCents: 700,
+      deliveryAddressSnapshot: null,
+      itemsSnapshot: [],
+      customerNotes: null,
+      cancellationReason: null,
+      cancelledByRole: null,
+      version: 4,
+      idempotencyKey: "idem_fin_1",
+      acceptedAtIso: "2026-11-03T12:02:00Z",
+      readyAtIso: "2026-11-03T12:20:00Z",
+      deliveredAtIso: "2026-11-03T12:40:00Z",
+      cancelledAtIso: null,
+      createdAtIso: "2026-11-03T12:00:00Z",
+      updatedAtIso: "2026-11-03T12:40:00Z",
+    };
+
+    const finModel = buildFinancialBackofficeModel({
+      actor: financeAdminAal2,
+      orders: [sampleOrder],
+      pspReportedCaptures: [{ orderId: "ord_fin_1", capturedCents: 5425 }],
+      settlementToExecute: {
+        settlement: {
+          id: "settle_99",
+          organizationId: "org_101",
+          courierId: null,
+          periodStart: "2026-11-01",
+          periodEnd: "2026-11-03",
+          amountCents: 3960,
+          status: "SCHEDULED",
+          approvedBy: null,
+          externalPayoutReference: null,
+          createdAtIso: "2026-11-03T15:00:00Z",
+        },
+        providerCode: "stripe",
+        bankAccountApprovedByActorId: "different_staff_id",
+      },
+      env: {}, // No PSP keys configured -> honest BLOCKED_NO_PSP
+      locale: "pt-BR",
+    });
+
+    assert.equal(finModel.authorized, true);
+    assert.equal(finModel.gmvCents, 4500);
+    assert.equal(finModel.netPlatformRevenueCents, 765);
+    assert.equal(finModel.merchantPayablesCents, 3960);
+    assert.equal(finModel.courierPayablesCents, 700);
+    assert.match(finModel.gmvVsRevenueNoticeText, /Volume Bruto de Mercadorias/);
+    assert.equal(finModel.settlementResult?.status, "BLOCKED_NO_PSP");
+    assert.match(finModel.settlementNoticeText ?? "", /BLOCKED_MISSING_CREDENTIALS/);
+
+    // M14 Logistics console renders Haversine fallback notice when Google Maps is unconfigured
+    const logisticsConsole = buildLogisticsDispatchConsoleModel({
+      actor: financeAdminAal2,
+      tasks: [
+        {
+          id: "dtask_1",
+          orderId: "ord_fin_1",
+          storeId: "store_201",
+          fulfillmentModality: "PLATFORM_DELIVERY",
+          status: "ASSIGNED",
+          pickupLatitude: -23.561414,
+          pickupLongitude: -46.655881,
+          dropoffLatitude: -23.56398,
+          dropoffLongitude: -46.66912,
+          dropoffNeighborhoodOnly: "Bela Vista",
+          dropoffFullAddress: "Av. Paulista, 1578",
+          courierFeeCents: 700,
+          distanceMeters: 1420,
+          estimatedEtaMinutes: 18,
+          activeCourierId: "courier_1",
+          pickedUpAtIso: null,
+          completedAtIso: null,
+          createdAtIso: "2026-11-03T12:20:00Z",
+        },
+      ],
+      env: {},
+      locale: "en",
+    });
+    assert.equal(logisticsConsole.authorized, true);
+    assert.equal(logisticsConsole.mapsProviderStatus, "BLOCKED_MISSING_CREDENTIALS");
+    assert.match(logisticsConsole.mapsFallbackNoticeText ?? "", /Haversine distance \(1420m\)/);
+
+    // M15 Fleet Operator Portal filters out independent and cross-fleet couriers
+    const fleetModel = buildFleetOperatorPortalModel({
+      fleetOrganizationId: "fleet_A",
+      actorOrganizationIds: ["fleet_A"],
+      isFleetContractApproved: true,
+      couriers: [
+        { courierId: "c1", courierName: "Fleet A Courier", fleetOrganizationId: "fleet_A" },
+        { courierId: "c2", courierName: "Independent Courier", fleetOrganizationId: null },
+        { courierId: "c3", courierName: "Fleet B Courier", fleetOrganizationId: "fleet_B" },
+      ],
+    });
+    assert.equal(fleetModel.portalStatus, "ACTIVE");
+    assert.equal(fleetModel.visibleCouriers.length, 1);
+    assert.equal(fleetModel.visibleCouriers[0]?.courierId, "c1");
   });
 });

@@ -1,9 +1,10 @@
-# iDeliveryFood — Relatório Consolidado de Entrega (Fase A + Fase B + Fase C)
+# iDeliveryFood — Relatório Consolidado de Entrega (Fase A + Fase B + Fase C + Fase D)
 
 ## 1. Status Geral da Execução
 - **Fase A (`M00 -> M01 -> M02 -> M03`):** **CONCLUÍDA E VALIDADA**
 - **Fase B (`M04 -> M05 -> M09 -> M10 -> M12`):** **CONCLUÍDA E VALIDADA**
 - **Fase C (`M06 -> M07 -> M08 -> M16`):** **CONCLUÍDA E VALIDADA**
+- **Fase D (`M13 -> M14 -> M11 -> M15`):** **CONCLUÍDA (com limitações documentadas)**
 - **Projeto Supabase Vinculado (`project_ref`):** `dwsoochnfxldfvcaijie` (`us-east-1`, PostgreSQL 17.11)
 - **Repositório GitHub:** `https://github.com/JuanBMMontesinos/iDeliveryFood.git` (`main`)
 
@@ -26,6 +27,14 @@
 | **M10** | Pedidos, Carrinho, Cotação e Máquina de Estados | **DELIVERED** | `createOrderFromServerQuote`, `executeOrderCommand` (concorrência otimista `expectedVersion`, janela de cancelamento gratuito de 120s, eventos append-only em `order_events` e `outbox_events`), `/v1/quotes`, `/v1/orders`, `/v1/orders/{orderId}/commands`, `/v1/orders/{orderId}/events`. |
 | **M12** | Pagamentos, PSP, Webhooks e Estornos | **DELIVERED** | `computePspWebhookSignature`, `verifyAndProcessPspWebhook` (HMAC-SHA256 constante, janela de replay de 300s, deduplicação `(providerCode, externalEventId)` e tratamento de captura tardia como `DISPUTED`), `evaluateRefundRequest` (MFA `aal2` + teto ABAC `maxRefundApprovalCents`), `/v1/payments/attempts`, `/v1/webhooks/psp/{providerCode}` e `/v1/refunds`. |
 | **M16** | Administração Central, Acessos e Cadastros | **DELIVERED** | `buildAdminRoleNavigationModules`, `executeAdminStaffScopeGrant` (bloqueio de autoconcessão `DENIED_SELF_GRANT_FORBIDDEN` + trigger SQL `trg_guard_staff_scope_self_grant`), `executeAdminCadastreGovernanceAction` (MFA `aal2` + justificativa obrigatória), `buildAdminAuditTrailExplorerModel` (`isReadOnly: true`), `/v1/admin/staff-scopes`, `/v1/admin/governance-actions` e `/v1/admin/audit-logs`. |
+| **M13** | Backoffice Financeiro e Conciliação | **DELIVERED** | `buildBalancedOrderCaptureJournal` (partidas dobradas balanceadas), `evaluatePspReconciliationRun` (divergência em centavos), `evaluateSettlementPayoutExecution` (MFA `aal2`, segregação de funções, `BLOCKED_NO_PSP` honesto), `buildFinancialBackofficeModel` (GMV ≠ Receita Líquida), view `ledger_account_balances_v`, `/v1/finance/reconciliation-runs` e `/v1/finance/settlements/{id}/execute`. |
+| **M14** | Logística, Despacho e Console Operacional | **DELIVERED** | `acceptDeliveryOfferTransactional` (entregador único, `409` em concorrência, endereço completo só após aceite), `evaluateCourierLocationSample` (GPS antigo/impreciso sinalizado), OTP de 4 dígitos com hash SHA-256, `buildLogisticsDispatchConsoleModel` (fallback Haversine sem mapa simulado), `/v1/logistics/offers`, `/v1/logistics/offers/{id}/accept`, `/v1/logistics/location-samples`, `/v1/logistics/tasks/{id}/complete`. |
+| **M11** | App do Entregador — Android e iOS | **PARTIAL** | `CourierDispatchController.kt` / `.swift` (privacidade de endereço, bloqueio de conclusão offline, OTP, aviso de GPS negado) + 100% paridade `i18n`. Testes Kotlin/Swift incluídos, porém **não executados** neste ambiente (exigem Gradle/Xcode); telas Compose/SwiftUI ainda não implementadas. |
+| **M15** | Portal de Operadores Logísticos e Frotas | **DISABLED_PENDING_FLEET_CONTRACT** | `evaluateFleetOperatorAccess` e `buildFleetOperatorPortalModel` (isolamento entre frotas e entregadores independentes). Sem endpoints `/v1/fleet/*` nem RLS específica de frota até a habilitação comercial. |
+
+### Limitações Conhecidas da Fase D
+- Rotas de `M13`/`M14` em `apps/api` usam armazenamento em memória quando nenhum adaptador de repositório é fornecido; tabelas e RLS correspondentes já existem em `dwsoochnfxldfvcaijie`, mas o adaptador de persistência ainda não está conectado.
+- Repasses reais e mapas ao vivo permanecem bloqueados até a configuração das credenciais de PSP/Maps.
 
 ---
 
