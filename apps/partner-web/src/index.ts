@@ -3,6 +3,7 @@ import {
   DEFAULT_LOCALE,
   translateMessage,
   type AuthenticatedActorProfileContract,
+  type BatchCatalogUpdateItemResultContract,
   type SupportedLocale,
 } from "@ideliveryfood/contracts";
 import {
@@ -79,5 +80,49 @@ export function buildPartnerPortalScreenModel(params: {
       ? null
       : translateMessage("partner.finance.segregated_notice", locale),
     banner: null,
+  };
+}
+
+/**
+ * Evaluates a multi-unit batch catalog update across target store units and builds a partial status summary (M09).
+ */
+export function evaluateMultiUnitCatalogBatch(params: {
+  actor: AuthenticatedActorProfileContract;
+  organizationId: string;
+  productId: string;
+  targetStoreIds: readonly string[];
+  locale?: SupportedLocale;
+}): {
+  results: BatchCatalogUpdateItemResultContract[];
+  summaryText: string;
+} {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const results: BatchCatalogUpdateItemResultContract[] = [];
+
+  for (const storeId of params.targetStoreIds) {
+    const decision = authorizePartnerScope({
+      actor: params.actor,
+      organizationId: params.organizationId,
+      storeId,
+      allowedRoles: ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"],
+    });
+    results.push({
+      storeId,
+      productId: params.productId,
+      status: decision.allowed ? "APPLIED" : "DENIED_SCOPE",
+      reasonCode: decision.reasonCode,
+    });
+  }
+
+  const applied = results.filter((r) => r.status === "APPLIED").length;
+  const denied = results.filter((r) => r.status === "DENIED_SCOPE").length;
+
+  return {
+    results,
+    summaryText: translateMessage("partner.multi_unit.batch_summary", locale, {
+      applied,
+      denied,
+      total: results.length,
+    }),
   };
 }

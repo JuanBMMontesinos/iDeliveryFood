@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AuthenticatedActorProfileContract } from "@ideliveryfood/contracts";
-import { buildPartnerPortalScreenModel } from "../src/index.js";
+import { buildPartnerPortalScreenModel, evaluateMultiUnitCatalogBatch } from "../src/index.js";
 
-describe("@ideliveryfood/partner-web — Multi-Tenant Scope & Partner Finance Segregation Tests", () => {
+describe("@ideliveryfood/partner-web — Multi-Tenant Scope, Partner Finance Segregation & M09 Multi-Unit Batch", () => {
   const operatorLucas: AuthenticatedActorProfileContract = {
     id: "00000000-0000-4000-8000-000000000011",
     email: "operator.paulista@test.ideliveryfood.invalid",
@@ -73,5 +73,25 @@ describe("@ideliveryfood/partner-web — Multi-Tenant Scope & Partner Finance Se
     assert.equal(financeScreen.canAccessStoreOperations, true);
     assert.equal(financeScreen.canAccessFinancialLedger, true);
     assert.equal(financeScreen.financeSegregationNotice, null);
+  });
+
+  it("evaluates M09 multi-unit catalog batch updates with per-unit partial status reporting", () => {
+    const batch = evaluateMultiUnitCatalogBatch({
+      actor: operatorLucas,
+      organizationId: "00000000-0000-4000-8000-000000000101",
+      productId: "00000000-0000-4000-8000-000000000601",
+      targetStoreIds: [
+        "00000000-0000-4000-8000-000000000201",
+        "00000000-0000-4000-8000-000000000203",
+      ],
+      locale: "en",
+    });
+
+    assert.equal(batch.results[0]?.status, "APPLIED");
+    assert.equal(batch.results[1]?.status, "DENIED_SCOPE");
+    assert.equal(
+      batch.summaryText,
+      "Batch catalog update: 1 applied, 1 denied across 2 unit targets."
+    );
   });
 });

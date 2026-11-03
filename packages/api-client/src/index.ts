@@ -1,8 +1,20 @@
 import {
   DEFAULT_LOCALE,
   type ApiErrorEnvelope,
+  type CartItemSelectionContract,
+  type CustomerAddressContract,
+  type FulfillmentModality,
+  type OrderEventRecordContract,
+  type OrderRecordContract,
   type PaginatedResponse,
+  type PaymentAttemptContract,
+  type PaymentMethodCode,
   type PublishedStoreContract,
+  type RefundRecordContract,
+  type ServerQuoteRecordContract,
+  type ServiceAreaEligibilityContract,
+  type StoreAvailabilityEvaluationContract,
+  type StoreCatalogResponseContract,
   type SupportedLocale,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
@@ -108,10 +120,177 @@ export class IDeliveryApiClient {
     return payload as T;
   }
 
-  public async listPublishedStores(): Promise<PaginatedResponse<PublishedStoreContract>> {
+  public async listPublishedStores(params?: {
+    search?: string;
+    cuisineCategory?: string;
+  }): Promise<PaginatedResponse<PublishedStoreContract>> {
+    const query = new URLSearchParams({ locale: this.locale });
+    if (params?.search) query.set("search", params.search);
+    if (params?.cuisineCategory) query.set("cuisineCategory", params.cuisineCategory);
     return this.request<PaginatedResponse<PublishedStoreContract>>({
-      path: `/stores?locale=${encodeURIComponent(this.locale)}`,
+      path: `/stores?${query.toString()}`,
       method: "GET",
+    });
+  }
+
+  public async getStoreCatalog(
+    storeId: string
+  ): Promise<{ data: StoreCatalogResponseContract }> {
+    return this.request<{ data: StoreCatalogResponseContract }>({
+      path: `/stores/${encodeURIComponent(storeId)}/catalog?locale=${encodeURIComponent(this.locale)}`,
+      method: "GET",
+    });
+  }
+
+  public async evaluateStoreAvailabilityAndCoverage(params: {
+    storeId: string;
+    customerLatitude?: number;
+    customerLongitude?: number;
+    fulfillmentModality?: FulfillmentModality;
+    grossMerchandiseCents?: number;
+  }): Promise<{
+    data: {
+      availability: StoreAvailabilityEvaluationContract;
+      coverage: ServiceAreaEligibilityContract | null;
+    };
+  }> {
+    const query = new URLSearchParams();
+    if (params.customerLatitude !== undefined) {
+      query.set("lat", String(params.customerLatitude));
+    }
+    if (params.customerLongitude !== undefined) {
+      query.set("lng", String(params.customerLongitude));
+    }
+    if (params.fulfillmentModality) {
+      query.set("modality", params.fulfillmentModality);
+    }
+    if (params.grossMerchandiseCents !== undefined) {
+      query.set("basketCents", String(params.grossMerchandiseCents));
+    }
+    const qs = query.toString();
+    return this.request({
+      path: `/stores/${encodeURIComponent(params.storeId)}/availability${qs ? `?${qs}` : ""}`,
+      method: "GET",
+    });
+  }
+
+  public async listMyAddresses(): Promise<{ data: CustomerAddressContract[] }> {
+    return this.request<{ data: CustomerAddressContract[] }>({
+      path: "/me/addresses",
+      method: "GET",
+    });
+  }
+
+  public async createQuote(params: {
+    storeId: string;
+    addressId?: string | null;
+    fulfillmentModality: FulfillmentModality;
+    cartItems: CartItemSelectionContract[];
+    discountCents?: number;
+    discountFundedBy?: "PLATFORM" | "MERCHANT" | "NONE";
+    promotionCode?: string | null;
+    idempotencyKey: string;
+  }): Promise<{ data: ServerQuoteRecordContract }> {
+    return this.request<{ data: ServerQuoteRecordContract }>({
+      path: "/quotes",
+      method: "POST",
+      body: {
+        storeId: params.storeId,
+        addressId: params.addressId ?? null,
+        fulfillmentModality: params.fulfillmentModality,
+        cartItems: params.cartItems,
+        discountCents: params.discountCents ?? 0,
+        discountFundedBy: params.discountFundedBy ?? "NONE",
+        promotionCode: params.promotionCode ?? null,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async createOrderFromQuote(params: {
+    quoteId: string;
+    customerNotes?: string | null;
+    idempotencyKey: string;
+  }): Promise<{ data: OrderRecordContract }> {
+    return this.request<{ data: OrderRecordContract }>({
+      path: "/orders",
+      method: "POST",
+      body: {
+        quoteId: params.quoteId,
+        customerNotes: params.customerNotes ?? null,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async executeOrderCommand(params: {
+    orderId: string;
+    command: string;
+    expectedVersion: number;
+    reason?: string;
+    idempotencyKey: string;
+  }): Promise<{ data: { order: OrderRecordContract; event: OrderEventRecordContract } }> {
+    return this.request<{ data: { order: OrderRecordContract; event: OrderEventRecordContract } }>({
+      path: `/orders/${encodeURIComponent(params.orderId)}/commands`,
+      method: "POST",
+      body: {
+        command: params.command,
+        expectedVersion: params.expectedVersion,
+        reason: params.reason ?? null,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async listOrderEvents(
+    orderId: string
+  ): Promise<{ data: OrderEventRecordContract[] }> {
+    return this.request<{ data: OrderEventRecordContract[] }>({
+      path: `/orders/${encodeURIComponent(orderId)}/events`,
+      method: "GET",
+    });
+  }
+
+  public async createPaymentAttempt(params: {
+    orderId: string;
+    providerCode: string;
+    paymentMethod: PaymentMethodCode;
+    idempotencyKey: string;
+  }): Promise<{ data: PaymentAttemptContract }> {
+    return this.request<{ data: PaymentAttemptContract }>({
+      path: "/payments/attempts",
+      method: "POST",
+      body: {
+        orderId: params.orderId,
+        providerCode: params.providerCode,
+        paymentMethod: params.paymentMethod,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async requestRefund(params: {
+    orderId: string;
+    paymentAttemptId: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+  }): Promise<{ data: RefundRecordContract }> {
+    return this.request<{ data: RefundRecordContract }>({
+      path: "/refunds",
+      method: "POST",
+      body: {
+        orderId: params.orderId,
+        paymentAttemptId: params.paymentAttemptId,
+        amountCents: params.amountCents,
+        reason: params.reason,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
     });
   }
 

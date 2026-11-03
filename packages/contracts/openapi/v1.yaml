@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: iDeliveryFood Platform API
-  version: 1.0.0
+  version: 1.1.0
   description: >
     Versioned HTTP API (/v1) for the iDeliveryFood multi-tenant food delivery marketplace.
     Enforces integer cents (BRL), America/Sao_Paulo operational timezone, i18n (en default, pt-BR),
@@ -47,6 +47,19 @@ paths:
       responses:
         "200":
           description: Updated preferences
+  /me/addresses:
+    get:
+      operationId: listCustomerAddresses
+      summary: List saved customer delivery addresses
+      responses:
+        "200":
+          description: List of addresses
+    post:
+      operationId: createCustomerAddress
+      summary: Save a new customer delivery address with coordinates
+      responses:
+        "201":
+          description: Address created
   /me/devices/revoke:
     post:
       operationId: revokeUserDevice
@@ -77,6 +90,20 @@ paths:
           description: Scoped organization members
         "403":
           description: Cross-tenant access denied
+  /organizations/{orgId}/units-summary:
+    get:
+      operationId: getMultiUnitSummary
+      summary: Consolidated multi-unit operational summary restricted to actor's authorized stores (M09)
+      responses:
+        "200":
+          description: Multi-unit summary
+  /organizations/{orgId}/catalog-batch:
+    post:
+      operationId: applyMultiUnitCatalogBatch
+      summary: Apply batch product availability or price update across multiple units with partial status report (M09)
+      responses:
+        "200":
+          description: Per-unit batch execution results
   /invitations:
     post:
       operationId: createInvitation
@@ -101,24 +128,86 @@ paths:
   /stores:
     get:
       operationId: listPublishedStores
-      summary: List active published stores from Supabase (supports en and pt-BR localized descriptions)
+      summary: List active published stores from Supabase with search, cuisine filter, and coverage evaluation (M04)
       responses:
         "200":
           description: Paginated published stores
+  /stores/{storeId}/catalog:
+    get:
+      operationId: getStoreCatalog
+      summary: Get store details, operating availability, categories, products, and option groups (M04/M05)
+      responses:
+        "200":
+          description: Store catalog and availability
+  /stores/{storeId}/availability:
+    get:
+      operationId: evaluateStoreAvailabilityAndCoverage
+      summary: Evaluate store operating schedule in America/Sao_Paulo and Haversine radius coverage (M04)
+      responses:
+        "200":
+          description: Store availability and service area eligibility
   /quotes:
     post:
       operationId: calculateQuote
-      summary: Calculate an authoritative server-side quote in integer BRL cents
+      summary: Calculate and persist an authoritative server-side quote in integer BRL cents with TTL (M04/M10)
       responses:
         "201":
           description: Immutable quote snapshot
   /orders:
     post:
       operationId: createOrderFromQuote
-      summary: Create an idempotent order from an unexpired server quote
+      summary: Create an idempotent order from an unexpired, unconsumed server quote (M10)
       responses:
         "201":
           description: Order created
+  /orders/{orderId}:
+    get:
+      operationId: getOrderById
+      summary: Retrieve order details and immutable snapshots for authorized actor (M10)
+      responses:
+        "200":
+          description: Order record
+  /orders/{orderId}/commands:
+    post:
+      operationId: executeOrderStateCommand
+      summary: Execute a state transition command (ACCEPT, REJECT, START_PREPARING, MARK_READY, CANCEL) with expectedVersion optimistic locking (M10)
+      responses:
+        "200":
+          description: Updated order state and appended event
+        "409":
+          description: Optimistic concurrency version conflict or invalid state transition
+  /orders/{orderId}/events:
+    get:
+      operationId: listOrderEvents
+      summary: List append-only order state transition events (M10)
+      responses:
+        "200":
+          description: Ordered list of order events
+  /payments/attempts:
+    post:
+      operationId: createPaymentAttempt
+      summary: Create an idempotent payment attempt or return honest BLOCKED_MISSING_CREDENTIALS error when PSP is unconfigured (M12)
+      responses:
+        "201":
+          description: Payment attempt recorded
+        "503":
+          description: External PSP provider is BLOCKED_MISSING_CREDENTIALS
+  /webhooks/psp/{providerCode}:
+    post:
+      operationId: handlePspWebhook
+      summary: Verify HMAC signature, timestamp replay window, deduplicate event, and reconcile order payment state (M12)
+      responses:
+        "200":
+          description: Webhook processed or deduplicated
+        "401":
+          description: Invalid webhook signature or timestamp outside tolerance window
+  /refunds:
+    post:
+      operationId: createRefund
+      summary: Request or approve a partial/full refund with ABAC ceiling and MFA aal2 verification (M12)
+      responses:
+        "201":
+          description: Refund recorded and reversal ledger entries generated
 components:
   schemas:
     ApiErrorEnvelope:

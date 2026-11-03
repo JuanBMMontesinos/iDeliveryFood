@@ -62,6 +62,9 @@ importers:
       '@ideliveryfood/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@ideliveryfood/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@ideliveryfood/ui-web':
         specifier: workspace:*
         version: link:../../packages/ui-web

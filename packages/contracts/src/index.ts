@@ -94,10 +94,302 @@ export interface PublishedStoreContract {
   timezone: string;
   city: string;
   stateCode: string;
+  latitude?: number;
+  longitude?: number;
   minOrderCents: number;
   prepTimeMinMinutes: number;
   prepTimeMaxMinutes: number;
   supportedModalities: FulfillmentModality[];
+}
+
+export interface StoreOperatingHourContract {
+  dayOfWeek: number; // 0 = Sunday .. 6 = Saturday
+  opensAt: string; // HH:mm:ss
+  closesAt: string; // HH:mm:ss
+  isOvernight: boolean;
+  isClosed: boolean;
+}
+
+export interface StoreHourExceptionContract {
+  exceptionDate: string; // YYYY-MM-DD in America/Sao_Paulo
+  opensAt: string | null;
+  closesAt: string | null;
+  isClosed: boolean;
+  reason: string | null;
+}
+
+export interface StoreServiceAreaContract {
+  id: string;
+  storeId: string;
+  name: string;
+  radiusMeters: number;
+  baseFeeCents: number;
+  perKmFeeCents: number;
+  freeDeliveryMinOrderCents: number | null;
+  estimatedDeliveryMinutes: number;
+  isActive: boolean;
+}
+
+export type StoreAvailabilityReasonCode =
+  | "OPEN"
+  | "STORE_PAUSED"
+  | "STORE_INACTIVE"
+  | "CLOSED_BY_EXCEPTION"
+  | "OUTSIDE_OPERATING_HOURS";
+
+export interface StoreAvailabilityEvaluationContract {
+  storeId: string;
+  isOpen: boolean;
+  reasonCode: StoreAvailabilityReasonCode;
+  evaluatedAtIso: string;
+  operationalTimezone: string;
+}
+
+export type ServiceAreaReasonCode =
+  | "ELIGIBLE"
+  | "PICKUP_NO_RADIUS_REQUIRED"
+  | "NO_ACTIVE_SERVICE_AREA"
+  | "OUT_OF_RANGE";
+
+export interface ServiceAreaEligibilityContract {
+  storeId: string;
+  eligible: boolean;
+  reasonCode: ServiceAreaReasonCode;
+  distanceMeters: number;
+  deliveryFeeCents: number;
+  estimatedDeliveryMinutes: number;
+  matchedServiceAreaId: string | null;
+}
+
+export interface CatalogOptionContract {
+  id: string;
+  nameEn: string;
+  namePtBr: string;
+  localizedName: string;
+  additionalPriceCents: number;
+  isAvailable: boolean;
+  sortOrder: number;
+}
+
+export interface CatalogOptionGroupContract {
+  id: string;
+  nameEn: string;
+  namePtBr: string;
+  localizedName: string;
+  minSelections: number;
+  maxSelections: number;
+  sortOrder: number;
+  options: CatalogOptionContract[];
+}
+
+export interface CatalogProductContract {
+  id: string;
+  storeId: string;
+  categoryId: string;
+  sku: string | null;
+  nameEn: string;
+  namePtBr: string;
+  localizedName: string;
+  descriptionEn: string;
+  descriptionPtBr: string;
+  localizedDescription: string;
+  priceCents: number;
+  isAvailable: boolean;
+  isPaused: boolean;
+  maxPerOrder: number;
+  unitOfMeasure: "UNIT" | "GRAM" | "KG";
+  optionGroups: CatalogOptionGroupContract[];
+}
+
+export interface CatalogCategoryContract {
+  id: string;
+  storeId: string;
+  nameEn: string;
+  namePtBr: string;
+  localizedName: string;
+  sortOrder: number;
+  isActive: boolean;
+  products: CatalogProductContract[];
+}
+
+export interface StoreCatalogResponseContract {
+  store: PublishedStoreContract;
+  availability: StoreAvailabilityEvaluationContract;
+  categories: CatalogCategoryContract[];
+}
+
+export interface CustomerAddressContract {
+  id: string;
+  userId: string;
+  label: string;
+  recipientName: string;
+  streetLine: string;
+  number: string;
+  complement: string | null;
+  neighborhood: string;
+  city: string;
+  stateCode: string;
+  postalCode: string;
+  latitude: number;
+  longitude: number;
+  deliveryInstructions: string | null;
+  isDefault: boolean;
+}
+
+export interface CartOptionSelectionContract {
+  optionGroupId: string;
+  optionId: string;
+  quantity: number;
+}
+
+export interface CartItemSelectionContract {
+  productId: string;
+  quantity: number;
+  selectedOptions: CartOptionSelectionContract[];
+  notes?: string;
+}
+
+export interface QuoteItemSnapshotContract {
+  productId: string;
+  productNameEn: string;
+  productNamePtBr: string;
+  quantity: number;
+  unitPriceCents: number;
+  addonsUnitPriceCents: number;
+  totalLineCents: number;
+  notes?: string;
+  selectedOptions: Array<{
+    optionId: string;
+    optionNameEn: string;
+    optionNamePtBr: string;
+    quantity: number;
+    additionalPriceCents: number;
+  }>;
+}
+
+export interface ServerQuoteRecordContract {
+  id: string;
+  customerId: string;
+  storeId: string;
+  addressId: string | null;
+  fulfillmentModality: FulfillmentModality;
+  promotionCode: string | null;
+  currencyCode: typeof CURRENCY_CODE;
+  subtotalCents: number;
+  addonsCents: number;
+  serviceFeeCents: number;
+  deliveryFeeCents: number;
+  discountCents: number;
+  totalCents: number;
+  distanceMeters: number;
+  estimatedPrepMinutes: number;
+  estimatedDeliveryMinutes: number;
+  itemsSnapshot: QuoteItemSnapshotContract[];
+  addressSnapshot: Record<string, unknown> | null;
+  idempotencyKey: string;
+  expiresAtIso: string;
+  consumedAtIso: string | null;
+  createdAtIso: string;
+}
+
+export interface OrderRecordContract {
+  id: string;
+  orderNumber: number;
+  customerId: string;
+  organizationId: string;
+  storeId: string;
+  quoteId: string;
+  fulfillmentModality: FulfillmentModality;
+  orderStatus: string;
+  paymentStatus: string;
+  deliveryStatus: string;
+  currencyCode: typeof CURRENCY_CODE;
+  subtotalCents: number;
+  addonsCents: number;
+  serviceFeeCents: number;
+  deliveryFeeCents: number;
+  discountCents: number;
+  totalCents: number;
+  platformCommissionCents: number;
+  merchantNetCents: number;
+  courierEarningsCents: number;
+  deliveryAddressSnapshot: Record<string, unknown> | null;
+  itemsSnapshot: QuoteItemSnapshotContract[];
+  customerNotes: string | null;
+  cancellationReason: string | null;
+  cancelledByRole: string | null;
+  version: number;
+  idempotencyKey: string;
+  acceptedAtIso: string | null;
+  readyAtIso: string | null;
+  deliveredAtIso: string | null;
+  cancelledAtIso: string | null;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface OrderEventRecordContract {
+  id: string;
+  orderId: string;
+  actorId: string | null;
+  actorRole: string;
+  eventType: string;
+  previousOrderStatus: string | null;
+  newOrderStatus: string;
+  previousPaymentStatus: string | null;
+  newPaymentStatus: string | null;
+  previousDeliveryStatus: string | null;
+  newDeliveryStatus: string | null;
+  idempotencyKey: string;
+  payload: Record<string, unknown>;
+  createdAtIso: string;
+}
+
+export type PaymentMethodCode = "PIX" | "CREDIT_CARD" | "DEBIT_CARD";
+
+export interface PaymentAttemptContract {
+  id: string;
+  orderId: string;
+  customerId: string;
+  providerCode: string;
+  paymentMethod: PaymentMethodCode;
+  amountCents: number;
+  currencyCode: typeof CURRENCY_CODE;
+  status: string;
+  externalPaymentId: string | null;
+  idempotencyKey: string;
+  isSandbox: boolean;
+  errorCode: string | null;
+  createdAtIso: string;
+}
+
+export interface RefundRecordContract {
+  id: string;
+  orderId: string;
+  paymentAttemptId: string;
+  amountCents: number;
+  reason: string;
+  requestedBy: string;
+  approvedBy: string | null;
+  status: "PENDING_APPROVAL" | "APPROVED" | "PROCESSED" | "FAILED" | "REJECTED";
+  idempotencyKey: string;
+  createdAtIso: string;
+}
+
+export interface MultiUnitStoreSummaryContract {
+  storeId: string;
+  storeName: string;
+  isPublished: boolean;
+  isPaused: boolean;
+  activeOrderCount: number;
+  grossMerchandiseCents: number;
+}
+
+export interface BatchCatalogUpdateItemResultContract {
+  storeId: string;
+  productId: string;
+  status: "APPLIED" | "DENIED_SCOPE" | "NOT_FOUND";
+  reasonCode: string;
 }
 
 export interface UserPreferencesContract {
@@ -212,11 +504,32 @@ export const I18N_MESSAGES = {
     "marketplace.stores.heading": "Available Restaurants ({count})",
     "marketplace.stores.min_order": "Min. order: {amount}",
     "marketplace.stores.prep_time": "{min}-{max} min",
+    "marketplace.store.open": "Open now",
+    "marketplace.store.closed": "Closed ({reason})",
+    "marketplace.store.paused": "Temporarily paused",
+    "marketplace.store.out_of_range": "Outside delivery coverage ({distance}m)",
+    "marketplace.store.free_delivery": "Free delivery",
     "marketplace.modality.platform_delivery": "Platform Delivery",
     "marketplace.modality.merchant_delivery": "Store Delivery",
     "marketplace.modality.pickup": "Pickup at Store",
+    "catalog.option_group.required": "Required ({min} to {max})",
+    "catalog.option_group.optional": "Optional (up to {max})",
+    "catalog.product.unavailable": "Currently unavailable",
+    "cart.switch_store.confirm_title": "Start a new basket at {newStoreName}?",
+    "cart.switch_store.confirm_body": "Your current basket contains items from {currentStoreName}. Confirming will replace your basket.",
+    "cart.empty": "Your basket is empty.",
+    "checkout.quote.expired": "Your quote expired at {expiresAt}. Please refresh before placing the order.",
+    "checkout.psp.blocked_notice": "Online payment capture via {providerCode} is blocked in this environment ({missingVars}). Real payment credentials are required.",
+    "checkout.total.label": "Order Total: {amount}",
+    "order.status.created": "Order Created",
+    "order.status.preparing": "Kitchen is preparing your order",
+    "order.status.ready_for_pickup": "Order is ready for pickup",
+    "order.status.delivered": "Order delivered",
+    "order.status.cancelled": "Order cancelled ({reason})",
+    "order.cancel.window_expired": "Direct self-service cancellation window ({seconds}s) has elapsed or kitchen already started preparation.",
     "partner.portal.title": "Partner Portal — Store Operations & Catalog",
     "partner.finance.segregated_notice": "Financial ledger and settlements are restricted to Partner Owner and Partner Finance roles.",
+    "partner.multi_unit.batch_summary": "Batch catalog update: {applied} applied, {denied} denied across {total} unit targets.",
     "admin.portal.title": "Admin Backoffice — Governance, RBAC & Provider Status",
     "admin.providers.blocked_badge": "BLOCKED: Missing external credentials ({vars})",
     "courier.app.title": "iDeliveryFood Courier",
@@ -244,11 +557,32 @@ export const I18N_MESSAGES = {
     "marketplace.stores.heading": "Restaurantes Disponíveis ({count})",
     "marketplace.stores.min_order": "Pedido mín.: {amount}",
     "marketplace.stores.prep_time": "{min}-{max} min",
+    "marketplace.store.open": "Aberto agora",
+    "marketplace.store.closed": "Fechado ({reason})",
+    "marketplace.store.paused": "Pausado temporariamente",
+    "marketplace.store.out_of_range": "Fora da área de entrega ({distance}m)",
+    "marketplace.store.free_delivery": "Entrega grátis",
     "marketplace.modality.platform_delivery": "Entrega Parceira da Plataforma",
     "marketplace.modality.merchant_delivery": "Entrega Própria da Loja",
     "marketplace.modality.pickup": "Retirada na Loja",
+    "catalog.option_group.required": "Obrigatório ({min} a {max})",
+    "catalog.option_group.optional": "Opcional (até {max})",
+    "catalog.product.unavailable": "Indisponível no momento",
+    "cart.switch_store.confirm_title": "Iniciar uma nova sacola em {newStoreName}?",
+    "cart.switch_store.confirm_body": "Sua sacola atual contém itens de {currentStoreName}. Ao confirmar, sua sacola será substituída.",
+    "cart.empty": "Sua sacola está vazia.",
+    "checkout.quote.expired": "Sua cotação expirou às {expiresAt}. Atualize antes de confirmar o pedido.",
+    "checkout.psp.blocked_notice": "A captura de pagamento online via {providerCode} está bloqueada neste ambiente ({missingVars}). Credenciais reais são necessárias.",
+    "checkout.total.label": "Total do Pedido: {amount}",
+    "order.status.created": "Pedido Criado",
+    "order.status.preparing": "A cozinha está preparando seu pedido",
+    "order.status.ready_for_pickup": "Pedido pronto para retirada",
+    "order.status.delivered": "Pedido entregue",
+    "order.status.cancelled": "Pedido cancelado ({reason})",
+    "order.cancel.window_expired": "A janela de cancelamento direto ({seconds}s) expirou ou a cozinha já iniciou o preparo.",
     "partner.portal.title": "Portal do Parceiro — Operação de Loja e Catálogo",
     "partner.finance.segregated_notice": "O livro-razão e os repasses financeiros são restritos aos papéis de Proprietário e Financeiro.",
+    "partner.multi_unit.batch_summary": "Atualização em lote do catálogo: {applied} aplicadas, {denied} negadas em {total} unidades.",
     "admin.portal.title": "Backoffice Admin — Governança, RBAC e Status de Provedores",
     "admin.providers.blocked_badge": "BLOQUEADO: Credenciais externas ausentes ({vars})",
     "courier.app.title": "iDeliveryFood Entregador",

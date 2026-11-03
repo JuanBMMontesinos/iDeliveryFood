@@ -84,7 +84,7 @@ describe("@ideliveryfood/contracts — i18n, Money, Timezone & OpenAPI Contract 
     assert.throws(() => assertIntegerCents(-100), /INVALID_MONETARY_CENTS/);
   });
 
-  it("verifies OpenAPI 3.1 specification exists and defines mandatory /v1 endpoints", () => {
+  it("verifies OpenAPI 3.1 specification exists and defines mandatory Fase A + Fase B /v1 endpoints", () => {
     const specPath = path.resolve(process.cwd(), "openapi/v1.yaml");
     assert.equal(fs.existsSync(specPath), true, "openapi/v1.yaml must exist");
     const content = fs.readFileSync(specPath, "utf8");
@@ -94,11 +94,21 @@ describe("@ideliveryfood/contracts — i18n, Money, Timezone & OpenAPI Contract 
     assert.match(content, /\/system\/providers:/);
     assert.match(content, /\/me:/);
     assert.match(content, /\/me\/preferences:/);
+    assert.match(content, /\/me\/addresses:/);
     assert.match(content, /\/organizations\/\{orgId\}\/members:/);
+    assert.match(content, /\/organizations\/\{orgId\}\/units-summary:/);
+    assert.match(content, /\/organizations\/\{orgId\}\/catalog-batch:/);
     assert.match(content, /\/invitations:/);
     assert.match(content, /\/onboarding\/approvals:/);
     assert.match(content, /\/stores:/);
+    assert.match(content, /\/stores\/\{storeId\}\/catalog:/);
+    assert.match(content, /\/stores\/\{storeId\}\/availability:/);
     assert.match(content, /\/quotes:/);
     assert.match(content, /\/orders:/);
+    assert.match(content, /\/orders\/\{orderId\}\/commands:/);
+    assert.match(content, /\/orders\/\{orderId\}\/events:/);
+    assert.match(content, /\/payments\/attempts:/);
+    assert.match(content, /\/webhooks\/psp\/\{providerCode\}:/);
+    assert.match(content, /\/refunds:/);
   });
 });

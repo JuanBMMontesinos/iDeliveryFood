@@ -54,6 +54,15 @@ describe("@ideliveryfood/api-client — Typed /v1 Client, Correlation ID & Idemp
     );
 
     await assert.rejects(
+      () =>
+        client.createOrderFromQuote({
+          quoteId: "quote_123",
+          idempotencyKey: "short",
+        }),
+      /IDEMPOTENCY_KEY_REQUIRED/
+    );
+
+    await assert.rejects(
       () => client.listPublishedStores(),
       (err: unknown) => {
         assert.ok(err instanceof IDeliveryApiError);

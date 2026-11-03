@@ -1,7 +1,7 @@
 -- ============================================================================
 -- iDeliveryFood — Automated RLS, Multi-Tenant Isolation & Constraints Suite
 -- ============================================================================
--- Executes inside a transaction and verifies all 10 security & data invariants:
+-- Executes inside a transaction and verifies all 13 security & Fase A/B invariants:
 -- 1. 100% of public tables have RLS enabled (46/46 tables).
 -- 2. Anonymous actor (anon) only sees published stores (2/3) and 0 private rows.
 -- 3. Consumer actor (Alice) sees only own profile, address, and order; 0 from Bruno.
@@ -10,14 +10,18 @@
 -- 6. Partner Finance (Clara, Org 101) sees Org 101 payable ledger account and 0 platform/courier accounts.
 -- 7. Courier (Carlos) sees assigned delivery task and own courier ledger account.
 -- 8. Staff Finance (Roberto) is denied ledger_journals at aal1 and granted at aal2 (MFA step-up).
--- 9. Append-only tables reject UPDATE/DELETE with 23514.
+-- 9. Append-only tables reject UPDATE/DELETE with 23514 / 42501.
 -- 10. Double-entry ledger trigger rejects unbalanced journal postings with 23514.
+-- 11. Haversine distance helper (app_security.calculate_distance_meters) computes accurate distance in meters.
+-- 12. Security-invoker catalog view (public.store_catalog_v) exposes published products & option groups.
+-- 13. Webhook event log (public.payment_provider_events) enforces (provider_code, external_event_id) deduplication.
 -- ============================================================================
 
 DO $$
 DECLARE
   v_unprotected_tables integer;
   v_count integer;
+  v_distance_meters integer;
   v_caught_error boolean;
 BEGIN
   -- 1. Verify 100% of tables in public have RLS enabled
@@ -47,6 +51,19 @@ BEGIN
   SELECT count(*) INTO v_count FROM public.orders;
   IF v_count <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED [anon orders]: expected 0 orders, got %', v_count;
+  END IF;
+
+  -- 11. Verify Haversine distance calculation between Store 201 and Alice's address
+  SELECT app_security.calculate_distance_meters(-23.561414, -46.655881, -23.563980, -46.669120)
+  INTO v_distance_meters;
+  IF v_distance_meters < 1300 OR v_distance_meters > 1500 THEN
+    RAISE EXCEPTION 'TEST FAILED [Haversine distance]: expected ~1379m, got %', v_distance_meters;
+  END IF;
+
+  -- 12. Verify public.store_catalog_v under ANON role
+  SELECT count(*) INTO v_count FROM public.store_catalog_v;
+  IF v_count <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED [anon store_catalog_v]: expected 3 published products, got %', v_count;
   END IF;
 
   -- 3. Test as Consumer Alice (00000000-0000-4000-8000-000000000001)
@@ -197,7 +214,23 @@ BEGIN
   IF NOT v_caught_error THEN
     RAISE EXCEPTION 'TEST FAILED [Unbalanced Ledger]: expected check_violation (23514)';
   END IF;
+
+  -- 13. Test Webhook Deduplication uniqueness (provider_code, external_event_id)
+  v_caught_error := false;
+  BEGIN
+    INSERT INTO public.payment_provider_events (provider_code, external_event_id, event_type, signature_verified, is_test_data)
+    VALUES ('stripe', 'evt_dedup_test_001', 'payment_intent.succeeded', true, true);
+
+    INSERT INTO public.payment_provider_events (provider_code, external_event_id, event_type, signature_verified, is_test_data)
+    VALUES ('stripe', 'evt_dedup_test_001', 'payment_intent.succeeded', true, true);
+  EXCEPTION WHEN unique_violation THEN
+    v_caught_error := true;
+  END;
+
+  IF NOT v_caught_error THEN
+    RAISE EXCEPTION 'TEST FAILED [Webhook Deduplication]: expected unique_violation (23505)';
+  END IF;
 END;
 $$;
 
-SELECT 'ALL_10_SECURITY_AND_RLS_INVARIANTS_PASSED' AS verification_status;
+SELECT 'ALL_13_SECURITY_AND_FASE_B_INVARIANTS_PASSED' AS verification_status;
