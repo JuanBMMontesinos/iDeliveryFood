@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">iDeliveryFood</string>
+    <string name="auth_sign_in_title">Sign in to your account</string>
+    <string name="auth_locale_label">Language</string>
+    <string name="auth_locale_en">English (Default)</string>
+    <string name="auth_locale_pt_br">Português (Brasil)</string>
+    <string name="state_loading">Loading live data from platform...</string>
+    <string name="state_empty">No restaurants available in your area right now.</string>
+    <string name="state_error">Unable to complete request. Please try again.</string>
+    <string name="state_offline">You are offline. Reconnecting automatically...</string>
+    <string name="privacy_delete_account">Request account deletion (LGPD)</string>
+</resources>

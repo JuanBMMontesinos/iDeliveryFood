@@ -1,0 +1,62 @@
+{
+  "sourceLanguage": "en",
+  "version": "1.0",
+  "strings": {
+    "app_name": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "iDeliveryFood" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "iDeliveryFood" } }
+      }
+    },
+    "auth_sign_in_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sign in to your account" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Entre na sua conta" } }
+      }
+    },
+    "auth_locale_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Language" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Idioma" } }
+      }
+    },
+    "state_loading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Loading live data from platform..." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Carregando dados em tempo real da plataforma..." } }
+      }
+    },
+    "state_empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No restaurants available in your area right now." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Nenhum restaurante disponível na sua região no momento." } }
+      }
+    },
+    "state_error": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Unable to complete request. Please try again." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Não foi possível concluir a solicitação. Tente novamente." } }
+      }
+    },
+    "state_offline": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "You are offline. Reconnecting automatically..." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Você está sem conexão. Reconectando automaticamente..." } }
+      }
+    },
+    "privacy_delete_account": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Request account deletion (LGPD)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Solicitar exclusão de conta (LGPD)" } }
+      }
+    }
+  }
+}

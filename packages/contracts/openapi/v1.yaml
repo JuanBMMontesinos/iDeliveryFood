@@ -1,0 +1,147 @@
+openapi: 3.1.0
+info:
+  title: iDeliveryFood Platform API
+  version: 1.0.0
+  description: >
+    Versioned HTTP API (/v1) for the iDeliveryFood multi-tenant food delivery marketplace.
+    Enforces integer cents (BRL), America/Sao_Paulo operational timezone, i18n (en default, pt-BR),
+    strict RBAC/ABAC/RLS, and MFA aal2 step-up for sensitive mutations.
+servers:
+  - url: http://localhost:4000/v1
+    description: Local Development API
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Process is alive
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Readiness probe including Supabase connectivity and external provider status
+      responses:
+        "200":
+          description: Service readiness report
+  /system/providers:
+    get:
+      operationId: listProviderStatuses
+      summary: Honest readiness status for pre-configured external providers (PSP, Maps, Push, Email)
+      responses:
+        "200":
+          description: Provider readiness list
+  /me:
+    get:
+      operationId: getCurrentProfile
+      summary: Get authenticated actor profile, active tenant memberships, and staff scopes
+      responses:
+        "200":
+          description: Authenticated profile envelope
+        "401":
+          description: Unauthenticated
+  /me/preferences:
+    patch:
+      operationId: updateMyPreferences
+      summary: Update user locale (en or pt-BR) and notification preferences in Supabase
+      responses:
+        "200":
+          description: Updated preferences
+  /me/devices/revoke:
+    post:
+      operationId: revokeUserDevice
+      summary: Revoke a registered device session and push token
+      responses:
+        "200":
+          description: Device revoked
+  /me/privacy-requests:
+    post:
+      operationId: createPrivacyRequest
+      summary: Submit LGPD export, anonymization, or account deletion request (checks legal hold)
+      responses:
+        "201":
+          description: Privacy request recorded
+  /organizations/{orgId}/members:
+    get:
+      operationId: listOrganizationMembers
+      summary: List members scoped to a merchant organization
+      parameters:
+        - name: orgId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Scoped organization members
+        "403":
+          description: Cross-tenant access denied
+  /invitations:
+    post:
+      operationId: createInvitation
+      summary: Issue a single-use expiring invitation for partner or staff membership
+      responses:
+        "201":
+          description: Invitation created
+  /invitations/accept:
+    post:
+      operationId: acceptInvitation
+      summary: Consume a valid single-use invitation token
+      responses:
+        "200":
+          description: Invitation accepted
+  /onboarding/approvals:
+    post:
+      operationId: recordOnboardingApproval
+      summary: Approve, reject, or suspend a merchant store or courier (requires staff MFA aal2)
+      responses:
+        "200":
+          description: Approval decision recorded and audited
+  /stores:
+    get:
+      operationId: listPublishedStores
+      summary: List active published stores from Supabase (supports en and pt-BR localized descriptions)
+      responses:
+        "200":
+          description: Paginated published stores
+  /quotes:
+    post:
+      operationId: calculateQuote
+      summary: Calculate an authoritative server-side quote in integer BRL cents
+      responses:
+        "201":
+          description: Immutable quote snapshot
+  /orders:
+    post:
+      operationId: createOrderFromQuote
+      summary: Create an idempotent order from an unexpired server quote
+      responses:
+        "201":
+          description: Order created
+components:
+  schemas:
+    ApiErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - correlationId
+            - timestamp
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlationId:
+              type: string
+            timestamp:
+              type: string
+              format: date-time
+            details:
+              type: object

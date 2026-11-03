@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="courier_app_name">iDeliveryFood Entregador</string>
+    <string name="courier_status_online">Online — Pronto para ofertas de entrega</string>
+    <string name="courier_status_offline">Offline</string>
+    <string name="courier_pending_approval">Seu cadastro de entregador aguarda aprovação de KYC.</string>
+    <string name="courier_locale_label">Idioma</string>
+    <string name="courier_locale_en">English (Padrão)</string>
+    <string name="courier_locale_pt_br">Português (Brasil)</string>
+    <string name="state_loading">Carregando tarefas de entrega...</string>
+    <string name="state_error">Não foi possível sincronizar o estado do entregador.</string>
+    <string name="state_offline">Sem conexão. Amostras de localização enfileiradas localmente.</string>
+</resources>

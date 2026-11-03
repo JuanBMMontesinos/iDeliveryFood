@@ -1,0 +1,62 @@
+{
+  "sourceLanguage": "en",
+  "version": "1.0",
+  "strings": {
+    "courier_app_name": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "iDeliveryFood Courier" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "iDeliveryFood Entregador" } }
+      }
+    },
+    "courier_status_online": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Online — Ready for dispatch offers" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Online — Pronto para ofertas de entrega" } }
+      }
+    },
+    "courier_status_offline": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Offline" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Offline" } }
+      }
+    },
+    "courier_pending_approval": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Your courier profile is pending KYC approval." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Seu cadastro de entregador aguarda aprovação de KYC." } }
+      }
+    },
+    "courier_locale_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Language" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Idioma" } }
+      }
+    },
+    "state_loading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Loading dispatch tasks..." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Carregando tarefas de entrega..." } }
+      }
+    },
+    "state_error": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Unable to sync courier state." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Não foi possível sincronizar o estado do entregador." } }
+      }
+    },
+    "state_offline": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No network connection. Location samples queued locally." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Sem conexão. Amostras de localização enfileiradas localmente." } }
+      }
+    }
+  }
+}

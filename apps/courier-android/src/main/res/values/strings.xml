@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="courier_app_name">iDeliveryFood Courier</string>
+    <string name="courier_status_online">Online — Ready for dispatch offers</string>
+    <string name="courier_status_offline">Offline</string>
+    <string name="courier_pending_approval">Your courier profile is pending KYC approval.</string>
+    <string name="courier_locale_label">Language</string>
+    <string name="courier_locale_en">English (Default)</string>
+    <string name="courier_locale_pt_br">Português (Brasil)</string>
+    <string name="state_loading">Loading dispatch tasks...</string>
+    <string name="state_error">Unable to sync courier state.</string>
+    <string name="state_offline">No network connection. Location samples queued locally.</string>
+</resources>

@@ -1,0 +1,44 @@
+name: iDeliveryFood CI — Lint, Typecheck, Security Scan & Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-monorepo:
+    name: Web, API, Worker & Shared Packages Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.1
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Run repository secret and .env leakage scan
+        run: pnpm security:scan
+
+      - name: Run Typecheck & Lint across all packages and apps
+        run: pnpm lint && pnpm typecheck
+
+      - name: Run Unit, Contract, i18n Parity & Integration Tests
+        run: pnpm test
+
+      - name: Build all packages and applications
+        run: pnpm build

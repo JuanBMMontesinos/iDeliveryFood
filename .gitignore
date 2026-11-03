@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Environment variables & secrets (NEVER commit secrets)
+.env
+.env.*
+!.env.example
+**/local.properties
+**/*.keystore
+**/*.jks
+**/*.p12
+**/*.mobileprovision
+**/GoogleService-Info.plist
+**/google-services.json
+
+# Android / Gradle
+.gradle/
+**/build/
+.idea/
+*.iml
+
+# iOS / Xcode / SwiftPM
+.build/
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Supabase local temp
+supabase/.branches/
+supabase/.temp/
+
+# Logs & OS
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
