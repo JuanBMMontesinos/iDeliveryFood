@@ -208,6 +208,48 @@ paths:
       responses:
         "201":
           description: Refund recorded and reversal ledger entries generated
+  /stores/{storeId}/settings:
+    patch:
+      operationId: updateStoreSettings
+      summary: Update store pause status, prep time bounds, and minimum order in BRL cents (M07)
+      responses:
+        "200":
+          description: Store settings updated
+  /stores/{storeId}/bank-account-change-request:
+    post:
+      operationId: requestBankAccountChange
+      summary: Submit a PENDING bank account change request requiring partner_owner + MFA aal2 (M07)
+      responses:
+        "201":
+          description: Pending bank account approval request recorded
+  /stores/{storeId}/orders-queue:
+    get:
+      operationId: getStoreOrdersQueue
+      summary: Retrieve live kitchen order console queue with SLA countdowns and pause resilience (M08)
+      responses:
+        "200":
+          description: Kitchen order queue grouped by operational column
+  /admin/staff-scopes:
+    post:
+      operationId: grantStaffScope
+      summary: Grant a staff role scope (requires tech_admin + MFA aal2 + justification; blocks self-grant) (M16)
+      responses:
+        "201":
+          description: Staff scope granted and audited
+  /admin/governance-actions:
+    post:
+      operationId: executeAdminGovernanceAction
+      summary: Execute approval, rejection, suspension, or reactivation decision with MFA aal2 (M16)
+      responses:
+        "201":
+          description: Governance decision recorded in immutable audit trail
+  /admin/audit-logs:
+    get:
+      operationId: listAdminAuditLogs
+      summary: Retrieve read-only immutable audit logs for authorized compliance/admin roles (M16)
+      responses:
+        "200":
+          description: List of audit log records
 components:
   schemas:
     ApiErrorEnvelope:

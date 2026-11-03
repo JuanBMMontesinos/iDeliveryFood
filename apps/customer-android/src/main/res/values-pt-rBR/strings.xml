@@ -9,5 +9,11 @@
     <string name="state_empty">Nenhum restaurante disponível na sua região no momento.</string>
     <string name="state_error">Não foi possível concluir a solicitação. Tente novamente.</string>
     <string name="state_offline">Você está sem conexão. Reconectando automaticamente...</string>
+    <string name="offline_stale_cache_banner">Modo offline: exibindo catálogo em cache. Preços em tempo real e checkout exigem conexão ativa.</string>
+    <string name="marketplace_stores_heading">Restaurantes Disponíveis</string>
+    <string name="cart_switch_store_title">Iniciar uma nova sacola em outra loja?</string>
+    <string name="cart_switch_store_body">Sua sacola atual possui itens de outro restaurante. Ao confirmar, sua sacola será substituída.</string>
+    <string name="checkout_psp_blocked_notice">A captura de pagamento online está bloqueada neste ambiente por ausência de credenciais do PSP.</string>
+    <string name="order_cancel_window_expired">A janela de cancelamento direto expirou ou a cozinha já iniciou o preparo.</string>
     <string name="privacy_delete_account">Solicitar exclusão de conta (LGPD)</string>
 </resources>

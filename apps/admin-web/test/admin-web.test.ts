@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AuthenticatedActorProfileContract } from "@ideliveryfood/contracts";
-import { buildAdminGovernanceScreenModel } from "../src/index.js";
+import {
+  buildAdminAuditTrailExplorerModel,
+  buildAdminGovernanceScreenModel,
+  buildAdminRoleNavigationModules,
+  executeAdminCadastreGovernanceAction,
+  executeAdminStaffScopeGrant,
+} from "../src/index.js";
 
 describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider Status Tests", () => {
   const staffAdminAal1: AuthenticatedActorProfileContract = {
@@ -62,5 +68,95 @@ describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider 
       screenPt.providerCards[0]?.blockedBadgeText ?? "",
       /BLOQUEADO: Credenciais externas ausentes \(STRIPE_SECRET_KEY/
     );
+  });
+
+  it("segregates M16 navigation modules by staff role and blocks self-grant of administrative scopes", () => {
+    const supportAgent: AuthenticatedActorProfileContract = {
+      ...staffAdminAal1,
+      id: "00000000-0000-4000-8000-000000000095",
+      aal: "aal2",
+      staffScopes: [
+        {
+          role: "support_l1",
+          regionCode: "SP",
+          maxRefundApprovalCents: 2500,
+          requiresMfa: false,
+        },
+      ],
+    };
+
+    const supportModules = buildAdminRoleNavigationModules(supportAgent);
+    assert.deepEqual(supportModules, ["SUPPORT_AND_DISPUTES"]);
+
+    const techAdminAal2: AuthenticatedActorProfileContract = {
+      ...staffAdminAal1,
+      aal: "aal2",
+    };
+
+    // Self-grant attempt must be blocked
+    const selfGrantAttempt = executeAdminStaffScopeGrant({
+      actor: techAdminAal2,
+      request: {
+        targetUserId: techAdminAal2.id,
+        role: "finance",
+        regionCode: null,
+        maxRefundApprovalCents: 500000,
+        justification: "Attempting to grant finance scope to myself",
+      },
+      locale: "pt-BR",
+    });
+
+    assert.equal(selfGrantAttempt.allowed, false);
+    assert.equal(selfGrantAttempt.reasonCode, "DENIED_SELF_GRANT_FORBIDDEN");
+    assert.match(selfGrantAttempt.errorMessage ?? "", /Autoconcessão bloqueada/);
+
+    // Granting to another staff user with MFA aal2 + justification succeeds
+    const validGrant = executeAdminStaffScopeGrant({
+      actor: techAdminAal2,
+      request: {
+        targetUserId: supportAgent.id,
+        role: "support_l2",
+        regionCode: "SP",
+        maxRefundApprovalCents: 10000,
+        justification: "Promoted to L2 support lead for São Paulo region",
+      },
+    });
+    assert.equal(validGrant.allowed, true);
+  });
+
+  it("enforces mandatory justification and MFA aal2 for M16 cadastre suspensions and read-only audit logs", () => {
+    const techAdminAal2: AuthenticatedActorProfileContract = {
+      ...staffAdminAal1,
+      aal: "aal2",
+    };
+
+    assert.throws(() =>
+      executeAdminCadastreGovernanceAction({
+        actor: techAdminAal2,
+        targetType: "STORE",
+        targetId: "00000000-0000-4000-8000-000000000201",
+        decision: "SUSPENDED",
+        reason: "bad", // too short (< 5 chars)
+      })
+    );
+
+    const suspended = executeAdminCadastreGovernanceAction({
+      actor: techAdminAal2,
+      targetType: "STORE",
+      targetId: "00000000-0000-4000-8000-000000000201",
+      decision: "SUSPENDED",
+      reason: "Health inspection document expired; awaiting renewal.",
+    });
+    assert.equal(suspended.decision, "SUSPENDED");
+
+    const auditExplorer = buildAdminAuditTrailExplorerModel({
+      actor: techAdminAal2,
+      logs: [{ id: "aud_1", action: "ADMIN_GOVERNANCE_SUSPENDED" }],
+      locale: "en",
+    });
+    assert.equal(auditExplorer.authorized, true);
+    assert.equal(auditExplorer.isReadOnly, true);
+    assert.equal(auditExplorer.allowMutationOrDelete, false);
+    assert.equal(auditExplorer.visibleLogs.length, 1);
   });
 });

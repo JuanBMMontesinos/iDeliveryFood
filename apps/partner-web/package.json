@@ -10,6 +10,7 @@
     "@ideliveryfood/authz": "workspace:*",
     "@ideliveryfood/config": "workspace:*",
     "@ideliveryfood/contracts": "workspace:*",
+    "@ideliveryfood/domain": "workspace:*",
     "@ideliveryfood/ui-web": "workspace:*"
   },
   "scripts": {

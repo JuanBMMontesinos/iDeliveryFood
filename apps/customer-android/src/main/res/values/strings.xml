@@ -9,5 +9,11 @@
     <string name="state_empty">No restaurants available in your area right now.</string>
     <string name="state_error">Unable to complete request. Please try again.</string>
     <string name="state_offline">You are offline. Reconnecting automatically...</string>
+    <string name="offline_stale_cache_banner">Offline mode: displaying cached catalog. Live prices and checkout require an active connection.</string>
+    <string name="marketplace_stores_heading">Available Restaurants</string>
+    <string name="cart_switch_store_title">Start a new basket at another store?</string>
+    <string name="cart_switch_store_body">Your current basket has items from another restaurant. Confirming will replace your basket.</string>
+    <string name="checkout_psp_blocked_notice">Online payment capture is blocked in this environment due to missing PSP credentials.</string>
+    <string name="order_cancel_window_expired">Direct self-service cancellation window has elapsed or kitchen already started preparation.</string>
     <string name="privacy_delete_account">Request account deletion (LGPD)</string>
 </resources>

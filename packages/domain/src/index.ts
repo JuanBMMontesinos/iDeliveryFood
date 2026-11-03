@@ -3,19 +3,27 @@ import {
   CURRENCY_CODE,
   OPERATIONAL_TIMEZONE,
   assertIntegerCents,
+  type AdminGovernanceActionContract,
+  type AdminStaffScopeGrantRequestContract,
+  type BankAccountChangeRequestContract,
   type CartItemSelectionContract,
   type CatalogProductContract,
   type FulfillmentModality,
+  type KitchenOrderCardContract,
+  type KitchenQueueColumnStatus,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type ProviderReadinessStatus,
   type QuoteItemSnapshotContract,
   type ServerQuoteRecordContract,
   type ServiceAreaEligibilityContract,
+  type StaffRole,
   type StoreAvailabilityEvaluationContract,
   type StoreHourExceptionContract,
   type StoreOperatingHourContract,
+  type StoreOrdersQueueResponseContract,
   type StoreServiceAreaContract,
+  type StoreSettingsPatchContract,
 } from "@ideliveryfood/contracts";
 
 export type OrderStatus =
@@ -1394,4 +1402,323 @@ export function assertExternalProviderReady(params: {
       `PROVIDER_BLOCKED [${params.providerCode}]: External provider is ${params.status}. Missing credentials: ${params.missingEnvVars.join(", ")}`
     );
   }
+}
+
+// ============================================================================
+// M07: Partner Store Settings Validation & Bank Account Step-Up Approval Guard
+// ============================================================================
+
+/**
+ * Validates store settings updates (pause reason, integer minOrderCents, prep time bounds) (M07).
+ */
+export function validateStoreSettingsPatch(
+  patch: StoreSettingsPatchContract
+): StoreSettingsPatchContract {
+  if (patch.minOrderCents !== undefined) {
+    assertIntegerCents(patch.minOrderCents, "minOrderCents");
+  }
+  if (patch.prepTimeMinMinutes !== undefined) {
+    if (!Number.isSafeInteger(patch.prepTimeMinMinutes) || patch.prepTimeMinMinutes <= 0) {
+      throw new Error("STORE_SETTINGS_INVALID_PREP_TIME: prepTimeMinMinutes must be > 0.");
+    }
+  }
+  if (patch.prepTimeMaxMinutes !== undefined) {
+    const min = patch.prepTimeMinMinutes ?? 1;
+    if (!Number.isSafeInteger(patch.prepTimeMaxMinutes) || patch.prepTimeMaxMinutes < min) {
+      throw new Error(
+        "STORE_SETTINGS_INVALID_PREP_TIME: prepTimeMaxMinutes must be >= prepTimeMinMinutes."
+      );
+    }
+  }
+  if (patch.isPaused === true && (!patch.pauseReason || patch.pauseReason.trim().length < 3)) {
+    throw new Error(
+      "STORE_PAUSE_REASON_REQUIRED: A structured pauseReason is required when pausing a store."
+    );
+  }
+  return patch;
+}
+
+/**
+ * Creates a PENDING bank account change request requiring step-up MFA (aal2) and compliance approval.
+ * Never triggers immediate financial liquidation or stores full raw account numbers (M07/M13).
+ */
+export function createBankAccountChangeRequest(params: {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  requestedBy: string;
+  actorAal: "aal1" | "aal2";
+  bankCode: string;
+  branchNumber: string;
+  accountLast4: string;
+  reason: string;
+  now?: Date;
+}): BankAccountChangeRequestContract {
+  if (params.actorAal !== "aal2") {
+    throw new Error(
+      "BANK_CHANGE_MFA_AAL2_REQUIRED: Multi-factor authentication (aal2) is required to request bank account changes."
+    );
+  }
+  if (!/^\d{3,4}$/.test(params.bankCode.trim())) {
+    throw new Error("BANK_CHANGE_INVALID_BANK_CODE: bankCode must be 3 to 4 digits.");
+  }
+  if (!/^\d{4}$/.test(params.accountLast4.trim())) {
+    throw new Error(
+      "BANK_CHANGE_INVALID_LAST4: Only the last 4 digits of the account may be stored in approval metadata."
+    );
+  }
+  if (!params.reason || params.reason.trim().length < 5) {
+    throw new Error("BANK_CHANGE_REASON_REQUIRED: A reason of at least 5 characters is required.");
+  }
+
+  return {
+    id: params.id,
+    organizationId: params.organizationId,
+    storeId: params.storeId,
+    requestedBy: params.requestedBy,
+    bankCode: params.bankCode.trim(),
+    branchNumber: params.branchNumber.trim(),
+    accountLast4: params.accountLast4.trim(),
+    status: "PENDING",
+    reason: params.reason.trim(),
+    createdAtIso: (params.now ?? new Date()).toISOString(),
+  };
+}
+
+// ============================================================================
+// M08: Restaurant Kitchen Order Queue, SLA Countdown & Reconnect Catch-Up
+// ============================================================================
+
+export function mapOrderStatusToKitchenColumn(orderStatus: string): KitchenQueueColumnStatus {
+  switch (orderStatus) {
+    case "CREATED":
+    case "AWAITING_PAYMENT":
+    case "PENDING_MERCHANT_ACCEPTANCE":
+      return "NEW";
+    case "ACCEPTED":
+      return "ACCEPTED";
+    case "PREPARING":
+      return "PREPARING";
+    case "READY_FOR_PICKUP":
+      return "READY";
+    case "DISPATCHING":
+    case "COURIER_ASSIGNED":
+    case "PICKED_UP":
+    case "OUT_FOR_DELIVERY":
+    case "ARRIVED_AT_DESTINATION":
+      return "IN_TRANSIT";
+    case "DELIVERED":
+    case "COMPLETED":
+      return "COMPLETED";
+    case "CANCELLED":
+    case "REJECTED":
+    case "DELIVERY_FAILED":
+    case "DISPUTED":
+    case "REFUNDED":
+    default:
+      return "CANCELLED";
+  }
+}
+
+/**
+ * Builds the real-time kitchen order console queue (M08), computing SLA countdowns from real
+ * timestamps and keeping active orders visible even when the store is paused for new orders.
+ */
+export function buildKitchenOrderQueue(params: {
+  storeId: string;
+  isStorePaused: boolean;
+  orders: readonly OrderRecordContract[];
+  prepTimeMaxMinutes?: number;
+  acceptanceSlaMinutes?: number;
+  now?: Date;
+  latestEventCursor?: string | null;
+}): StoreOrdersQueueResponseContract {
+  const now = params.now ?? new Date();
+  const prepTimeMaxMinutes = params.prepTimeMaxMinutes ?? 35;
+  const acceptanceSlaMinutes = params.acceptanceSlaMinutes ?? 8;
+
+  const columns: Record<KitchenQueueColumnStatus, KitchenOrderCardContract[]> = {
+    NEW: [],
+    ACCEPTED: [],
+    PREPARING: [],
+    READY: [],
+    IN_TRANSIT: [],
+    COMPLETED: [],
+    CANCELLED: [],
+  };
+
+  let activeOrderCount = 0;
+
+  for (const order of params.orders) {
+    if (order.storeId !== params.storeId) continue;
+
+    const column = mapOrderStatusToKitchenColumn(order.orderStatus);
+    const isTerminal = column === "COMPLETED" || column === "CANCELLED";
+    if (!isTerminal) {
+      activeOrderCount += 1;
+    }
+
+    const baseTimeMs =
+      column === "NEW"
+        ? new Date(order.createdAtIso).getTime()
+        : new Date(order.acceptedAtIso ?? order.createdAtIso).getTime();
+
+    const slaWindowMinutes = column === "NEW" ? acceptanceSlaMinutes : prepTimeMaxMinutes;
+    const slaDeadlineMs = baseTimeMs + slaWindowMinutes * 60 * 1000;
+    const remainingSlaSeconds = isTerminal
+      ? 0
+      : Math.floor((slaDeadlineMs - now.getTime()) / 1000);
+
+    const card: KitchenOrderCardContract = {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      storeId: order.storeId,
+      column,
+      orderStatus: order.orderStatus,
+      paymentStatus: order.paymentStatus,
+      deliveryStatus: order.deliveryStatus,
+      fulfillmentModality: order.fulfillmentModality,
+      totalCents: order.totalCents,
+      itemsCount: order.itemsSnapshot.reduce((sum, item) => sum + item.quantity, 0),
+      customerNotes: order.customerNotes,
+      version: order.version,
+      createdAtIso: order.createdAtIso,
+      slaDeadlineIso: new Date(slaDeadlineMs).toISOString(),
+      remainingSlaSeconds,
+      isSlaBreached: !isTerminal && remainingSlaSeconds < 0,
+    };
+
+    columns[column].push(card);
+  }
+
+  return {
+    storeId: params.storeId,
+    isStorePaused: params.isStorePaused,
+    evaluatedAtIso: now.toISOString(),
+    activeOrderCount,
+    columns,
+    latestEventCursor: params.latestEventCursor ?? null,
+  };
+}
+
+/**
+ * Deduplicates incoming order events after a WebSocket/polling reconnect using event IDs and idempotency keys (M08).
+ */
+export function reconcileKitchenOrderEventsOnReconnect(params: {
+  seenEventIds: ReadonlySet<string>;
+  incomingEvents: readonly OrderEventRecordContract[];
+}): {
+  newEvents: OrderEventRecordContract[];
+  nextSeenEventIds: Set<string>;
+  latestCursor: string | null;
+} {
+  const nextSeenEventIds = new Set(params.seenEventIds);
+  const newEvents: OrderEventRecordContract[] = [];
+  let latestCursor: string | null = null;
+
+  for (const evt of params.incomingEvents) {
+    latestCursor = evt.id;
+    const dedupToken = `${evt.id}:${evt.idempotencyKey}`;
+    if (!nextSeenEventIds.has(evt.id) && !nextSeenEventIds.has(dedupToken)) {
+      nextSeenEventIds.add(evt.id);
+      nextSeenEventIds.add(dedupToken);
+      newEvents.push(evt);
+    }
+  }
+
+  return {
+    newEvents,
+    nextSeenEventIds,
+    latestCursor,
+  };
+}
+
+// ============================================================================
+// M16: Central Administration Governance, Self-Grant Guard & Audit Decisions
+// ============================================================================
+
+/**
+ * Evaluates a staff role grant request (M16): enforces tech_admin role, MFA aal2,
+ * mandatory justification (>= 5 chars), and strictly prohibits self-grant.
+ */
+export function evaluateStaffScopeGrant(params: {
+  actorId: string;
+  actorAal: "aal1" | "aal2";
+  actorRoles: readonly StaffRole[];
+  request: AdminStaffScopeGrantRequestContract;
+}): {
+  allowed: boolean;
+  reasonCode:
+    | "ALLOWED"
+    | "DENIED_SELF_GRANT_FORBIDDEN"
+    | "DENIED_MFA_AAL2_REQUIRED"
+    | "DENIED_ROLE_INSUFFICIENT"
+    | "DENIED_JUSTIFICATION_REQUIRED";
+} {
+  if (params.actorId === params.request.targetUserId) {
+    return { allowed: false, reasonCode: "DENIED_SELF_GRANT_FORBIDDEN" };
+  }
+  if (!params.actorRoles.includes("tech_admin")) {
+    return { allowed: false, reasonCode: "DENIED_ROLE_INSUFFICIENT" };
+  }
+  if (params.actorAal !== "aal2") {
+    return { allowed: false, reasonCode: "DENIED_MFA_AAL2_REQUIRED" };
+  }
+  if (!params.request.justification || params.request.justification.trim().length < 5) {
+    return { allowed: false, reasonCode: "DENIED_JUSTIFICATION_REQUIRED" };
+  }
+  assertIntegerCents(params.request.maxRefundApprovalCents, "maxRefundApprovalCents");
+
+  return { allowed: true, reasonCode: "ALLOWED" };
+}
+
+/**
+ * Evaluates a central admin governance decision (APPROVE, REJECT, NEEDS_INFO, SUSPEND, REIVATE)
+ * requiring MFA aal2, authorized staff role, mandatory justification, and non-self target (M16).
+ */
+export function evaluateAdminGovernanceDecision(params: {
+  id: string;
+  actorId: string;
+  actorAal: "aal1" | "aal2";
+  actorRoles: readonly StaffRole[];
+  targetType: AdminGovernanceActionContract["targetType"];
+  targetId: string;
+  decision: AdminGovernanceActionContract["decision"];
+  reason: string;
+  now?: Date;
+}): AdminGovernanceActionContract {
+  const allowedRoles: readonly StaffRole[] = [
+    "operations",
+    "commercial",
+    "risk_compliance",
+    "tech_admin",
+  ];
+  if (!params.actorRoles.some((r) => allowedRoles.includes(r))) {
+    throw new Error("ADMIN_GOVERNANCE_FORBIDDEN: Actor role cannot execute governance decisions.");
+  }
+  if (params.actorAal !== "aal2") {
+    throw new Error(
+      "ADMIN_GOVERNANCE_MFA_AAL2_REQUIRED: Multi-factor authentication (aal2) is required."
+    );
+  }
+  if (params.actorId === params.targetId) {
+    throw new Error(
+      "ADMIN_GOVERNANCE_SELF_TARGET_FORBIDDEN: Staff members cannot approve or suspend their own account."
+    );
+  }
+  if (!params.reason || params.reason.trim().length < 5) {
+    throw new Error(
+      "ADMIN_GOVERNANCE_REASON_REQUIRED: A structured reason of at least 5 characters is required."
+    );
+  }
+
+  return {
+    id: params.id,
+    targetType: params.targetType,
+    targetId: params.targetId,
+    decision: params.decision,
+    actorId: params.actorId,
+    reason: params.reason.trim(),
+    createdAtIso: (params.now ?? new Date()).toISOString(),
+  };
 }

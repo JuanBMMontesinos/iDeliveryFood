@@ -526,4 +526,70 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(allowedAal2.status, 200);
   });
+
+  it("handles Fase C endpoints: M07 store pause settings, M08 kitchen orders queue, and M16 admin self-grant prohibition & audit logs", async () => {
+    // 1. Partner Operator pauses Store 201 with mandatory reason (M07)
+    const pauseRes = await fetch(
+      `${baseUrl}/stores/00000000-0000-4000-8000-000000000201/settings`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Actor-Id": "00000000-0000-4000-8000-000000000011",
+          "X-Idempotency-Key": "idem_store_pause_201",
+        },
+        body: JSON.stringify({
+          organizationId: "00000000-0000-4000-8000-000000000101",
+          isPaused: true,
+          pauseReason: "Kitchen shift handover",
+        }),
+      }
+    );
+    assert.equal(pauseRes.status, 200);
+
+    // 2. Kitchen orders queue remains accessible and shows active orders while paused (M08)
+    const queueRes = await fetch(
+      `${baseUrl}/stores/00000000-0000-4000-8000-000000000201/orders-queue?organizationId=00000000-0000-4000-8000-000000000101`,
+      {
+        headers: {
+          "X-Actor-Id": "00000000-0000-4000-8000-000000000011",
+        },
+      }
+    );
+    assert.equal(queueRes.status, 200);
+    const queueJson = (await queueRes.json()) as {
+      data: { isStorePaused: boolean; activeOrderCount: number };
+    };
+    assert.equal(queueJson.data.isStorePaused, true);
+    assert.ok(queueJson.data.activeOrderCount >= 1);
+
+    // 3. Tech Admin attempts to self-grant a staff scope -> blocked with 403 DENIED_SELF_GRANT_FORBIDDEN (M16)
+    const selfGrantRes = await fetch(`${baseUrl}/admin/staff-scopes`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
+        "X-Actor-Aal": "aal2",
+        "X-Idempotency-Key": "idem_self_grant_attempt",
+      },
+      body: JSON.stringify({
+        targetUserId: "00000000-0000-4000-8000-000000000090",
+        role: "finance",
+        maxRefundApprovalCents: 100000,
+        justification: "Attempting self-grant",
+      }),
+    });
+    assert.equal(selfGrantRes.status, 403);
+
+    // 4. Tech Admin reads immutable audit logs at aal2 (M16)
+    const auditLogsRes = await fetch(`${baseUrl}/admin/audit-logs`, {
+      headers: {
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
+        "X-Actor-Aal": "aal2",
+      },
+    });
+    assert.equal(auditLogsRes.status, 200);
+    const auditLogsJson = (await auditLogsRes.json()) as { data: unknown[] };
+    assert.ok(auditLogsJson.data.length >= 2);
+  });
 });

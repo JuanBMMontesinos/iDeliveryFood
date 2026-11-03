@@ -1,6 +1,9 @@
 import {
   DEFAULT_LOCALE,
+  type AdminGovernanceActionContract,
+  type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
+  type BankAccountChangeRequestContract,
   type CartItemSelectionContract,
   type CustomerAddressContract,
   type FulfillmentModality,
@@ -15,6 +18,8 @@ import {
   type ServiceAreaEligibilityContract,
   type StoreAvailabilityEvaluationContract,
   type StoreCatalogResponseContract,
+  type StoreOrdersQueueResponseContract,
+  type StoreSettingsPatchContract,
   type SupportedLocale,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
@@ -304,6 +309,93 @@ export class IDeliveryApiClient {
       method: "PATCH",
       body: { locale },
       idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async updateStoreSettings(params: {
+    storeId: string;
+    organizationId: string;
+    patch: StoreSettingsPatchContract;
+    idempotencyKey: string;
+  }): Promise<{ data: PublishedStoreContract }> {
+    return this.request<{ data: PublishedStoreContract }>({
+      path: `/stores/${encodeURIComponent(params.storeId)}/settings`,
+      method: "PATCH",
+      body: {
+        organizationId: params.organizationId,
+        ...params.patch,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async requestBankAccountChange(params: {
+    storeId: string;
+    organizationId: string;
+    bankCode: string;
+    branchNumber: string;
+    accountLast4: string;
+    reason: string;
+    idempotencyKey: string;
+  }): Promise<{ data: BankAccountChangeRequestContract }> {
+    return this.request<{ data: BankAccountChangeRequestContract }>({
+      path: `/stores/${encodeURIComponent(params.storeId)}/bank-account-change-request`,
+      method: "POST",
+      body: {
+        organizationId: params.organizationId,
+        bankCode: params.bankCode,
+        branchNumber: params.branchNumber,
+        accountLast4: params.accountLast4,
+        reason: params.reason,
+      },
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async getStoreOrdersQueue(
+    storeId: string,
+    organizationId: string
+  ): Promise<{ data: StoreOrdersQueueResponseContract }> {
+    const query = new URLSearchParams({ organizationId });
+    return this.request<{ data: StoreOrdersQueueResponseContract }>({
+      path: `/stores/${encodeURIComponent(storeId)}/orders-queue?${query.toString()}`,
+      method: "GET",
+    });
+  }
+
+  public async grantStaffScope(params: {
+    request: AdminStaffScopeGrantRequestContract;
+    idempotencyKey: string;
+  }): Promise<{ data: AdminStaffScopeGrantRequestContract & { grantedBy: string } }> {
+    return this.request<{ data: AdminStaffScopeGrantRequestContract & { grantedBy: string } }>({
+      path: "/admin/staff-scopes",
+      method: "POST",
+      body: params.request,
+      idempotencyKey: params.idempotencyKey,
+      requireIdempotency: true,
+    });
+  }
+
+  public async executeAdminGovernanceAction(params: {
+    targetType: AdminGovernanceActionContract["targetType"];
+    targetId: string;
+    decision: AdminGovernanceActionContract["decision"];
+    reason: string;
+    idempotencyKey: string;
+  }): Promise<{ data: AdminGovernanceActionContract }> {
+    return this.request<{ data: AdminGovernanceActionContract }>({
+      path: "/admin/governance-actions",
+      method: "POST",
+      body: {
+        targetType: params.targetType,
+        targetId: params.targetId,
+        decision: params.decision,
+        reason: params.reason,
+      },
+      idempotencyKey: params.idempotencyKey,
       requireIdempotency: true,
     });
   }

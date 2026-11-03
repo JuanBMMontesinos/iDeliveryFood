@@ -14,8 +14,11 @@ import {
   CURRENCY_CODE,
   DEFAULT_LOCALE,
   resolveSupportedLocale,
+  type AdminGovernanceActionContract,
+  type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
   type AuthenticatedActorProfileContract,
+  type BankAccountChangeRequestContract,
   type BatchCatalogUpdateItemResultContract,
   type CartItemSelectionContract,
   type CatalogCategoryContract,
@@ -31,23 +34,30 @@ import {
   type PublishedStoreContract,
   type RefundRecordContract,
   type ServerQuoteRecordContract,
+  type StaffRole,
   type StoreCatalogResponseContract,
   type StoreHourExceptionContract,
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
+  type StoreSettingsPatchContract,
   type SupportedLocale,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
 import {
   assertExternalProviderReady,
+  buildKitchenOrderQueue,
   calculateServerQuoteAndSplit,
+  createBankAccountChangeRequest,
   createOrderFromServerQuote,
   evaluateAccountDeletionRequest,
+  evaluateAdminGovernanceDecision,
   evaluateRefundRequest,
   evaluateServiceAreaEligibility,
+  evaluateStaffScopeGrant,
   evaluateStoreAvailability,
   executeOrderCommand,
   validateAndBuildQuoteItems,
+  validateStoreSettingsPatch,
   verifyAndProcessPspWebhook,
   type OrderCommandType,
   type QuoteItemInput,
@@ -221,6 +231,8 @@ export function createApiServer(deps: {
   const paymentAttemptsById = new Map<string, PaymentAttemptContract>();
   const processedWebhookKeys = new Set<string>();
   const refundsByOrderId = new Map<string, RefundRecordContract[]>();
+  const storeOverridesById = new Map<string, StoreSettingsPatchContract>();
+  const bankChangeRequestsById = new Map<string, BankAccountChangeRequestContract>();
   let orderSequence = 10010;
 
   return http.createServer(async (req, res) => {
@@ -1295,6 +1307,385 @@ export function createApiServer(deps: {
           sendError(res, status, code, msg, correlationId);
           return;
         }
+      }
+
+      // 16. PATCH /v1/stores/:storeId/settings (M07 — Partner store pause/unpause, prep time, minOrderCents)
+      const storeSettingsMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/settings$/);
+      if (method === "PATCH" && storeSettingsMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = storeSettingsMatch[1] ?? "";
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const organizationId = String(
+          body.organizationId ?? "00000000-0000-4000-8000-000000000101"
+        );
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId,
+          storeId,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to update store settings.", correlationId);
+          return;
+        }
+
+        const stores = await deps.repository.listPublishedStores(locale);
+        const targetStore = stores.find((s) => s.id === storeId);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+
+        try {
+          const patch: StoreSettingsPatchContract = {};
+          if (body.isPaused !== undefined) patch.isPaused = Boolean(body.isPaused);
+          if (body.pauseReason !== undefined) {
+            patch.pauseReason = body.pauseReason ? String(body.pauseReason) : null;
+          }
+          if (body.minOrderCents !== undefined) patch.minOrderCents = Number(body.minOrderCents);
+          if (body.prepTimeMinMinutes !== undefined) {
+            patch.prepTimeMinMinutes = Number(body.prepTimeMinMinutes);
+          }
+          if (body.prepTimeMaxMinutes !== undefined) {
+            patch.prepTimeMaxMinutes = Number(body.prepTimeMaxMinutes);
+          }
+          validateStoreSettingsPatch(patch);
+
+          const mergedPatch: StoreSettingsPatchContract = {
+            ...(storeOverridesById.get(storeId) ?? {}),
+            ...patch,
+          };
+          storeOverridesById.set(storeId, mergedPatch);
+
+          const updatedStore: PublishedStoreContract = {
+            ...targetStore,
+            isPaused: mergedPatch.isPaused ?? targetStore.isPaused,
+            minOrderCents: mergedPatch.minOrderCents ?? targetStore.minOrderCents,
+            prepTimeMinMinutes: mergedPatch.prepTimeMinMinutes ?? targetStore.prepTimeMinMinutes,
+            prepTimeMaxMinutes: mergedPatch.prepTimeMaxMinutes ?? targetStore.prepTimeMaxMinutes,
+          };
+
+          await deps.repository.appendAuditLog({
+            id: `aud_${Date.now()}`,
+            actorId: actor.id,
+            action: "STORE_SETTINGS_UPDATED",
+            targetType: "STORE",
+            targetId: storeId,
+            correlationId,
+            reason: mergedPatch.pauseReason ?? "Updated store operational settings",
+            redactedPayload: {
+              isPaused: updatedStore.isPaused,
+              minOrderCents: updatedStore.minOrderCents,
+              prepTimeMinMinutes: updatedStore.prepTimeMinMinutes,
+              prepTimeMaxMinutes: updatedStore.prepTimeMaxMinutes,
+            },
+            createdAt: new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, { data: updatedStore });
+          return;
+        } catch (patchErr) {
+          const msg = patchErr instanceof Error ? patchErr.message : "Invalid store settings patch";
+          sendError(res, 400, msg.split(":")[0] ?? "STORE_SETTINGS_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 17. POST /v1/stores/:storeId/bank-account-change-request (M07 — Requires partner_owner + MFA aal2; PENDING only)
+      const bankChangeMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/bank-account-change-request$/);
+      if (method === "POST" && bankChangeMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = bankChangeMatch[1] ?? "";
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const organizationId = String(
+          body.organizationId ?? "00000000-0000-4000-8000-000000000101"
+        );
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId,
+          storeId,
+          allowedRoles: ["partner_owner"],
+          requireMfaAal2: true,
+        });
+
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Only Partner Owner with MFA aal2 can request bank account changes.",
+            correlationId
+          );
+          return;
+        }
+
+        try {
+          const bankReq = createBankAccountChangeRequest({
+            id: `bank_req_${Date.now()}`,
+            organizationId,
+            storeId,
+            requestedBy: actor.id,
+            actorAal: actor.aal,
+            bankCode: String(body.bankCode ?? ""),
+            branchNumber: String(body.branchNumber ?? ""),
+            accountLast4: String(body.accountLast4 ?? ""),
+            reason: String(body.reason ?? ""),
+          });
+          bankChangeRequestsById.set(bankReq.id, bankReq);
+
+          await deps.repository.appendAuditLog({
+            id: `aud_${Date.now()}`,
+            actorId: actor.id,
+            action: "BANK_ACCOUNT_CHANGE_REQUESTED",
+            targetType: "BANK_ACCOUNT",
+            targetId: storeId,
+            correlationId,
+            reason: bankReq.reason,
+            redactedPayload: {
+              bankCode: bankReq.bankCode,
+              accountLast4: bankReq.accountLast4,
+              status: bankReq.status,
+              immediatePayoutTriggered: false,
+            },
+            createdAt: bankReq.createdAtIso,
+          });
+
+          sendJson(res, 201, correlationId, { data: bankReq });
+          return;
+        } catch (bankErr) {
+          const msg = bankErr instanceof Error ? bankErr.message : "Invalid bank change request";
+          sendError(res, 400, msg.split(":")[0] ?? "BANK_CHANGE_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 18. GET /v1/stores/:storeId/orders-queue (M08 — Kitchen Order Console Queue with SLA & pause resilience)
+      const ordersQueueMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/orders-queue$/);
+      if (method === "GET" && ordersQueueMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = ordersQueueMatch[1] ?? "";
+        const organizationId =
+          parsedUrl.searchParams.get("organizationId") ?? "00000000-0000-4000-8000-000000000101";
+
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId,
+          storeId,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator", "partner_support"],
+        });
+
+        if (!decision.allowed && actor.staffScopes.length === 0) {
+          sendError(res, 403, decision.reasonCode, "Access to store order queue denied.", correlationId);
+          return;
+        }
+
+        const stores = await deps.repository.listPublishedStores(locale);
+        const store = stores.find((s) => s.id === storeId);
+        const override = storeOverridesById.get(storeId);
+        const isStorePaused = override?.isPaused ?? store?.isPaused ?? false;
+
+        const storeOrders = Array.from(ordersById.values()).filter((o) => o.storeId === storeId);
+        const allStoreEvents = storeOrders.flatMap((o) => orderEventsByOrderId.get(o.id) ?? []);
+        const latestEventCursor =
+          allStoreEvents.length > 0 ? (allStoreEvents[allStoreEvents.length - 1]?.id ?? null) : null;
+
+        const queue = buildKitchenOrderQueue({
+          storeId,
+          isStorePaused,
+          orders: storeOrders,
+          prepTimeMaxMinutes: override?.prepTimeMaxMinutes ?? store?.prepTimeMaxMinutes ?? 35,
+          latestEventCursor,
+        });
+
+        sendJson(res, 200, correlationId, { data: queue });
+        return;
+      }
+
+      // 19. POST /v1/admin/staff-scopes (M16 — Enforces tech_admin + MFA aal2 + blocks self-grant)
+      if (method === "POST" && pathname === "/v1/admin/staff-scopes") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const grantRequest: AdminStaffScopeGrantRequestContract = {
+          targetUserId: String(body.targetUserId ?? ""),
+          role: String(body.role ?? "operations") as StaffRole,
+          regionCode: body.regionCode ? String(body.regionCode) : null,
+          maxRefundApprovalCents: Number(body.maxRefundApprovalCents ?? 0),
+          justification: String(body.justification ?? ""),
+        };
+
+        const grantEval = evaluateStaffScopeGrant({
+          actorId: actor.id,
+          actorAal: actor.aal,
+          actorRoles: actor.staffScopes.map((s) => s.role),
+          request: grantRequest,
+        });
+
+        if (!grantEval.allowed) {
+          sendError(
+            res,
+            403,
+            grantEval.reasonCode,
+            `Staff scope grant denied (${grantEval.reasonCode}).`,
+            correlationId
+          );
+          return;
+        }
+
+        await deps.repository.appendAuditLog({
+          id: `aud_${Date.now()}`,
+          actorId: actor.id,
+          action: "STAFF_SCOPE_GRANTED",
+          targetType: "STAFF_SCOPE",
+          targetId: grantRequest.targetUserId,
+          correlationId,
+          reason: grantRequest.justification,
+          redactedPayload: {
+            role: grantRequest.role,
+            regionCode: grantRequest.regionCode,
+            maxRefundApprovalCents: grantRequest.maxRefundApprovalCents,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 201, correlationId, {
+          data: {
+            ...grantRequest,
+            grantedBy: actor.id,
+          },
+        });
+        return;
+      }
+
+      // 20. POST /v1/admin/governance-actions (M16 — Suspensions, Reactivations & Approvals with MFA aal2)
+      if (method === "POST" && pathname === "/v1/admin/governance-actions") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key is required.",
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const actionRecord = evaluateAdminGovernanceDecision({
+            id: `gov_${Date.now()}`,
+            actorId: actor.id,
+            actorAal: actor.aal,
+            actorRoles: actor.staffScopes.map((s) => s.role),
+            targetType: String(body.targetType ?? "STORE") as AdminGovernanceActionContract["targetType"],
+            targetId: String(body.targetId ?? ""),
+            decision: String(body.decision ?? "APPROVED") as AdminGovernanceActionContract["decision"],
+            reason: String(body.reason ?? ""),
+          });
+
+          await deps.repository.appendAuditLog({
+            id: `aud_${Date.now()}`,
+            actorId: actor.id,
+            action: `ADMIN_GOVERNANCE_${actionRecord.decision}`,
+            targetType: actionRecord.targetType,
+            targetId: actionRecord.targetId,
+            correlationId,
+            reason: actionRecord.reason,
+            redactedPayload: {
+              decision: actionRecord.decision,
+              targetType: actionRecord.targetType,
+            },
+            createdAt: actionRecord.createdAtIso,
+          });
+
+          sendJson(res, 201, correlationId, { data: actionRecord });
+          return;
+        } catch (govErr) {
+          const msg = govErr instanceof Error ? govErr.message : "Governance action denied";
+          const code = msg.split(":")[0] ?? "ADMIN_GOVERNANCE_ERROR";
+          const status = code.includes("FORBIDDEN") || code.includes("MFA") ? 403 : 400;
+          sendError(res, status, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 21. GET /v1/admin/audit-logs (M16 — Read-Only Audit Trail for Authorized Staff with MFA aal2)
+      if (method === "GET" && pathname === "/v1/admin/audit-logs") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "finance", "risk_compliance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Audit logs require authorized staff role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+        const logs = await deps.repository.getAuditLogs();
+        sendJson(res, 200, correlationId, { data: logs });
+        return;
       }
 
       sendError(res, 404, "ROUTE_NOT_FOUND", `Route ${method} ${pathname} not found.`, correlationId);

@@ -15,6 +15,7 @@
 -- 11. Haversine distance helper (app_security.calculate_distance_meters) computes accurate distance in meters.
 -- 12. Security-invoker catalog view (public.store_catalog_v) exposes published products & option groups.
 -- 13. Webhook event log (public.payment_provider_events) enforces (provider_code, external_event_id) deduplication.
+-- 14. Staff self-grant protection (trg_guard_staff_scope_self_grant) blocks staff from granting scopes to themselves (42501).
 -- ============================================================================
 
 DO $$
@@ -230,7 +231,27 @@ BEGIN
   IF NOT v_caught_error THEN
     RAISE EXCEPTION 'TEST FAILED [Webhook Deduplication]: expected unique_violation (23505)';
   END IF;
+
+  -- 14. Test Staff Self-Grant Prohibition as Tech Admin Mariana (00000000-0000-4000-8000-000000000090) at aal2
+  PERFORM set_config('role', 'authenticated', true);
+  PERFORM set_config(
+    'request.jwt.claims',
+    '{"sub":"00000000-0000-4000-8000-000000000090","role":"authenticated","aal":"aal2"}',
+    true
+  );
+
+  v_caught_error := false;
+  BEGIN
+    INSERT INTO public.staff_scopes (user_id, role, max_refund_approval_cents, requires_mfa, justification, is_test_data)
+    VALUES ('00000000-0000-4000-8000-000000000090', 'finance', 500000, true, 'Attempting self-grant of finance role', true);
+  EXCEPTION WHEN insufficient_privilege THEN
+    v_caught_error := true;
+  END;
+
+  IF NOT v_caught_error THEN
+    RAISE EXCEPTION 'TEST FAILED [Staff Self-Grant Prohibition]: expected insufficient_privilege (42501)';
+  END IF;
 END;
 $$;
 
-SELECT 'ALL_13_SECURITY_AND_FASE_B_INVARIANTS_PASSED' AS verification_status;
+SELECT 'ALL_14_SECURITY_AND_FASE_ABC_INVARIANTS_PASSED' AS verification_status;

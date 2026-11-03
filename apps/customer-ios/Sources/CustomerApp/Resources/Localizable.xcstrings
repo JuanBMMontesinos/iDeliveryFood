@@ -51,6 +51,48 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Você está sem conexão. Reconectando automaticamente..." } }
       }
     },
+    "offline_stale_cache_banner": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Offline mode: displaying cached catalog. Live prices and checkout require an active connection." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Modo offline: exibindo catálogo em cache. Preços em tempo real e checkout exigem conexão ativa." } }
+      }
+    },
+    "marketplace_stores_heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Available Restaurants" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Restaurantes Disponíveis" } }
+      }
+    },
+    "cart_switch_store_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Start a new basket at another store?" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Iniciar uma nova sacola em outra loja?" } }
+      }
+    },
+    "cart_switch_store_body": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Your current basket has items from another restaurant. Confirming will replace your basket." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Sua sacola atual possui itens de outro restaurante. Ao confirmar, sua sacola será substituída." } }
+      }
+    },
+    "checkout_psp_blocked_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Online payment capture is blocked in this environment due to missing PSP credentials." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "A captura de pagamento online está bloqueada neste ambiente por ausência de credenciais do PSP." } }
+      }
+    },
+    "order_cancel_window_expired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Direct self-service cancellation window has elapsed or kitchen already started preparation." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "A janela de cancelamento direto expirou ou a cozinha já iniciou o preparo." } }
+      }
+    },
     "privacy_delete_account": {
       "extractionState": "manual",
       "localizations": {

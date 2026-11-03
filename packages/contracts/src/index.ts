@@ -392,6 +392,83 @@ export interface BatchCatalogUpdateItemResultContract {
   reasonCode: string;
 }
 
+export interface StoreSettingsPatchContract {
+  isPaused?: boolean;
+  pauseReason?: string | null;
+  minOrderCents?: number;
+  prepTimeMinMinutes?: number;
+  prepTimeMaxMinutes?: number;
+  supportedModalities?: FulfillmentModality[];
+}
+
+export interface BankAccountChangeRequestContract {
+  id: string;
+  organizationId: string;
+  storeId: string;
+  requestedBy: string;
+  bankCode: string;
+  branchNumber: string;
+  accountLast4: string;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "NEEDS_INFO";
+  reason: string;
+  createdAtIso: string;
+}
+
+export type KitchenQueueColumnStatus =
+  | "NEW"
+  | "ACCEPTED"
+  | "PREPARING"
+  | "READY"
+  | "IN_TRANSIT"
+  | "COMPLETED"
+  | "CANCELLED";
+
+export interface KitchenOrderCardContract {
+  orderId: string;
+  orderNumber: number;
+  storeId: string;
+  column: KitchenQueueColumnStatus;
+  orderStatus: string;
+  paymentStatus: string;
+  deliveryStatus: string;
+  fulfillmentModality: FulfillmentModality;
+  totalCents: number;
+  itemsCount: number;
+  customerNotes: string | null;
+  version: number;
+  createdAtIso: string;
+  slaDeadlineIso: string;
+  remainingSlaSeconds: number;
+  isSlaBreached: boolean;
+}
+
+export interface StoreOrdersQueueResponseContract {
+  storeId: string;
+  isStorePaused: boolean;
+  evaluatedAtIso: string;
+  activeOrderCount: number;
+  columns: Record<KitchenQueueColumnStatus, KitchenOrderCardContract[]>;
+  latestEventCursor: string | null;
+}
+
+export interface AdminGovernanceActionContract {
+  id: string;
+  targetType: "USER" | "ORGANIZATION" | "STORE" | "COURIER" | "BANK_ACCOUNT";
+  targetId: string;
+  decision: "APPROVED" | "REJECTED" | "NEEDS_INFO" | "SUSPENDED" | "REACTIVATED";
+  actorId: string;
+  reason: string;
+  createdAtIso: string;
+}
+
+export interface AdminStaffScopeGrantRequestContract {
+  targetUserId: string;
+  role: StaffRole;
+  regionCode: string | null;
+  maxRefundApprovalCents: number;
+  justification: string;
+}
+
 export interface UserPreferencesContract {
   userId: string;
   locale: SupportedLocale;
@@ -532,6 +609,14 @@ export const I18N_MESSAGES = {
     "partner.multi_unit.batch_summary": "Batch catalog update: {applied} applied, {denied} denied across {total} unit targets.",
     "admin.portal.title": "Admin Backoffice — Governance, RBAC & Provider Status",
     "admin.providers.blocked_badge": "BLOCKED: Missing external credentials ({vars})",
+    "admin.self_grant.blocked": "Self-grant blocked: staff members cannot grant or elevate their own administrative roles.",
+    "admin.audit.read_only_badge": "Immutable Audit Trail (Read-Only)",
+    "mobile.offline.stale_cache_banner": "Offline mode: displaying cached catalog from {cachedAt}. Live prices and checkout require an active connection.",
+    "partner.store.paused_banner": "Store is paused for new orders ({reason}). Active orders in the kitchen queue remain visible until completion.",
+    "partner.bank_change.pending_approval": "Bank account change request ({accountLast4}) submitted for compliance approval (PENDING). Payouts are not triggered automatically.",
+    "kitchen.queue.title": "Kitchen Order Console — Real-Time Queue & SLA",
+    "kitchen.order.conflict_notice": "Order #{orderNumber} was already updated by another operator (version {version}). Queue refreshed.",
+    "kitchen.sound.consent_label": "Enable audible alert for new incoming orders",
     "courier.app.title": "iDeliveryFood Courier",
     "courier.status.online": "Online — Ready for dispatch offers",
     "courier.status.offline": "Offline"
@@ -585,6 +670,14 @@ export const I18N_MESSAGES = {
     "partner.multi_unit.batch_summary": "Atualização em lote do catálogo: {applied} aplicadas, {denied} negadas em {total} unidades.",
     "admin.portal.title": "Backoffice Admin — Governança, RBAC e Status de Provedores",
     "admin.providers.blocked_badge": "BLOQUEADO: Credenciais externas ausentes ({vars})",
+    "admin.self_grant.blocked": "Autoconcessão bloqueada: membros da equipe não podem conceder ou elevar seus próprios papéis administrativos.",
+    "admin.audit.read_only_badge": "Trilha de Auditoria Imutável (Somente Leitura)",
+    "mobile.offline.stale_cache_banner": "Modo offline: exibindo catálogo em cache de {cachedAt}. Preços em tempo real e checkout exigem conexão ativa.",
+    "partner.store.paused_banner": "A loja está pausada para novos pedidos ({reason}). Os pedidos ativos na fila da cozinha permanecem visíveis até a conclusão.",
+    "partner.bank_change.pending_approval": "Solicitação de alteração bancária ({accountLast4}) enviada para aprovação de compliance (PENDING). Repasses não são disparados automaticamente.",
+    "kitchen.queue.title": "Gestor Operacional de Pedidos — Fila em Tempo Real e SLA",
+    "kitchen.order.conflict_notice": "O pedido #{orderNumber} já foi atualizado por outro operador (versão {version}). Fila sincronizada.",
+    "kitchen.sound.consent_label": "Ativar alerta sonoro para novos pedidos",
     "courier.app.title": "iDeliveryFood Entregador",
     "courier.status.online": "Online — Pronto para ofertas de entrega",
     "courier.status.offline": "Offline"
