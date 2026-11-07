@@ -762,6 +762,121 @@ export interface PartnerFinanceSummaryContract {
   settlements: SettlementRecordContract[];
 }
 
+export interface AdminOverviewResponseContract {
+  organizations: Array<{
+    id: string;
+    slug: string;
+    legalName: string;
+    tradeName: string;
+    taxId: string;
+    status: string;
+    isMultiUnitEnabled: boolean;
+  }>;
+  stores: Array<{
+    id: string;
+    organizationId: string;
+    slug: string;
+    name: string;
+    cuisineCategory: string;
+    status: string;
+    isPublished: boolean;
+    isPaused: boolean;
+    city: string;
+    stateCode: string;
+  }>;
+  couriers: Array<{
+    id: string;
+    fullName: string;
+    approvalStatus: string;
+    activeRegionCode: string;
+    vehicleType: string;
+    isOnline: boolean;
+  }>;
+  approvalEvents: Array<{
+    id: string;
+    targetType: string;
+    targetId: string;
+    previousStatus: string | null;
+    newStatus: string;
+    decidedBy: string;
+    reason: string;
+    createdAtIso: string;
+  }>;
+  staffScopes: Array<{
+    id: string;
+    userId: string;
+    fullName: string;
+    email: string;
+    role: StaffRole;
+    regionCode: string | null;
+    maxRefundApprovalCents: number;
+    requiresMfa: boolean;
+    isActive: boolean;
+    justification: string | null;
+  }>;
+  auditLogs: Array<{
+    id: string;
+    actorId: string;
+    action: string;
+    targetType: string;
+    targetId: string;
+    correlationId: string;
+    reason: string | null;
+    redactedPayload: Record<string, unknown>;
+    createdAt: string;
+  }>;
+}
+
+export interface FinanceBackofficeOverviewContract {
+  gmvCents: number;
+  netPlatformRevenueCents: number;
+  merchantPayablesCents: number;
+  courierPayablesCents: number;
+  totalDebitsCents: number;
+  totalCreditsCents: number;
+  isLedgerBalanced: boolean;
+  ledgerAccounts: Array<{
+    id: string;
+    code: string;
+    name: string;
+    accountType: "ASSET" | "LIABILITY" | "REVENUE" | "EXPENSE";
+    organizationId: string | null;
+    courierId: string | null;
+    debitsCents: number;
+    creditsCents: number;
+    netBalanceCents: number;
+  }>;
+  orders: OrderRecordContract[];
+  settlements: SettlementRecordContract[];
+  reconciliationRuns: PspReconciliationRunContract[];
+  refunds: RefundRecordContract[];
+}
+
+export interface LogisticsBackofficeOverviewContract {
+  tasks: DeliveryTaskContract[];
+  offers: DeliveryOfferContract[];
+  locationSamples: CourierLocationSampleContract[];
+  onlineCouriers: Array<{
+    id: string;
+    fullName: string;
+    vehicleType: string;
+    activeRegionCode: string;
+    isOnline: boolean;
+  }>;
+}
+
+export interface FleetsBackofficeOverviewContract {
+  policyKey: string;
+  featureFleetOperatorsEnabled: boolean;
+  couriers: Array<{
+    courierId: string;
+    courierName: string;
+    fleetOrganizationId: string | null;
+    vehicleType: string;
+    approvalStatus: string;
+  }>;
+}
+
 /**
  * Validates that a monetary value is a safe non-negative integer in BRL centavos.
  */

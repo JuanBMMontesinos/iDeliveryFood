@@ -10,6 +10,7 @@ import {
   CURRENCY_CODE,
   DEFAULT_LOCALE,
   type AdminGovernanceActionContract,
+  type AdminOverviewResponseContract,
   type AdminStaffScopeGrantRequestContract,
   type AuthenticatedActorProfileContract,
   type AuthorizedStorageBucket,
@@ -26,7 +27,10 @@ import {
   type CustomerAddressContract,
   type DeliveryOfferContract,
   type DeliveryTaskContract,
+  type FinanceBackofficeOverviewContract,
+  type FleetsBackofficeOverviewContract,
   type FulfillmentModality,
+  type LogisticsBackofficeOverviewContract,
   type MerchantContractRecordContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
@@ -2917,6 +2921,381 @@ export function createSupabasePostgresRepository(params: {
         slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       }));
+    },
+
+    async getAdminOverview(): Promise<AdminOverviewResponseContract> {
+      const [orgsRes, storesRes, couriersRes, approvalsRes, scopesRes, auditLogs] =
+        await Promise.all([
+          pool.query(
+            `SELECT id, slug, legal_name, trade_name, tax_id, status, is_multi_unit_enabled
+             FROM public.organizations
+             ORDER BY trade_name ASC`
+          ),
+          pool.query(
+            `SELECT id, organization_id, slug, name, cuisine_category, status,
+                    is_published, is_paused, city, state_code
+             FROM public.stores
+             ORDER BY name ASC`
+          ),
+          pool.query(
+            `SELECT c.id, COALESCE(p.full_name, 'Courier ' || c.id::text) AS full_name,
+                    c.approval_status, c.active_region_code, c.vehicle_type, c.is_online
+             FROM public.couriers c
+             LEFT JOIN public.profiles p ON p.id = c.id
+             ORDER BY full_name ASC`
+          ),
+          pool.query(
+            `SELECT id, target_type, target_id, previous_status, new_status,
+                    decided_by, reason, created_at
+             FROM public.approval_events
+             ORDER BY created_at DESC
+             LIMIT 50`
+          ),
+          pool.query(
+            `SELECT s.id, s.user_id, COALESCE(p.full_name, 'Staff') AS full_name,
+                    COALESCE(p.email, 'staff@test.ideliveryfood.invalid') AS email,
+                    s.role, s.region_code, s.max_refund_approval_cents,
+                    s.requires_mfa, s.is_active, s.justification
+             FROM public.staff_scopes s
+             LEFT JOIN public.profiles p ON p.id = s.user_id
+             ORDER BY s.created_at ASC`
+          ),
+          this.getAuditLogs(),
+        ]);
+
+      return {
+        organizations: orgsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          slug: String(r.slug),
+          legalName: String(r.legal_name),
+          tradeName: String(r.trade_name),
+          taxId: String(r.tax_id),
+          status: String(r.status),
+          isMultiUnitEnabled: Boolean(r.is_multi_unit_enabled),
+        })),
+        stores: storesRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          organizationId: restoreLogicalId(String(r.organization_id)),
+          slug: String(r.slug),
+          name: String(r.name),
+          cuisineCategory: String(r.cuisine_category),
+          status: String(r.status),
+          isPublished: Boolean(r.is_published),
+          isPaused: Boolean(r.is_paused),
+          city: String(r.city),
+          stateCode: String(r.state_code),
+        })),
+        couriers: couriersRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          fullName: String(r.full_name),
+          approvalStatus: String(r.approval_status),
+          activeRegionCode: String(r.active_region_code),
+          vehicleType: String(r.vehicle_type),
+          isOnline: Boolean(r.is_online),
+        })),
+        approvalEvents: approvalsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          targetType: String(r.target_type),
+          targetId: restoreLogicalId(String(r.target_id)),
+          previousStatus: r.previous_status ? String(r.previous_status) : null,
+          newStatus: String(r.new_status),
+          decidedBy: restoreLogicalId(String(r.decided_by)),
+          reason: String(r.reason ?? ""),
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })),
+        staffScopes: scopesRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          userId: restoreLogicalId(String(r.user_id)),
+          fullName: String(r.full_name),
+          email: String(r.email),
+          role: String(r.role) as StaffRole,
+          regionCode: r.region_code ? String(r.region_code) : null,
+          maxRefundApprovalCents: Number(r.max_refund_approval_cents ?? 0),
+          requiresMfa: Boolean(r.requires_mfa),
+          isActive: Boolean(r.is_active),
+          justification: r.justification ? String(r.justification) : null,
+        })),
+        auditLogs,
+      };
+    },
+
+    async getFinanceBackofficeOverview(): Promise<FinanceBackofficeOverviewContract> {
+      const [accountsRes, ordersRes, settlementsRes, reconRes, refundsRes] =
+        await Promise.all([
+          pool.query(
+            `SELECT la.id, la.code, la.name, la.account_type, la.organization_id, la.courier_id,
+                    COALESCE(SUM(CASE WHEN le.direction = 'DEBIT' THEN le.amount_cents ELSE 0 END), 0) AS debits_cents,
+                    COALESCE(SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount_cents ELSE 0 END), 0) AS credits_cents
+             FROM public.ledger_accounts la
+             LEFT JOIN public.ledger_entries le ON le.account_id = la.id
+             GROUP BY la.id, la.code, la.name, la.account_type, la.organization_id, la.courier_id
+             ORDER BY la.code ASC`
+          ),
+          pool.query(`SELECT * FROM public.orders ORDER BY created_at DESC LIMIT 50`),
+          pool.query(
+            `SELECT id, organization_id, courier_id, period_start, period_end,
+                    amount_cents, status, approved_by, external_payout_reference, created_at
+             FROM public.settlements
+             ORDER BY period_end DESC`
+          ),
+          pool.query(
+            `SELECT id, provider_code, run_date, matched_count, discrepancy_count,
+                    discrepancy_total_cents, status, created_at
+             FROM public.reconciliation_runs
+             ORDER BY created_at DESC`
+          ),
+          pool.query(
+            `SELECT id, order_id, payment_attempt_id, amount_cents, reason,
+                    requested_by, approved_by, status, idempotency_key, created_at
+             FROM public.refunds
+             ORDER BY created_at DESC`
+          ),
+        ]);
+
+      let totalDebitsCents = 0;
+      let totalCreditsCents = 0;
+
+      const ledgerAccounts: FinanceBackofficeOverviewContract["ledgerAccounts"] =
+        accountsRes.rows.map((r: Record<string, unknown>) => {
+          const debitsCents = Number(r.debits_cents ?? 0);
+          const creditsCents = Number(r.credits_cents ?? 0);
+          totalDebitsCents += debitsCents;
+          totalCreditsCents += creditsCents;
+          const accountType = String(
+            r.account_type
+          ) as FinanceBackofficeOverviewContract["ledgerAccounts"][number]["accountType"];
+          const netBalanceCents =
+            accountType === "ASSET" || accountType === "EXPENSE"
+              ? debitsCents - creditsCents
+              : creditsCents - debitsCents;
+          return {
+            id: restoreLogicalId(String(r.id)),
+            code: String(r.code),
+            name: String(r.name),
+            accountType,
+            organizationId: r.organization_id
+              ? restoreLogicalId(String(r.organization_id))
+              : null,
+            courierId: r.courier_id ? restoreLogicalId(String(r.courier_id)) : null,
+            debitsCents,
+            creditsCents,
+            netBalanceCents,
+          };
+        });
+
+      const orders = ordersRes.rows.map((r: Record<string, unknown>) =>
+        mapRowToOrder(r, [])
+      );
+
+      let gmvCents = 0;
+      let netPlatformRevenueCents = 0;
+      let merchantPayablesCents = 0;
+      let courierPayablesCents = 0;
+      for (const ord of orders) {
+        gmvCents += ord.subtotalCents + ord.addonsCents;
+        netPlatformRevenueCents += ord.platformCommissionCents + ord.serviceFeeCents;
+        merchantPayablesCents += ord.merchantNetCents;
+        courierPayablesCents += ord.courierEarningsCents;
+      }
+
+      const settlements: SettlementRecordContract[] = settlementsRes.rows.map(
+        (r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          organizationId: r.organization_id
+            ? restoreLogicalId(String(r.organization_id))
+            : null,
+          courierId: r.courier_id ? restoreLogicalId(String(r.courier_id)) : null,
+          periodStart:
+            r.period_start instanceof Date
+              ? r.period_start.toISOString().slice(0, 10)
+              : String(r.period_start).slice(0, 10),
+          periodEnd:
+            r.period_end instanceof Date
+              ? r.period_end.toISOString().slice(0, 10)
+              : String(r.period_end).slice(0, 10),
+          amountCents: Number(r.amount_cents),
+          status: String(r.status) as SettlementRecordContract["status"],
+          approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+          externalPayoutReference: r.external_payout_reference
+            ? String(r.external_payout_reference)
+            : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })
+      );
+
+      const reconciliationRuns: PspReconciliationRunContract[] = reconRes.rows.map(
+        (r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          providerCode: String(r.provider_code),
+          runDate:
+            r.run_date instanceof Date
+              ? r.run_date.toISOString().slice(0, 10)
+              : String(r.run_date).slice(0, 10),
+          matchedCount: Number(r.matched_count),
+          discrepancyCount: Number(r.discrepancy_count),
+          discrepancyTotalCents: Number(r.discrepancy_total_cents),
+          status: String(r.status) as PspReconciliationRunContract["status"],
+          discrepancies: [],
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })
+      );
+
+      const refunds: RefundRecordContract[] = refundsRes.rows.map(
+        (r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          orderId: restoreLogicalId(String(r.order_id)),
+          paymentAttemptId: restoreLogicalId(String(r.payment_attempt_id)),
+          amountCents: Number(r.amount_cents),
+          reason: String(r.reason ?? ""),
+          requestedBy: restoreLogicalId(String(r.requested_by)),
+          approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+          status: String(r.status) as RefundRecordContract["status"],
+          idempotencyKey: String(r.idempotency_key),
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })
+      );
+
+      return {
+        gmvCents,
+        netPlatformRevenueCents,
+        merchantPayablesCents,
+        courierPayablesCents,
+        totalDebitsCents,
+        totalCreditsCents,
+        isLedgerBalanced: totalDebitsCents === totalCreditsCents,
+        ledgerAccounts,
+        orders,
+        settlements,
+        reconciliationRuns,
+        refunds,
+      };
+    },
+
+    async getLogisticsBackofficeOverview(): Promise<LogisticsBackofficeOverviewContract> {
+      const [tasksRes, offersRes, samplesRes, couriersRes] = await Promise.all([
+        pool.query(`SELECT * FROM public.delivery_tasks ORDER BY created_at DESC LIMIT 50`),
+        pool.query(`SELECT * FROM public.delivery_offers ORDER BY created_at DESC LIMIT 50`),
+        pool.query(
+          `SELECT * FROM public.courier_location_samples ORDER BY recorded_at DESC LIMIT 50`
+        ),
+        pool.query(
+          `SELECT c.id, COALESCE(p.full_name, 'Courier ' || c.id::text) AS full_name,
+                  c.vehicle_type, c.active_region_code, c.is_online
+           FROM public.couriers c
+           LEFT JOIN public.profiles p ON p.id = c.id
+           ORDER BY c.is_online DESC, full_name ASC`
+        ),
+      ]);
+
+      return {
+        tasks: tasksRes.rows.map((r: Record<string, unknown>) => {
+          const activeCourierId = r.active_courier_id
+            ? restoreLogicalId(String(r.active_courier_id))
+            : null;
+          return {
+            id: restoreLogicalId(String(r.id)),
+            orderId: restoreLogicalId(String(r.order_id)),
+            storeId: restoreLogicalId(String(r.store_id)),
+            fulfillmentModality: String(
+              r.fulfillment_modality ?? "PLATFORM_DELIVERY"
+            ) as FulfillmentModality,
+            status: String(r.status) as DeliveryStatus,
+            pickupLatitude: Number(r.pickup_latitude),
+            pickupLongitude: Number(r.pickup_longitude),
+            dropoffLatitude: Number(r.dropoff_latitude),
+            dropoffLongitude: Number(r.dropoff_longitude),
+            dropoffNeighborhoodOnly: String(
+              r.dropoff_neighborhood_only ?? "Jardins / Consolação"
+            ),
+            dropoffFullAddress: activeCourierId
+              ? r.dropoff_full_address
+                ? String(r.dropoff_full_address)
+                : null
+              : null,
+            courierFeeCents: Number(r.courier_fee_cents),
+            distanceMeters: Number(r.distance_meters),
+            estimatedEtaMinutes: Number(r.estimated_eta_minutes ?? 20),
+            activeCourierId,
+            pickedUpAtIso: r.picked_up_at
+              ? new Date(String(r.picked_up_at)).toISOString()
+              : null,
+            completedAtIso: r.completed_at
+              ? new Date(String(r.completed_at)).toISOString()
+              : null,
+            createdAtIso: new Date(String(r.created_at)).toISOString(),
+          };
+        }),
+        offers: offersRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          deliveryTaskId: restoreLogicalId(String(r.delivery_task_id)),
+          courierId: restoreLogicalId(String(r.courier_id)),
+          offeredFeeCents: Number(r.offered_fee_cents),
+          status: String(r.status) as DeliveryOfferContract["status"],
+          pickupStoreName: String(r.pickup_store_name),
+          distanceMeters: Number(r.distance_meters),
+          dropoffNeighborhoodOnly: String(r.dropoff_neighborhood_only),
+          expiresAtIso: new Date(String(r.expires_at)).toISOString(),
+          respondedAtIso: r.responded_at
+            ? new Date(String(r.responded_at)).toISOString()
+            : null,
+        })),
+        locationSamples: samplesRes.rows.map((r: Record<string, unknown>) => {
+          const accuracyMeters = Number(r.accuracy_meters ?? 0);
+          return {
+            id: restoreLogicalId(String(r.id)),
+            courierId: restoreLogicalId(String(r.courier_id)),
+            deliveryTaskId: r.delivery_task_id
+              ? restoreLogicalId(String(r.delivery_task_id))
+              : null,
+            latitude: Number(r.latitude),
+            longitude: Number(r.longitude),
+            accuracyMeters,
+            recordedAtIso: new Date(String(r.recorded_at)).toISOString(),
+            expiresAtIso: new Date(String(r.expires_at)).toISOString(),
+            isStaleOrLowAccuracy: accuracyMeters > 100,
+          };
+        }),
+        onlineCouriers: couriersRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          fullName: String(r.full_name),
+          vehicleType: String(r.vehicle_type),
+          activeRegionCode: String(r.active_region_code),
+          isOnline: Boolean(r.is_online),
+        })),
+      };
+    },
+
+    async getFleetsBackofficeOverview(): Promise<FleetsBackofficeOverviewContract> {
+      const [policyRes, couriersRes] = await Promise.all([
+        pool.query(
+          `SELECT policy_key, feature_fleet_operators_enabled
+           FROM public.platform_policies
+           WHERE policy_key = 'DEFAULT_BR_MARKETPLACE'
+           LIMIT 1`
+        ),
+        pool.query(
+          `SELECT c.id, COALESCE(p.full_name, 'Courier ' || c.id::text) AS full_name,
+                  c.vehicle_type, c.approval_status
+           FROM public.couriers c
+           LEFT JOIN public.profiles p ON p.id = c.id
+           ORDER BY full_name ASC`
+        ),
+      ]);
+
+      const policyRow = (policyRes.rows[0] ?? {}) as Record<string, unknown>;
+      return {
+        policyKey: String(policyRow.policy_key ?? "DEFAULT_BR_MARKETPLACE"),
+        featureFleetOperatorsEnabled: Boolean(
+          policyRow.feature_fleet_operators_enabled ?? false
+        ),
+        couriers: couriersRes.rows.map((r: Record<string, unknown>) => ({
+          courierId: restoreLogicalId(String(r.id)),
+          courierName: String(r.full_name),
+          fleetOrganizationId: null, // Seeded couriers are independent couriers unless assigned to a fleet contract
+          vehicleType: String(r.vehicle_type),
+          approvalStatus: String(r.approval_status),
+        })),
+      };
     },
   };
 }

@@ -17,6 +17,7 @@ import {
   DEFAULT_LOCALE,
   resolveSupportedLocale,
   type AdminGovernanceActionContract,
+  type AdminOverviewResponseContract,
   type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
   type AuthenticatedActorProfileContract,
@@ -36,7 +37,10 @@ import {
   type CustomerAddressContract,
   type DeliveryOfferContract,
   type DeliveryTaskContract,
+  type FinanceBackofficeOverviewContract,
+  type FleetsBackofficeOverviewContract,
   type FulfillmentModality,
+  type LogisticsBackofficeOverviewContract,
   type MerchantContractRecordContract,
   type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
@@ -386,6 +390,10 @@ export interface ApiDataRepository {
   listStoreReviews?(storeId: string): Promise<OrderReviewContract[]>;
   replyToStoreReview?(storeId: string, reviewId: string, replyText: string): Promise<OrderReviewContract | null>;
   listStoreSupportCases?(storeId: string): Promise<SupportCaseContract[]>;
+  getAdminOverview?(): Promise<AdminOverviewResponseContract>;
+  getFinanceBackofficeOverview?(): Promise<FinanceBackofficeOverviewContract>;
+  getLogisticsBackofficeOverview?(): Promise<LogisticsBackofficeOverviewContract>;
+  getFleetsBackofficeOverview?(): Promise<FleetsBackofficeOverviewContract>;
 }
 
 /**
@@ -4835,6 +4843,165 @@ export function createApiServer(deps: {
           ? await deps.repository.listStoreSupportCases(store.id)
           : [];
         sendJson(res, 200, correlationId, { data: cases });
+        return;
+      }
+
+      // 37. Fase I: GET /v1/admin/overview (M16 — Central Admin Backoffice overview requiring staff role + MFA aal2)
+      if (method === "GET" && pathname === "/v1/admin/overview") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "operations",
+            "finance",
+            "risk_compliance",
+            "commercial",
+            "growth_marketing",
+            "support_l1",
+            "support_l2",
+            "tech_admin",
+          ],
+          requireMfaAal2: true,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Central Admin Backoffice requires an authorized staff role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+        const overview = deps.repository.getAdminOverview
+          ? await deps.repository.getAdminOverview()
+          : {
+              organizations: [],
+              stores: [],
+              couriers: [],
+              approvalEvents: [],
+              staffScopes: [],
+              auditLogs: await deps.repository.getAuditLogs(),
+            };
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 38. Fase I: GET /v1/finance/overview (M13 — Financial Backoffice overview requiring finance/tech_admin + MFA aal2)
+      if (method === "GET" && pathname === "/v1/finance/overview") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["finance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Financial Backoffice requires finance or tech_admin role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+        const finOverview = deps.repository.getFinanceBackofficeOverview
+          ? await deps.repository.getFinanceBackofficeOverview()
+          : {
+              gmvCents: 0,
+              netPlatformRevenueCents: 0,
+              merchantPayablesCents: 0,
+              courierPayablesCents: 0,
+              totalDebitsCents: 0,
+              totalCreditsCents: 0,
+              isLedgerBalanced: true,
+              ledgerAccounts: [],
+              orders: [],
+              settlements: [],
+              reconciliationRuns: [],
+              refunds: [],
+            };
+        sendJson(res, 200, correlationId, { data: finOverview });
+        return;
+      }
+
+      // 39. Fase I: GET /v1/logistics/overview (M14 — Logistics & Dispatch Console requiring operations/tech_admin + MFA aal2)
+      if (method === "GET" && pathname === "/v1/logistics/overview") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Logistics & Dispatch Console requires operations or tech_admin role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+        const logOverview = deps.repository.getLogisticsBackofficeOverview
+          ? await deps.repository.getLogisticsBackofficeOverview()
+          : {
+              tasks: [],
+              offers: [],
+              locationSamples: [],
+              onlineCouriers: [],
+            };
+        sendJson(res, 200, correlationId, { data: logOverview });
+        return;
+      }
+
+      // 40. Fase I: GET /v1/fleets/overview (M15 — Fleet Operator Portal reading feature_fleet_operators_enabled from platform_policies)
+      if (method === "GET" && pathname === "/v1/fleets/overview") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const fleetsOverview = deps.repository.getFleetsBackofficeOverview
+          ? await deps.repository.getFleetsBackofficeOverview()
+          : {
+              policyKey: "DEFAULT_BR_MARKETPLACE",
+              featureFleetOperatorsEnabled: false,
+              couriers: [],
+            };
+        sendJson(res, 200, correlationId, { data: fleetsOverview });
         return;
       }
 

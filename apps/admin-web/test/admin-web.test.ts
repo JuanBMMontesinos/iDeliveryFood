@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import fs from "node:fs";
+import type { AddressInfo } from "node:net";
+import path from "node:path";
+import { after, before, describe, it } from "node:test";
+import {
+  createApiServer,
+  createSupabasePostgresRepository,
+  signSupabaseHs256Jwt,
+  type SupabasePostgresRepositoryInstance,
+} from "@ideliveryfood/api";
 import type { AuthenticatedActorProfileContract } from "@ideliveryfood/contracts";
 import {
   buildAdminAuditTrailExplorerModel,
@@ -8,9 +17,29 @@ import {
   buildFinancialBackofficeModel,
   buildFleetOperatorPortalModel,
   buildLogisticsDispatchConsoleModel,
+  createAdminWebServer,
   executeAdminCadastreGovernanceAction,
   executeAdminStaffScopeGrant,
 } from "../src/index.js";
+
+function loadDatabaseUrl(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  const candidates = [
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(process.cwd(), "../../.env"),
+  ];
+  for (const envPath of candidates) {
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, "utf8");
+      const match = content.match(/^DATABASE_URL=(.+)$/m);
+      if (match?.[1]) {
+        return match[1].trim().replace(/^["']|["']$/g, "");
+      }
+    }
+  }
+  throw new Error("DATABASE_URL not found in environment or .env");
+}
+
 
 describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider Status Tests", () => {
   const staffAdminAal1: AuthenticatedActorProfileContract = {
@@ -300,3 +329,167 @@ describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider 
     assert.equal(fleetModel.visibleCouriers[0]?.courierId, "c1");
   });
 });
+
+describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16, M13, M14, M15)", () => {
+  const TEST_JWT_SECRET = "test_supabase_jwt_secret_phase_i_admin_web_32chars!";
+  const TECH_ADMIN_ID = "00000000-0000-4000-8000-000000000099";
+  const OPS_STAFF_ID = "00000000-0000-4000-8000-000000000090";
+  const FINANCE_STAFF_ID = "00000000-0000-4000-8000-000000000091";
+
+  let repo: SupabasePostgresRepositoryInstance;
+  let apiServer: ReturnType<typeof createApiServer>;
+  let adminWebServer: ReturnType<typeof createAdminWebServer>;
+  let adminBaseUrl = "";
+
+  const techAdminTokenAal1 = signSupabaseHs256Jwt(
+    {
+      sub: TECH_ADMIN_ID,
+      email: "staff.admin@test.ideliveryfood.invalid",
+      aal: "aal1",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    },
+    TEST_JWT_SECRET
+  );
+
+  const techAdminTokenAal2 = signSupabaseHs256Jwt(
+    {
+      sub: TECH_ADMIN_ID,
+      email: "staff.admin@test.ideliveryfood.invalid",
+      aal: "aal2",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    },
+    TEST_JWT_SECRET
+  );
+
+  const opsStaffTokenAal2 = signSupabaseHs256Jwt(
+    {
+      sub: OPS_STAFF_ID,
+      email: "staff.ops@test.ideliveryfood.invalid",
+      aal: "aal2",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    },
+    TEST_JWT_SECRET
+  );
+
+  const financeStaffTokenAal2 = signSupabaseHs256Jwt(
+    {
+      sub: FINANCE_STAFF_ID,
+      email: "staff.finance@test.ideliveryfood.invalid",
+      aal: "aal2",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    },
+    TEST_JWT_SECRET
+  );
+
+  before(async () => {
+    repo = createSupabasePostgresRepository({
+      connectionString: loadDatabaseUrl(),
+      isTestData: true,
+    });
+    apiServer = createApiServer({
+      repository: repo,
+      env: {
+        SUPABASE_JWT_SECRET: TEST_JWT_SECRET,
+      },
+    });
+    await new Promise<void>((resolve) => {
+      apiServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const apiPort = (apiServer.address() as AddressInfo).port;
+
+    adminWebServer = createAdminWebServer({
+      apiBaseUrl: `http://127.0.0.1:${apiPort}/v1`,
+      env: {},
+    });
+    await new Promise<void>((resolve) => {
+      adminWebServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const webPort = (adminWebServer.address() as AddressInfo).port;
+    adminBaseUrl = `http://127.0.0.1:${webPort}`;
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve) => adminWebServer.close(() => resolve()));
+    await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    await repo.close();
+  });
+
+  it("blocks /admin, /finance, and /logistics with HTTP 403 when staff JWT is only MFA aal1", async () => {
+    for (const route of ["/admin", "/finance", "/logistics"]) {
+      const res = await fetch(`${adminBaseUrl}${route}`, {
+        headers: { Authorization: `Bearer ${techAdminTokenAal1}` },
+      });
+      assert.equal(res.status, 403, `Expected 403 on ${route} with aal1`);
+      const html = await res.text();
+      assert.match(html, /MFA aal2/);
+    }
+  });
+
+  it("renders M16 Central Admin Backoffice (/admin, /admin/approvals, /admin/scopes, /admin/audit) with live Supabase data at MFA aal2", async () => {
+    const res = await fetch(`${adminBaseUrl}/admin?locale=en`, {
+      headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+    });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+
+    // Verifies live organizations & all stores including draft/unpublished Store 203
+    assert.match(html, /Paulista Artisan Burgers/);
+    assert.match(html, /Tokyo Bay Sushi/);
+    assert.match(html, /Paulista Artisan Burgers - Itaim \(Unpublished Unit\)/);
+    // Verifies KYC approval events, self-grant prohibition, read-only audit badge, and provider readiness
+    assert.match(html, /KYC and CNPJ verified for Paulista Artisan Burgers/);
+    assert.match(html, /Self-grant blocked/);
+    assert.match(html, /Immutable Audit Trail \(Read-Only\)/);
+    assert.match(html, /SEED_BOOTSTRAP_VERIFIED/);
+    assert.match(html, /BLOCKED_MISSING_CREDENTIALS/);
+  });
+
+  it("enforces strict role segregation between Finance (M13) and Logistics Operations (M14) against live Supabase", async () => {
+    // 1. Finance staff Roberto (aal2) can access /finance and verify balanced double-entry ledger
+    const finAllowed = await fetch(`${adminBaseUrl}/finance?locale=en`, {
+      headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+    });
+    assert.equal(finAllowed.status, 200);
+    const finHtml = await finAllowed.text();
+    assert.match(finHtml, /BALANCED \(DEBITS === CREDITS\)/);
+    assert.match(finHtml, /ASSET_PSP_CLEARING/);
+    assert.match(finHtml, /LIABILITY_MERCHANT_ORG_101/);
+    assert.match(finHtml, /REVENUE_PLATFORM_COMMISSION/);
+    assert.match(finHtml, /BLOCKED_MISSING_CREDENTIALS/);
+
+    // Finance staff Roberto (aal2) is blocked from /logistics (HTTP 403)
+    const logDeniedForFinance = await fetch(`${adminBaseUrl}/logistics`, {
+      headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+    });
+    assert.equal(logDeniedForFinance.status, 403);
+
+    // 2. Operations staff Marina (aal2) can access /logistics and view live tasks, offers, GPS samples & Haversine fallback
+    const logAllowed = await fetch(`${adminBaseUrl}/logistics?locale=en`, {
+      headers: { Authorization: `Bearer ${opsStaffTokenAal2}` },
+    });
+    assert.equal(logAllowed.status, 200);
+    const logHtml = await logAllowed.text();
+    assert.match(logHtml, /Haversine distance \(1420m\)/);
+    assert.match(logHtml, /Carlos Entregador Teste/);
+    assert.match(logHtml, /HIGH_ACCURACY/);
+    assert.match(logHtml, /Pre-acceptance privacy/);
+
+    // Operations staff Marina (aal2) is blocked from /finance (HTTP 403)
+    const finDeniedForOps = await fetch(`${adminBaseUrl}/finance`, {
+      headers: { Authorization: `Bearer ${opsStaffTokenAal2}` },
+    });
+    assert.equal(finDeniedForOps.status, 403);
+  });
+
+  it("renders M15 Fleet Operator Portal (/fleets) governed by live platform_policies feature_fleet_operators_enabled flag", async () => {
+    const res = await fetch(`${adminBaseUrl}/fleets?locale=en`, {
+      headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+    });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /DEFAULT_BR_MARKETPLACE/);
+    assert.match(html, /DISABLED_PENDING_FLEET_CONTRACT/);
+    assert.match(html, /FALSE \(DISABLED BY DEFAULT POLICY\)/);
+  });
+});
+

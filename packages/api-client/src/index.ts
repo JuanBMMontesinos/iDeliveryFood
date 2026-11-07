@@ -1,6 +1,7 @@
 import {
   DEFAULT_LOCALE,
   type AdminGovernanceActionContract,
+  type AdminOverviewResponseContract,
   type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
   type AuthenticatedActorProfileContract,
@@ -19,7 +20,10 @@ import {
   type CustomerAddressContract,
   type DeliveryOfferContract,
   type DeliveryTaskContract,
+  type FinanceBackofficeOverviewContract,
+  type FleetsBackofficeOverviewContract,
   type FulfillmentModality,
+  type LogisticsBackofficeOverviewContract,
   type MerchantContractRecordContract,
   type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
@@ -827,6 +831,49 @@ export class IDeliveryApiClient {
   ): Promise<{ data: SupportCaseContract[] }> {
     return this.request({
       path: `/partner/stores/${encodeURIComponent(storeId)}/support-cases`,
+      method: "GET",
+    });
+  }
+
+  public async getAdminOverview(): Promise<{ data: AdminOverviewResponseContract }> {
+    return this.request({
+      path: "/admin/overview",
+      method: "GET",
+    });
+  }
+
+  public async listAdminAuditLogs(): Promise<{
+    data: AdminOverviewResponseContract["auditLogs"];
+  }> {
+    return this.request({
+      path: "/admin/audit-logs",
+      method: "GET",
+    });
+  }
+
+  public async getFinanceBackofficeOverview(): Promise<{
+    data: FinanceBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/finance/overview",
+      method: "GET",
+    });
+  }
+
+  public async getLogisticsBackofficeOverview(): Promise<{
+    data: LogisticsBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/logistics/overview",
+      method: "GET",
+    });
+  }
+
+  public async getFleetsBackofficeOverview(): Promise<{
+    data: FleetsBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/fleets/overview",
       method: "GET",
     });
   }

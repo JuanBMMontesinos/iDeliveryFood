@@ -322,7 +322,7 @@ export function buildFinancialBackofficeModel(params: {
     buildBalancedOrderCaptureJournal({
       journalId: `jnl_${ord.id}`,
       order: ord,
-      discountFundedBy: "NONE",
+      discountFundedBy: ord.discountCents > 0 ? "PLATFORM" : "NONE",
       postedBy: params.actor.id,
     });
 
@@ -503,3 +503,11 @@ export function buildFleetOperatorPortalModel(params: {
     visibleCouriers,
   };
 }
+
+export * from "./app/layout.js";
+export * from "./app/admin/page.js";
+export * from "./app/finance/page.js";
+export * from "./app/logistics/page.js";
+export * from "./app/fleets/page.js";
+export * from "./server.js";
+

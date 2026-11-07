@@ -41,6 +41,10 @@ importers:
       '@ideliveryfood/ui-web':
         specifier: workspace:*
         version: link:../../packages/ui-web
+    devDependencies:
+      '@ideliveryfood/api':
+        specifier: workspace:*
+        version: link:../api
 
   apps/api:
     dependencies:
