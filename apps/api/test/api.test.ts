@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -10,6 +11,10 @@ import type {
   AuthenticatedActorProfileContract,
   BankAccountChangeRequestContract,
   BatchCatalogUpdateItemResultContract,
+  CatalogCategoryContract,
+  CatalogOptionContract,
+  CatalogOptionGroupContract,
+  CatalogProductContract,
   CourierLocationSampleContract,
   CustomerAddressContract,
   DeliveryOfferContract,
@@ -22,6 +27,9 @@ import type {
   RefundRecordContract,
   ServerQuoteRecordContract,
   SettlementRecordContract,
+  StoreHourExceptionContract,
+  StoreOperatingHourContract,
+  StoreServiceAreaContract,
   StoreSettingsPatchContract,
   SupportedLocale,
   UserPreferencesContract,
@@ -456,6 +464,240 @@ function createCompleteUnitTestRepository(): ApiDataRepository {
       });
     },
     async saveCourierLocationSample(_sample: CourierLocationSampleContract) {},
+
+    async replaceStoreOperatingHours(
+      _storeId: string,
+      hours: StoreOperatingHourContract[]
+    ) {
+      return hours;
+    },
+    async upsertStoreHourException(
+      _storeId: string,
+      exception: StoreHourExceptionContract
+    ) {
+      return exception;
+    },
+    async deleteStoreHourException(_storeId: string, _exceptionDate: string) {
+      return true;
+    },
+    async createStoreServiceArea(area: StoreServiceAreaContract) {
+      return area;
+    },
+    async updateStoreServiceArea(
+      storeId: string,
+      areaId: string,
+      patch: Partial<Omit<StoreServiceAreaContract, "id" | "storeId">>
+    ) {
+      return {
+        id: areaId,
+        storeId,
+        name: patch.name ?? "Updated Area",
+        radiusMeters: patch.radiusMeters ?? 5000,
+        baseFeeCents: patch.baseFeeCents ?? 790,
+        perKmFeeCents: patch.perKmFeeCents ?? 120,
+        freeDeliveryMinOrderCents: patch.freeDeliveryMinOrderCents ?? null,
+        estimatedDeliveryMinutes: patch.estimatedDeliveryMinutes ?? 30,
+        isActive: patch.isActive ?? true,
+      };
+    },
+    async deleteStoreServiceArea(_storeId: string, _areaId: string) {
+      return true;
+    },
+    async createCatalogCategory(
+      storeId: string,
+      input,
+      locale = "en"
+    ): Promise<CatalogCategoryContract> {
+      return {
+        id: input.id ?? crypto.randomUUID(),
+        storeId,
+        nameEn: input.nameEn,
+        namePtBr: input.namePtBr,
+        localizedName: locale === "pt-BR" ? input.namePtBr : input.nameEn,
+        sortOrder: input.sortOrder ?? 0,
+        isActive: input.isActive ?? true,
+        products: [],
+      };
+    },
+    async updateCatalogCategory(
+      storeId: string,
+      categoryId: string,
+      patch,
+      locale = "en"
+    ): Promise<CatalogCategoryContract | null> {
+      const nameEn = patch.nameEn ?? "Updated Category";
+      const namePtBr = patch.namePtBr ?? "Categoria Atualizada";
+      return {
+        id: categoryId,
+        storeId,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        sortOrder: patch.sortOrder ?? 1,
+        isActive: patch.isActive ?? true,
+        products: [],
+      };
+    },
+    async deleteCatalogCategory(_storeId: string, _categoryId: string) {
+      return true;
+    },
+    async getProductStoreId(productId: string) {
+      if (productId.includes("not_found")) return null;
+      return "00000000-0000-4000-8000-000000000201";
+    },
+    async createCatalogProduct(
+      storeId: string,
+      input,
+      locale = "en"
+    ): Promise<CatalogProductContract> {
+      return {
+        id: input.id ?? crypto.randomUUID(),
+        storeId,
+        categoryId: input.categoryId,
+        sku: input.sku ?? null,
+        nameEn: input.nameEn,
+        namePtBr: input.namePtBr,
+        localizedName: locale === "pt-BR" ? input.namePtBr : input.nameEn,
+        descriptionEn: input.descriptionEn ?? "",
+        descriptionPtBr: input.descriptionPtBr ?? "",
+        localizedDescription:
+          locale === "pt-BR"
+            ? (input.descriptionPtBr ?? "")
+            : (input.descriptionEn ?? ""),
+        priceCents: input.priceCents,
+        isAvailable: input.isAvailable ?? true,
+        isPaused: input.isPaused ?? false,
+        maxPerOrder: input.maxPerOrder ?? 20,
+        unitOfMeasure: input.unitOfMeasure ?? "UNIT",
+        optionGroups: [],
+      };
+    },
+    async updateCatalogProduct(
+      storeId: string,
+      productId: string,
+      patch,
+      locale = "en"
+    ): Promise<CatalogProductContract | null> {
+      if (productId.includes("not_found")) return null;
+      const nameEn = patch.nameEn ?? "Updated Product";
+      const namePtBr = patch.namePtBr ?? "Produto Atualizado";
+      return {
+        id: productId,
+        storeId,
+        categoryId: patch.categoryId ?? "00000000-0000-4000-8000-000000000501",
+        sku: patch.sku ?? null,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        descriptionEn: patch.descriptionEn ?? "",
+        descriptionPtBr: patch.descriptionPtBr ?? "",
+        localizedDescription:
+          locale === "pt-BR"
+            ? (patch.descriptionPtBr ?? "")
+            : (patch.descriptionEn ?? ""),
+        priceCents: patch.priceCents ?? 3890,
+        isAvailable: patch.isAvailable ?? true,
+        isPaused: patch.isPaused ?? false,
+        maxPerOrder: patch.maxPerOrder ?? 20,
+        unitOfMeasure: patch.unitOfMeasure ?? "UNIT",
+        optionGroups: [],
+      };
+    },
+    async deleteCatalogProduct(_storeId: string, _productId: string) {
+      return true;
+    },
+    async createCatalogOptionGroup(
+      _productId: string,
+      _storeId: string,
+      input,
+      locale = "en"
+    ): Promise<CatalogOptionGroupContract> {
+      return {
+        id: input.id ?? crypto.randomUUID(),
+        nameEn: input.nameEn,
+        namePtBr: input.namePtBr,
+        localizedName: locale === "pt-BR" ? input.namePtBr : input.nameEn,
+        minSelections: input.minSelections,
+        maxSelections: input.maxSelections,
+        sortOrder: input.sortOrder ?? 0,
+        options: [],
+      };
+    },
+    async updateCatalogOptionGroup(
+      _productId: string,
+      groupId: string,
+      patch,
+      locale = "en"
+    ): Promise<CatalogOptionGroupContract | null> {
+      const nameEn = patch.nameEn ?? "Updated Group";
+      const namePtBr = patch.namePtBr ?? "Grupo Atualizado";
+      return {
+        id: groupId,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        minSelections: patch.minSelections ?? 0,
+        maxSelections: patch.maxSelections ?? 2,
+        sortOrder: patch.sortOrder ?? 0,
+        options: [],
+      };
+    },
+    async deleteCatalogOptionGroup(_productId: string, _groupId: string) {
+      return true;
+    },
+    async getOptionGroupContext(groupId: string) {
+      if (groupId.includes("not_found")) return null;
+      return {
+        productId: "00000000-0000-4000-8000-000000000601",
+        storeId: "00000000-0000-4000-8000-000000000201",
+      };
+    },
+    async createCatalogOption(
+      _groupId: string,
+      _storeId: string,
+      input,
+      locale = "en"
+    ): Promise<CatalogOptionContract> {
+      return {
+        id: input.id ?? crypto.randomUUID(),
+        nameEn: input.nameEn,
+        namePtBr: input.namePtBr,
+        localizedName: locale === "pt-BR" ? input.namePtBr : input.nameEn,
+        additionalPriceCents: input.additionalPriceCents,
+        isAvailable: input.isAvailable ?? true,
+        sortOrder: input.sortOrder ?? 0,
+      };
+    },
+    async updateCatalogOption(
+      optionId: string,
+      _storeId: string,
+      patch,
+      locale = "en"
+    ): Promise<CatalogOptionContract | null> {
+      const nameEn = patch.nameEn ?? "Updated Option";
+      const namePtBr = patch.namePtBr ?? "Opcao Atualizada";
+      return {
+        id: optionId,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        additionalPriceCents: patch.additionalPriceCents ?? 500,
+        isAvailable: patch.isAvailable ?? true,
+        sortOrder: patch.sortOrder ?? 0,
+      };
+    },
+    async deleteCatalogOption(_optionId: string, _storeId: string) {
+      return true;
+    },
+    async getOptionContext(optionId: string) {
+      if (optionId.includes("not_found")) return null;
+      return {
+        optionGroupId: "00000000-0000-4000-8000-000000000701",
+        productId: "00000000-0000-4000-8000-000000000601",
+        storeId: "00000000-0000-4000-8000-000000000201",
+      };
+    },
+    async saveStorageUploadIntent() {},
   };
 }
 
@@ -1271,6 +1513,259 @@ describe(
       assert.equal(logsRes.status, 200);
       const logsJson = (await logsRes.json()) as { data: AuditLogWriteRecord[] };
       assert.ok(logsJson.data.length >= 1);
+    });
+
+    it("executes Fase F (M04, M07, M09, M02) CRUD on live Supabase: categories, products, option groups, service areas, hours, signed uploads & cross-tenant 403 block", async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const ownerOrg101Token = signSupabaseHs256Jwt(
+        {
+          sub: "00000000-0000-4000-8000-000000000010",
+          aal: "aal1",
+          exp: nowSec + 600,
+        },
+        liveJwtSecret
+      );
+      const customerToken = signSupabaseHs256Jwt(
+        {
+          sub: "00000000-0000-4000-8000-000000000001",
+          aal: "aal1",
+          exp: nowSec + 600,
+        },
+        liveJwtSecret
+      );
+
+      // 1. GET /v1/stores/:slug resolves store by slug and returns full StoreDetailResponseContract
+      const detailRes = await fetch(
+        `${liveBaseUrl}/stores/paulista-burgers-jardins?locale=pt-BR`
+      );
+      assert.equal(detailRes.status, 200);
+      const detailJson = (await detailRes.json()) as {
+        data: { store: PublishedStoreContract; categories: CatalogCategoryContract[] };
+      };
+      assert.equal(
+        detailJson.data.store.id,
+        "00000000-0000-4000-8000-000000000201"
+      );
+      assert.ok(detailJson.data.categories.length >= 1);
+
+      // 2. Cross-tenant block: Partner Owner of Org 101 CANNOT create category in Store 202 (Org 102)
+      const crossCatRes = await fetch(
+        `${liveBaseUrl}/partner/stores/00000000-0000-4000-8000-000000000202/categories`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            nameEn: "Unauthorized Category",
+            namePtBr: "Categoria Nao Autorizada",
+          }),
+        }
+      );
+      assert.equal(crossCatRes.status, 403);
+
+      // 3. Create Category -> Product -> Option Group -> Option in Store 201 (Org 101)
+      const createCatRes = await fetch(
+        `${liveBaseUrl}/partner/stores/00000000-0000-4000-8000-000000000201/categories`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            nameEn: "Limited Desserts",
+            namePtBr: "Sobremesas Especiais",
+            sortOrder: 90,
+            isActive: true,
+          }),
+        }
+      );
+      assert.equal(createCatRes.status, 201);
+      const createdCat = ((await createCatRes.json()) as { data: CatalogCategoryContract })
+        .data;
+
+      const createProdRes = await fetch(
+        `${liveBaseUrl}/partner/stores/00000000-0000-4000-8000-000000000201/products`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            categoryId: createdCat.id,
+            sku: "DESSERT-BROWNIE-01",
+            nameEn: "Belgian Chocolate Brownie",
+            namePtBr: "Brownie de Chocolate Belga",
+            descriptionEn: "Warm brownie with fudge",
+            descriptionPtBr: "Brownie quente com calda",
+            priceCents: 2290,
+            isAvailable: true,
+          }),
+        }
+      );
+      assert.equal(createProdRes.status, 201);
+      const createdProd = ((await createProdRes.json()) as { data: CatalogProductContract })
+        .data;
+      assert.equal(createdProd.priceCents, 2290);
+
+      // Invalid option group bounds (minSelections > maxSelections) rejected with 400
+      const badGroupRes = await fetch(
+        `${liveBaseUrl}/partner/products/${createdProd.id}/option-groups`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            nameEn: "Invalid Bounds",
+            namePtBr: "Limites Invalidos",
+            minSelections: 3,
+            maxSelections: 1,
+          }),
+        }
+      );
+      assert.equal(badGroupRes.status, 400);
+
+      const createGroupRes = await fetch(
+        `${liveBaseUrl}/partner/products/${createdProd.id}/option-groups`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            nameEn: "Ice Cream Scoop",
+            namePtBr: "Bola de Sorvete",
+            minSelections: 0,
+            maxSelections: 2,
+            sortOrder: 1,
+          }),
+        }
+      );
+      assert.equal(createGroupRes.status, 201);
+      const createdGroup = (
+        (await createGroupRes.json()) as { data: CatalogOptionGroupContract }
+      ).data;
+
+      const createOptRes = await fetch(
+        `${liveBaseUrl}/partner/products/${createdProd.id}/option-groups/${createdGroup.id}/options`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            nameEn: "Vanilla Gelato",
+            namePtBr: "Gelato de Baunilha",
+            additionalPriceCents: 600,
+            isAvailable: true,
+          }),
+        }
+      );
+      assert.equal(createOptRes.status, 201);
+      const createdOpt = ((await createOptRes.json()) as { data: CatalogOptionContract })
+        .data;
+
+      // 4. Verify new product + option group + option immediately work in POST /v1/quotes
+      const quoteNewProdRes = await fetch(`${liveBaseUrl}/quotes`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${customerToken}`,
+          "X-Idempotency-Key": `live_fasef_quote_${Date.now()}`,
+        },
+        body: JSON.stringify({
+          storeId: "00000000-0000-4000-8000-000000000201",
+          fulfillmentModality: "PICKUP",
+          cartItems: [
+            {
+              productId: createdProd.id,
+              quantity: 1,
+              selectedOptions: [
+                {
+                  optionGroupId: createdGroup.id,
+                  optionId: createdOpt.id,
+                  quantity: 1,
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(quoteNewProdRes.status, 201);
+      const quoteNewProd = (
+        (await quoteNewProdRes.json()) as { data: ServerQuoteRecordContract }
+      ).data;
+      assert.equal(quoteNewProd.subtotalCents, 2290);
+      assert.equal(quoteNewProd.addonsCents, 600);
+
+      // 5. POST /v1/storage/signed-upload-url validates MIME, size, and tenant scope
+      const badMimeUploadRes = await fetch(`${liveBaseUrl}/storage/signed-upload-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ownerOrg101Token}`,
+        },
+        body: JSON.stringify({
+          bucket: "catalog-media",
+          fileName: "malware.exe",
+          mimeType: "application/x-msdownload",
+          fileSizeBytes: 2048,
+          storeId: "00000000-0000-4000-8000-000000000201",
+        }),
+      });
+      assert.equal(badMimeUploadRes.status, 400);
+
+      const crossStoreUploadRes = await fetch(
+        `${liveBaseUrl}/storage/signed-upload-url`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ownerOrg101Token}`,
+          },
+          body: JSON.stringify({
+            bucket: "catalog-media",
+            fileName: "brownie.webp",
+            mimeType: "image/webp",
+            fileSizeBytes: 150000,
+            storeId: "00000000-0000-4000-8000-000000000202",
+          }),
+        }
+      );
+      assert.equal(crossStoreUploadRes.status, 403);
+
+      const validUploadRes = await fetch(`${liveBaseUrl}/storage/signed-upload-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ownerOrg101Token}`,
+        },
+        body: JSON.stringify({
+          bucket: "catalog-media",
+          fileName: "brownie.webp",
+          mimeType: "image/webp",
+          fileSizeBytes: 150000,
+          storeId: "00000000-0000-4000-8000-000000000201",
+        }),
+      });
+      assert.equal(validUploadRes.status, 201);
+
+      // Clean up temporary catalog category (cascades to product, group, option) so seed catalog stays clean
+      const delCatRes = await fetch(
+        `${liveBaseUrl}/partner/stores/00000000-0000-4000-8000-000000000201/categories/${createdCat.id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${ownerOrg101Token}` },
+        }
+      );
+      assert.equal(delCatRes.status, 200);
     });
   }
 );

@@ -12,11 +12,16 @@ import {
   type AdminGovernanceActionContract,
   type AdminStaffScopeGrantRequestContract,
   type AuthenticatedActorProfileContract,
+  type AuthorizedStorageBucket,
   type BankAccountChangeRequestContract,
   type CatalogCategoryContract,
+  type CatalogCategoryUpsertContract,
   type CatalogOptionContract,
   type CatalogOptionGroupContract,
+  type CatalogOptionGroupUpsertContract,
+  type CatalogOptionUpsertContract,
   type CatalogProductContract,
+  type CatalogProductUpsertContract,
   type CourierLocationSampleContract,
   type CustomerAddressContract,
   type DeliveryOfferContract,
@@ -216,9 +221,10 @@ export function createSupabasePostgresRepository(params: {
 
     async getStoreById(storeId: string, locale: SupportedLocale = DEFAULT_LOCALE) {
       const storeUuid = toDeterministicUuid(storeId);
+      const slugCandidate = storeId.trim().toLowerCase();
       const res = await pool.query(
-        `SELECT * FROM public.stores WHERE id = $1 LIMIT 1`,
-        [storeUuid]
+        `SELECT * FROM public.stores WHERE id = $1 OR slug = $2 LIMIT 1`,
+        [storeUuid, slugCandidate]
       );
       if (res.rowCount === 0) return null;
       return mapRowToPublishedStore(res.rows[0] as Record<string, unknown>, locale);
@@ -226,9 +232,12 @@ export function createSupabasePostgresRepository(params: {
 
     async getStoreCatalog(storeId: string, locale: SupportedLocale = DEFAULT_LOCALE) {
       const storeUuid = toDeterministicUuid(storeId);
+      const slugCandidate = storeId.trim().toLowerCase();
       const storeRes = await pool.query(
-        `SELECT * FROM public.stores WHERE id = $1 AND status = 'ACTIVE' AND is_published = true LIMIT 1`,
-        [storeUuid]
+        `SELECT * FROM public.stores
+         WHERE (id = $1 OR slug = $2) AND status = 'ACTIVE' AND is_published = true
+         LIMIT 1`,
+        [storeUuid, slugCandidate]
       );
       if (storeRes.rowCount === 0) return null;
       const storeWithOrg = mapRowToPublishedStore(
@@ -236,45 +245,46 @@ export function createSupabasePostgresRepository(params: {
         locale
       );
       const { organizationId: _orgId, ...store } = storeWithOrg;
+      const resolvedStoreUuid = store.id;
 
       const [hoursRes, excRes, areasRes, catsRes, prodsRes, groupsRes, optsRes] =
         await Promise.all([
           pool.query(
             `SELECT day_of_week, opens_at, closes_at, is_overnight, is_closed
              FROM public.store_hours WHERE store_id = $1 ORDER BY day_of_week ASC, opens_at ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT exception_date::text AS exception_date, is_closed, opens_at, closes_at, reason
              FROM public.store_hour_exceptions WHERE store_id = $1 ORDER BY exception_date ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT id, store_id, name, radius_meters, base_fee_cents, per_km_fee_cents,
                     free_delivery_min_order_cents, estimated_delivery_minutes, is_active
              FROM public.store_service_areas WHERE store_id = $1 AND is_active = true ORDER BY radius_meters ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT id, store_id, name_en, name_pt_br, sort_order, is_active
              FROM public.catalog_categories WHERE store_id = $1 AND is_active = true ORDER BY sort_order ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT id, store_id, category_id, sku, name_en, name_pt_br, description_en, description_pt_br,
                     price_cents, is_available, is_paused, max_per_order, unit_of_measure
              FROM public.catalog_products WHERE store_id = $1 ORDER BY created_at ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT id, product_id, store_id, name_en, name_pt_br, min_selections, max_selections, sort_order
              FROM public.catalog_option_groups WHERE store_id = $1 ORDER BY sort_order ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
           pool.query(
             `SELECT id, option_group_id, store_id, name_en, name_pt_br, additional_price_cents, is_available, sort_order
              FROM public.catalog_options WHERE store_id = $1 ORDER BY sort_order ASC`,
-            [storeUuid]
+            [resolvedStoreUuid]
           ),
         ]);
 
@@ -413,20 +423,30 @@ export function createSupabasePostgresRepository(params: {
       const storeUuid = toDeterministicUuid(storeId);
       const res = await pool.query(
         `UPDATE public.stores
-         SET is_paused = COALESCE($2, is_paused),
-             pause_reason = CASE WHEN $2 = false THEN NULL ELSE COALESCE($3, pause_reason) END,
-             min_order_cents = COALESCE($4, min_order_cents),
-             prep_time_min_minutes = COALESCE($5, prep_time_min_minutes),
-             prep_time_max_minutes = COALESCE($6, prep_time_max_minutes)
+         SET name = COALESCE($2, name),
+             description_en = COALESCE($3, description_en),
+             description_pt_br = COALESCE($4, description_pt_br),
+             cuisine_category = COALESCE($5, cuisine_category),
+             is_paused = COALESCE($6, is_paused),
+             pause_reason = CASE WHEN $6 = false THEN NULL ELSE COALESCE($7, pause_reason) END,
+             min_order_cents = COALESCE($8, min_order_cents),
+             prep_time_min_minutes = COALESCE($9, prep_time_min_minutes),
+             prep_time_max_minutes = COALESCE($10, prep_time_max_minutes),
+             supported_modalities = COALESCE($11::public.fulfillment_modality[], supported_modalities)
          WHERE id = $1
          RETURNING *`,
         [
           storeUuid,
+          patch.name !== undefined ? patch.name : null,
+          patch.descriptionEn !== undefined ? patch.descriptionEn : null,
+          patch.descriptionPtBr !== undefined ? patch.descriptionPtBr : null,
+          patch.cuisineCategory !== undefined ? patch.cuisineCategory : null,
           patch.isPaused !== undefined ? patch.isPaused : null,
           patch.pauseReason !== undefined ? patch.pauseReason : null,
           patch.minOrderCents !== undefined ? patch.minOrderCents : null,
           patch.prepTimeMinMinutes !== undefined ? patch.prepTimeMinMinutes : null,
           patch.prepTimeMaxMinutes !== undefined ? patch.prepTimeMaxMinutes : null,
+          patch.supportedModalities !== undefined ? patch.supportedModalities : null,
         ]
       );
       if (res.rowCount === 0) return null;
@@ -1757,6 +1777,750 @@ export function createSupabasePostgresRepository(params: {
           sample.longitude,
           sample.accuracyMeters,
           sample.recordedAtIso,
+          isTestData,
+        ]
+      );
+    },
+
+    async replaceStoreOperatingHours(
+      storeId: string,
+      hours: StoreOperatingHourContract[]
+    ): Promise<StoreOperatingHourContract[]> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`DELETE FROM public.store_hours WHERE store_id = $1`, [
+          storeUuid,
+        ]);
+        for (const h of hours) {
+          await client.query(
+            `INSERT INTO public.store_hours (
+               id, store_id, day_of_week, opens_at, closes_at, is_overnight, is_closed, is_test_data
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              crypto.randomUUID(),
+              storeUuid,
+              h.dayOfWeek,
+              h.opensAt,
+              h.closesAt,
+              h.isOvernight,
+              h.isClosed,
+              isTestData,
+            ]
+          );
+        }
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+      const res = await pool.query(
+        `SELECT day_of_week, opens_at::text AS opens_at, closes_at::text AS closes_at, is_overnight, is_closed
+         FROM public.store_hours WHERE store_id = $1 ORDER BY day_of_week ASC, opens_at ASC`,
+        [storeUuid]
+      );
+      return res.rows.map((r) => ({
+        dayOfWeek: Number(r.day_of_week),
+        opensAt: String(r.opens_at),
+        closesAt: String(r.closes_at),
+        isOvernight: Boolean(r.is_overnight),
+        isClosed: Boolean(r.is_closed),
+      }));
+    },
+
+    async upsertStoreHourException(
+      storeId: string,
+      exception: StoreHourExceptionContract
+    ): Promise<StoreHourExceptionContract> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `INSERT INTO public.store_hour_exceptions (
+           id, store_id, exception_date, is_closed, opens_at, closes_at, reason, is_test_data
+         ) VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8)
+         ON CONFLICT (store_id, exception_date) DO UPDATE SET
+           is_closed = EXCLUDED.is_closed,
+           opens_at = EXCLUDED.opens_at,
+           closes_at = EXCLUDED.closes_at,
+           reason = EXCLUDED.reason
+         RETURNING exception_date::text AS exception_date, is_closed, opens_at::text AS opens_at, closes_at::text AS closes_at, reason`,
+        [
+          crypto.randomUUID(),
+          storeUuid,
+          exception.exceptionDate,
+          exception.isClosed,
+          exception.opensAt,
+          exception.closesAt,
+          exception.reason ?? "Holiday / Special Schedule",
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        exceptionDate: String(r.exception_date),
+        isClosed: Boolean(r.is_closed),
+        opensAt: r.opens_at ? String(r.opens_at) : null,
+        closesAt: r.closes_at ? String(r.closes_at) : null,
+        reason: r.reason ? String(r.reason) : null,
+      };
+    },
+
+    async deleteStoreHourException(
+      storeId: string,
+      exceptionDate: string
+    ): Promise<boolean> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `DELETE FROM public.store_hour_exceptions WHERE store_id = $1 AND exception_date = $2::date`,
+        [storeUuid, exceptionDate]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async createStoreServiceArea(
+      area: StoreServiceAreaContract
+    ): Promise<StoreServiceAreaContract> {
+      const areaUuid = rememberLogicalId(area.id);
+      const storeUuid = toDeterministicUuid(area.storeId);
+      const res = await pool.query(
+        `INSERT INTO public.store_service_areas (
+           id, store_id, name, radius_meters, base_fee_cents, per_km_fee_cents,
+           free_delivery_min_order_cents, estimated_delivery_minutes, is_active, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           radius_meters = EXCLUDED.radius_meters,
+           base_fee_cents = EXCLUDED.base_fee_cents,
+           per_km_fee_cents = EXCLUDED.per_km_fee_cents,
+           free_delivery_min_order_cents = EXCLUDED.free_delivery_min_order_cents,
+           estimated_delivery_minutes = EXCLUDED.estimated_delivery_minutes,
+           is_active = EXCLUDED.is_active
+         RETURNING *`,
+        [
+          areaUuid,
+          storeUuid,
+          area.name,
+          area.radiusMeters,
+          area.baseFeeCents,
+          area.perKmFeeCents,
+          area.freeDeliveryMinOrderCents,
+          area.estimatedDeliveryMinutes,
+          area.isActive,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        name: String(r.name),
+        radiusMeters: Number(r.radius_meters),
+        baseFeeCents: Number(r.base_fee_cents),
+        perKmFeeCents: Number(r.per_km_fee_cents),
+        freeDeliveryMinOrderCents:
+          r.free_delivery_min_order_cents !== null
+            ? Number(r.free_delivery_min_order_cents)
+            : null,
+        estimatedDeliveryMinutes: Number(r.estimated_delivery_minutes),
+        isActive: Boolean(r.is_active),
+      };
+    },
+
+    async updateStoreServiceArea(
+      storeId: string,
+      areaId: string,
+      patch: Partial<Omit<StoreServiceAreaContract, "id" | "storeId">>
+    ): Promise<StoreServiceAreaContract | null> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const areaUuid = toDeterministicUuid(areaId);
+      const res = await pool.query(
+        `UPDATE public.store_service_areas
+         SET name = COALESCE($3, name),
+             radius_meters = COALESCE($4, radius_meters),
+             base_fee_cents = COALESCE($5, base_fee_cents),
+             per_km_fee_cents = COALESCE($6, per_km_fee_cents),
+             free_delivery_min_order_cents = CASE WHEN $7::boolean THEN $8 ELSE free_delivery_min_order_cents END,
+             estimated_delivery_minutes = COALESCE($9, estimated_delivery_minutes),
+             is_active = COALESCE($10, is_active)
+         WHERE id = $1 AND store_id = $2
+         RETURNING *`,
+        [
+          areaUuid,
+          storeUuid,
+          patch.name !== undefined ? patch.name : null,
+          patch.radiusMeters !== undefined ? patch.radiusMeters : null,
+          patch.baseFeeCents !== undefined ? patch.baseFeeCents : null,
+          patch.perKmFeeCents !== undefined ? patch.perKmFeeCents : null,
+          patch.freeDeliveryMinOrderCents !== undefined,
+          patch.freeDeliveryMinOrderCents !== undefined
+            ? patch.freeDeliveryMinOrderCents
+            : null,
+          patch.estimatedDeliveryMinutes !== undefined
+            ? patch.estimatedDeliveryMinutes
+            : null,
+          patch.isActive !== undefined ? patch.isActive : null,
+        ]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        name: String(r.name),
+        radiusMeters: Number(r.radius_meters),
+        baseFeeCents: Number(r.base_fee_cents),
+        perKmFeeCents: Number(r.per_km_fee_cents),
+        freeDeliveryMinOrderCents:
+          r.free_delivery_min_order_cents !== null
+            ? Number(r.free_delivery_min_order_cents)
+            : null,
+        estimatedDeliveryMinutes: Number(r.estimated_delivery_minutes),
+        isActive: Boolean(r.is_active),
+      };
+    },
+
+    async deleteStoreServiceArea(storeId: string, areaId: string): Promise<boolean> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const areaUuid = toDeterministicUuid(areaId);
+      const res = await pool.query(
+        `DELETE FROM public.store_service_areas WHERE id = $1 AND store_id = $2`,
+        [areaUuid, storeUuid]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async createCatalogCategory(
+      storeId: string,
+      input: CatalogCategoryUpsertContract & { id?: string },
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogCategoryContract> {
+      const catUuid = input.id ? rememberLogicalId(input.id) : crypto.randomUUID();
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `INSERT INTO public.catalog_categories (
+           id, store_id, name_en, name_pt_br, sort_order, is_active, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (id) DO UPDATE SET
+           name_en = EXCLUDED.name_en,
+           name_pt_br = EXCLUDED.name_pt_br,
+           sort_order = EXCLUDED.sort_order,
+           is_active = EXCLUDED.is_active
+         RETURNING *`,
+        [
+          catUuid,
+          storeUuid,
+          input.nameEn,
+          input.namePtBr,
+          input.sortOrder ?? 0,
+          input.isActive ?? true,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        sortOrder: Number(r.sort_order),
+        isActive: Boolean(r.is_active),
+        products: [],
+      };
+    },
+
+    async updateCatalogCategory(
+      storeId: string,
+      categoryId: string,
+      patch: Partial<CatalogCategoryUpsertContract>,
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogCategoryContract | null> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const catUuid = toDeterministicUuid(categoryId);
+      const res = await pool.query(
+        `UPDATE public.catalog_categories
+         SET name_en = COALESCE($3, name_en),
+             name_pt_br = COALESCE($4, name_pt_br),
+             sort_order = COALESCE($5, sort_order),
+             is_active = COALESCE($6, is_active)
+         WHERE id = $1 AND store_id = $2
+         RETURNING *`,
+        [
+          catUuid,
+          storeUuid,
+          patch.nameEn !== undefined ? patch.nameEn : null,
+          patch.namePtBr !== undefined ? patch.namePtBr : null,
+          patch.sortOrder !== undefined ? patch.sortOrder : null,
+          patch.isActive !== undefined ? patch.isActive : null,
+        ]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        sortOrder: Number(r.sort_order),
+        isActive: Boolean(r.is_active),
+        products: [],
+      };
+    },
+
+    async deleteCatalogCategory(storeId: string, categoryId: string): Promise<boolean> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const catUuid = toDeterministicUuid(categoryId);
+      const res = await pool.query(
+        `DELETE FROM public.catalog_categories WHERE id = $1 AND store_id = $2`,
+        [catUuid, storeUuid]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async getProductStoreId(productId: string): Promise<string | null> {
+      const prodUuid = toDeterministicUuid(productId);
+      const res = await pool.query(
+        `SELECT store_id FROM public.catalog_products WHERE id = $1 LIMIT 1`,
+        [prodUuid]
+      );
+      if (res.rowCount === 0) return null;
+      return String((res.rows[0] as Record<string, unknown>).store_id);
+    },
+
+    async createCatalogProduct(
+      storeId: string,
+      input: CatalogProductUpsertContract & { id?: string },
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogProductContract> {
+      const prodUuid = input.id ? rememberLogicalId(input.id) : crypto.randomUUID();
+      const storeUuid = toDeterministicUuid(storeId);
+      const catUuid = toDeterministicUuid(input.categoryId);
+      const res = await pool.query(
+        `INSERT INTO public.catalog_products (
+           id, store_id, category_id, sku, name_en, name_pt_br,
+           description_en, description_pt_br, price_cents, image_path,
+           is_available, is_paused, max_per_order, unit_of_measure, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         ON CONFLICT (id) DO UPDATE SET
+           category_id = EXCLUDED.category_id,
+           sku = EXCLUDED.sku,
+           name_en = EXCLUDED.name_en,
+           name_pt_br = EXCLUDED.name_pt_br,
+           description_en = EXCLUDED.description_en,
+           description_pt_br = EXCLUDED.description_pt_br,
+           price_cents = EXCLUDED.price_cents,
+           image_path = EXCLUDED.image_path,
+           is_available = EXCLUDED.is_available,
+           is_paused = EXCLUDED.is_paused,
+           max_per_order = EXCLUDED.max_per_order,
+           unit_of_measure = EXCLUDED.unit_of_measure
+         RETURNING *`,
+        [
+          prodUuid,
+          storeUuid,
+          catUuid,
+          input.sku ?? null,
+          input.nameEn,
+          input.namePtBr,
+          input.descriptionEn ?? "",
+          input.descriptionPtBr ?? "",
+          input.priceCents,
+          input.imagePath ?? null,
+          input.isAvailable ?? true,
+          input.isPaused ?? false,
+          input.maxPerOrder ?? 20,
+          input.unitOfMeasure ?? "UNIT",
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      const descEn = String(r.description_en ?? "");
+      const descPtBr = String(r.description_pt_br ?? "");
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        categoryId: String(r.category_id),
+        sku: r.sku ? String(r.sku) : null,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        descriptionEn: descEn,
+        descriptionPtBr: descPtBr,
+        localizedDescription: locale === "pt-BR" ? descPtBr : descEn,
+        priceCents: Number(r.price_cents),
+        isAvailable: Boolean(r.is_available),
+        isPaused: Boolean(r.is_paused),
+        maxPerOrder: Number(r.max_per_order),
+        unitOfMeasure: String(r.unit_of_measure) as "UNIT" | "GRAM" | "KG",
+        optionGroups: [],
+      };
+    },
+
+    async updateCatalogProduct(
+      storeId: string,
+      productId: string,
+      patch: Partial<CatalogProductUpsertContract>,
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogProductContract | null> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const prodUuid = toDeterministicUuid(productId);
+      const res = await pool.query(
+        `UPDATE public.catalog_products
+         SET category_id = COALESCE($3, category_id),
+             sku = CASE WHEN $4::boolean THEN $5 ELSE sku END,
+             name_en = COALESCE($6, name_en),
+             name_pt_br = COALESCE($7, name_pt_br),
+             description_en = COALESCE($8, description_en),
+             description_pt_br = COALESCE($9, description_pt_br),
+             price_cents = COALESCE($10, price_cents),
+             image_path = CASE WHEN $11::boolean THEN $12 ELSE image_path END,
+             is_available = COALESCE($13, is_available),
+             is_paused = COALESCE($14, is_paused),
+             max_per_order = COALESCE($15, max_per_order),
+             unit_of_measure = COALESCE($16, unit_of_measure)
+         WHERE id = $1 AND store_id = $2
+         RETURNING *`,
+        [
+          prodUuid,
+          storeUuid,
+          patch.categoryId !== undefined ? toDeterministicUuid(patch.categoryId) : null,
+          patch.sku !== undefined,
+          patch.sku !== undefined ? patch.sku : null,
+          patch.nameEn !== undefined ? patch.nameEn : null,
+          patch.namePtBr !== undefined ? patch.namePtBr : null,
+          patch.descriptionEn !== undefined ? patch.descriptionEn : null,
+          patch.descriptionPtBr !== undefined ? patch.descriptionPtBr : null,
+          patch.priceCents !== undefined ? patch.priceCents : null,
+          patch.imagePath !== undefined,
+          patch.imagePath !== undefined ? patch.imagePath : null,
+          patch.isAvailable !== undefined ? patch.isAvailable : null,
+          patch.isPaused !== undefined ? patch.isPaused : null,
+          patch.maxPerOrder !== undefined ? patch.maxPerOrder : null,
+          patch.unitOfMeasure !== undefined ? patch.unitOfMeasure : null,
+        ]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      const descEn = String(r.description_en ?? "");
+      const descPtBr = String(r.description_pt_br ?? "");
+      return {
+        id: String(r.id),
+        storeId: String(r.store_id),
+        categoryId: String(r.category_id),
+        sku: r.sku ? String(r.sku) : null,
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        descriptionEn: descEn,
+        descriptionPtBr: descPtBr,
+        localizedDescription: locale === "pt-BR" ? descPtBr : descEn,
+        priceCents: Number(r.price_cents),
+        isAvailable: Boolean(r.is_available),
+        isPaused: Boolean(r.is_paused),
+        maxPerOrder: Number(r.max_per_order),
+        unitOfMeasure: String(r.unit_of_measure) as "UNIT" | "GRAM" | "KG",
+        optionGroups: [],
+      };
+    },
+
+    async deleteCatalogProduct(storeId: string, productId: string): Promise<boolean> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const prodUuid = toDeterministicUuid(productId);
+      const res = await pool.query(
+        `DELETE FROM public.catalog_products WHERE id = $1 AND store_id = $2`,
+        [prodUuid, storeUuid]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async createCatalogOptionGroup(
+      productId: string,
+      storeId: string,
+      input: CatalogOptionGroupUpsertContract & { id?: string },
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogOptionGroupContract> {
+      const groupUuid = input.id ? rememberLogicalId(input.id) : crypto.randomUUID();
+      const prodUuid = toDeterministicUuid(productId);
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `INSERT INTO public.catalog_option_groups (
+           id, product_id, store_id, name_en, name_pt_br,
+           min_selections, max_selections, sort_order, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET
+           name_en = EXCLUDED.name_en,
+           name_pt_br = EXCLUDED.name_pt_br,
+           min_selections = EXCLUDED.min_selections,
+           max_selections = EXCLUDED.max_selections,
+           sort_order = EXCLUDED.sort_order
+         RETURNING *`,
+        [
+          groupUuid,
+          prodUuid,
+          storeUuid,
+          input.nameEn,
+          input.namePtBr,
+          input.minSelections,
+          input.maxSelections,
+          input.sortOrder ?? 0,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        minSelections: Number(r.min_selections),
+        maxSelections: Number(r.max_selections),
+        sortOrder: Number(r.sort_order),
+        options: [],
+      };
+    },
+
+    async updateCatalogOptionGroup(
+      productId: string,
+      groupId: string,
+      patch: Partial<CatalogOptionGroupUpsertContract>,
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogOptionGroupContract | null> {
+      const prodUuid = toDeterministicUuid(productId);
+      const groupUuid = toDeterministicUuid(groupId);
+      const res = await pool.query(
+        `UPDATE public.catalog_option_groups
+         SET name_en = COALESCE($3, name_en),
+             name_pt_br = COALESCE($4, name_pt_br),
+             min_selections = COALESCE($5, min_selections),
+             max_selections = COALESCE($6, max_selections),
+             sort_order = COALESCE($7, sort_order)
+         WHERE id = $1 AND product_id = $2
+         RETURNING *`,
+        [
+          groupUuid,
+          prodUuid,
+          patch.nameEn !== undefined ? patch.nameEn : null,
+          patch.namePtBr !== undefined ? patch.namePtBr : null,
+          patch.minSelections !== undefined ? patch.minSelections : null,
+          patch.maxSelections !== undefined ? patch.maxSelections : null,
+          patch.sortOrder !== undefined ? patch.sortOrder : null,
+        ]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        minSelections: Number(r.min_selections),
+        maxSelections: Number(r.max_selections),
+        sortOrder: Number(r.sort_order),
+        options: [],
+      };
+    },
+
+    async deleteCatalogOptionGroup(
+      productId: string,
+      groupId: string
+    ): Promise<boolean> {
+      const prodUuid = toDeterministicUuid(productId);
+      const groupUuid = toDeterministicUuid(groupId);
+      const res = await pool.query(
+        `DELETE FROM public.catalog_option_groups WHERE id = $1 AND product_id = $2`,
+        [groupUuid, prodUuid]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async getOptionGroupContext(
+      groupId: string
+    ): Promise<{ productId: string; storeId: string } | null> {
+      const groupUuid = toDeterministicUuid(groupId);
+      const res = await pool.query(
+        `SELECT product_id, store_id FROM public.catalog_option_groups WHERE id = $1 LIMIT 1`,
+        [groupUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        productId: String(r.product_id),
+        storeId: String(r.store_id),
+      };
+    },
+
+    async createCatalogOption(
+      groupId: string,
+      storeId: string,
+      input: CatalogOptionUpsertContract & { id?: string },
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogOptionContract> {
+      const optUuid = input.id ? rememberLogicalId(input.id) : crypto.randomUUID();
+      const groupUuid = toDeterministicUuid(groupId);
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `INSERT INTO public.catalog_options (
+           id, option_group_id, store_id, name_en, name_pt_br,
+           additional_price_cents, is_available, sort_order, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET
+           name_en = EXCLUDED.name_en,
+           name_pt_br = EXCLUDED.name_pt_br,
+           additional_price_cents = EXCLUDED.additional_price_cents,
+           is_available = EXCLUDED.is_available,
+           sort_order = EXCLUDED.sort_order
+         RETURNING *`,
+        [
+          optUuid,
+          groupUuid,
+          storeUuid,
+          input.nameEn,
+          input.namePtBr,
+          input.additionalPriceCents,
+          input.isAvailable ?? true,
+          input.sortOrder ?? 0,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        additionalPriceCents: Number(r.additional_price_cents),
+        isAvailable: Boolean(r.is_available),
+        sortOrder: Number(r.sort_order),
+      };
+    },
+
+    async updateCatalogOption(
+      optionId: string,
+      storeId: string,
+      patch: Partial<CatalogOptionUpsertContract>,
+      locale: SupportedLocale = DEFAULT_LOCALE
+    ): Promise<CatalogOptionContract | null> {
+      const optUuid = toDeterministicUuid(optionId);
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `UPDATE public.catalog_options
+         SET name_en = COALESCE($3, name_en),
+             name_pt_br = COALESCE($4, name_pt_br),
+             additional_price_cents = COALESCE($5, additional_price_cents),
+             is_available = COALESCE($6, is_available),
+             sort_order = COALESCE($7, sort_order)
+         WHERE id = $1 AND store_id = $2
+         RETURNING *`,
+        [
+          optUuid,
+          storeUuid,
+          patch.nameEn !== undefined ? patch.nameEn : null,
+          patch.namePtBr !== undefined ? patch.namePtBr : null,
+          patch.additionalPriceCents !== undefined
+            ? patch.additionalPriceCents
+            : null,
+          patch.isAvailable !== undefined ? patch.isAvailable : null,
+          patch.sortOrder !== undefined ? patch.sortOrder : null,
+        ]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      const nameEn = String(r.name_en);
+      const namePtBr = String(r.name_pt_br);
+      return {
+        id: String(r.id),
+        nameEn,
+        namePtBr,
+        localizedName: locale === "pt-BR" ? namePtBr : nameEn,
+        additionalPriceCents: Number(r.additional_price_cents),
+        isAvailable: Boolean(r.is_available),
+        sortOrder: Number(r.sort_order),
+      };
+    },
+
+    async deleteCatalogOption(optionId: string, storeId: string): Promise<boolean> {
+      const optUuid = toDeterministicUuid(optionId);
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `DELETE FROM public.catalog_options WHERE id = $1 AND store_id = $2`,
+        [optUuid, storeUuid]
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async getOptionContext(
+      optionId: string
+    ): Promise<{ optionGroupId: string; productId: string; storeId: string } | null> {
+      const optUuid = toDeterministicUuid(optionId);
+      const res = await pool.query(
+        `SELECT o.option_group_id, g.product_id, o.store_id
+         FROM public.catalog_options o
+         JOIN public.catalog_option_groups g ON g.id = o.option_group_id
+         WHERE o.id = $1
+         LIMIT 1`,
+        [optUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        optionGroupId: String(r.option_group_id),
+        productId: String(r.product_id),
+        storeId: String(r.store_id),
+      };
+    },
+
+    async saveStorageUploadIntent(params: {
+      id: string;
+      bucket: AuthorizedStorageBucket;
+      objectPath: string;
+      mimeType: string;
+      fileSizeBytes: number;
+      uploadedBy: string;
+      storeId: string | null;
+      organizationId: string | null;
+      signedTokenHash: string;
+      expiresAtIso: string;
+    }): Promise<void> {
+      const intentUuid = rememberLogicalId(params.id);
+      const uploadedByUuid = toDeterministicUuid(params.uploadedBy);
+      const storeUuid = params.storeId ? toDeterministicUuid(params.storeId) : null;
+      const orgUuid = params.organizationId
+        ? toDeterministicUuid(params.organizationId)
+        : null;
+      await pool.query(
+        `INSERT INTO public.storage_upload_intents (
+           id, bucket_id, object_path, mime_type, file_size_bytes,
+           uploaded_by, store_id, organization_id, signed_token_hash, expires_at, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          intentUuid,
+          params.bucket,
+          params.objectPath,
+          params.mimeType,
+          params.fileSizeBytes,
+          uploadedByUuid,
+          storeUuid,
+          orgUuid,
+          params.signedTokenHash,
+          params.expiresAtIso,
           isTestData,
         ]
       );

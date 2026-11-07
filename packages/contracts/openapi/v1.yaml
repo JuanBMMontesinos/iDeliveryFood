@@ -298,6 +298,179 @@ paths:
           description: Delivery task marked DELIVERED
         "409":
           description: Invalid 4-digit OTP code
+  /stores/{storeId}:
+    get:
+      operationId: getStoreDetail
+      summary: Retrieve published store detail by ID or slug along with active catalog, availability, hours, exceptions, and service areas (M04)
+      responses:
+        "200":
+          description: Published store detail and catalog
+  /partner/stores/{storeId}:
+    patch:
+      operationId: updatePartnerStore
+      summary: Update store profile, modalities, pause status, and preparation time bounds (M07)
+      responses:
+        "200":
+          description: Store updated
+  /partner/stores/{storeId}/hours:
+    get:
+      operationId: getPartnerStoreHours
+      summary: Retrieve store weekly operating hours and exceptions (M07)
+      responses:
+        "200":
+          description: Weekly hours and exceptions
+    put:
+      operationId: replacePartnerStoreHours
+      summary: Replace store weekly operating hours in America/Sao_Paulo (M07)
+      responses:
+        "200":
+          description: Weekly hours updated
+  /partner/stores/{storeId}/hour-exceptions:
+    post:
+      operationId: upsertPartnerStoreHourException
+      summary: Create or update a holiday/special schedule exception (M07)
+      responses:
+        "201":
+          description: Hour exception upserted
+  /partner/stores/{storeId}/hour-exceptions/{exceptionDate}:
+    delete:
+      operationId: deletePartnerStoreHourException
+      summary: Delete a store schedule exception by date (M07)
+      responses:
+        "200":
+          description: Hour exception deleted
+  /partner/stores/{storeId}/service-areas:
+    get:
+      operationId: listPartnerStoreServiceAreas
+      summary: List store delivery coverage areas and fee tiers (M04/M07)
+      responses:
+        "200":
+          description: Service areas list
+    post:
+      operationId: createPartnerStoreServiceArea
+      summary: Create a new store service area with integer BRL centavo fee rules (M04/M07)
+      responses:
+        "201":
+          description: Service area created
+  /partner/stores/{storeId}/service-areas/{areaId}:
+    patch:
+      operationId: updatePartnerStoreServiceArea
+      summary: Update a store service area (M04/M07)
+      responses:
+        "200":
+          description: Service area updated
+    delete:
+      operationId: deletePartnerStoreServiceArea
+      summary: Delete a store service area (M04/M07)
+      responses:
+        "200":
+          description: Service area deleted
+  /partner/stores/{storeId}/categories:
+    get:
+      operationId: listPartnerStoreCategories
+      summary: List store catalog categories (M04/M07)
+      responses:
+        "200":
+          description: Categories list
+    post:
+      operationId: createPartnerStoreCategory
+      summary: Create a catalog category with bilingual names (en and pt-BR) (M04/M07)
+      responses:
+        "201":
+          description: Category created
+  /partner/stores/{storeId}/categories/{categoryId}:
+    patch:
+      operationId: updatePartnerStoreCategory
+      summary: Update a catalog category (M04/M07)
+      responses:
+        "200":
+          description: Category updated
+    delete:
+      operationId: deletePartnerStoreCategory
+      summary: Delete a catalog category (M04/M07)
+      responses:
+        "200":
+          description: Category deleted
+  /partner/stores/{storeId}/products:
+    get:
+      operationId: listPartnerStoreProducts
+      summary: List store catalog products (M04/M07)
+      responses:
+        "200":
+          description: Products list
+    post:
+      operationId: createPartnerStoreProduct
+      summary: Create a catalog product priced in integer BRL cents (M04/M07)
+      responses:
+        "201":
+          description: Product created
+  /partner/stores/{storeId}/products/{productId}:
+    patch:
+      operationId: updatePartnerStoreProduct
+      summary: Update a catalog product (M04/M07)
+      responses:
+        "200":
+          description: Product updated
+    delete:
+      operationId: deletePartnerStoreProduct
+      summary: Delete a catalog product (M04/M07)
+      responses:
+        "200":
+          description: Product deleted
+  /partner/products/{productId}/option-groups:
+    post:
+      operationId: createCatalogOptionGroup
+      summary: Create an option group on a product enforcing minSelections <= maxSelections (M04/M07)
+      responses:
+        "201":
+          description: Option group created
+  /partner/products/{productId}/option-groups/{groupId}:
+    patch:
+      operationId: updateCatalogOptionGroup
+      summary: Update a product option group (M04/M07)
+      responses:
+        "200":
+          description: Option group updated
+    delete:
+      operationId: deleteCatalogOptionGroup
+      summary: Delete a product option group (M04/M07)
+      responses:
+        "200":
+          description: Option group deleted
+  /partner/products/{productId}/option-groups/{groupId}/options:
+    post:
+      operationId: createCatalogOption
+      summary: Create an option modifier priced in integer BRL cents (M04/M07)
+      responses:
+        "201":
+          description: Option created
+  /partner/products/{productId}/options/{optionId}:
+    patch:
+      operationId: updateCatalogOption
+      summary: Update a catalog option modifier (M04/M07)
+      responses:
+        "200":
+          description: Option updated
+    delete:
+      operationId: deleteCatalogOption
+      summary: Delete a catalog option modifier (M04/M07)
+      responses:
+        "200":
+          description: Option deleted
+  /organizations/{orgId}/catalog/batch:
+    post:
+      operationId: executeMultiUnitCatalogBatchV2
+      summary: Execute or preview (dryRun) a multi-unit catalog batch update persisted in PostgreSQL (M09)
+      responses:
+        "200":
+          description: Batch catalog update results per target store
+  /storage/signed-upload-url:
+    post:
+      operationId: createSignedUploadUrl
+      summary: Generate a signed upload URL validating bucket, MIME type, file size limit, and tenant scope (M02/M07)
+      responses:
+        "201":
+          description: Signed upload URL and upload intent created
 components:
   schemas:
     ApiErrorEnvelope:

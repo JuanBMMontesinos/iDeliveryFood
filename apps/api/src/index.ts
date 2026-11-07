@@ -12,6 +12,7 @@ import {
   inspectProviderReadiness,
 } from "@ideliveryfood/config";
 import {
+  assertIntegerCents,
   CURRENCY_CODE,
   DEFAULT_LOCALE,
   resolveSupportedLocale,
@@ -19,11 +20,18 @@ import {
   type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
   type AuthenticatedActorProfileContract,
+  type AuthorizedStorageBucket,
   type BankAccountChangeRequestContract,
   type BatchCatalogUpdateItemResultContract,
   type CartItemSelectionContract,
   type CatalogCategoryContract,
+  type CatalogCategoryUpsertContract,
+  type CatalogOptionContract,
+  type CatalogOptionGroupContract,
+  type CatalogOptionGroupUpsertContract,
+  type CatalogOptionUpsertContract,
   type CatalogProductContract,
+  type CatalogProductUpsertContract,
   type CourierLocationSampleContract,
   type CustomerAddressContract,
   type DeliveryOfferContract,
@@ -40,8 +48,10 @@ import {
   type RefundRecordContract,
   type ServerQuoteRecordContract,
   type SettlementRecordContract,
+  type SignedUploadUrlResponseContract,
   type StaffRole,
   type StoreCatalogResponseContract,
+  type StoreDetailResponseContract,
   type StoreHourExceptionContract,
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
@@ -260,6 +270,106 @@ export interface ApiDataRepository {
   }): Promise<void>;
   completeDeliveryTask(task: DeliveryTaskContract): Promise<void>;
   saveCourierLocationSample(sample: CourierLocationSampleContract): Promise<void>;
+
+  replaceStoreOperatingHours(
+    storeId: string,
+    hours: StoreOperatingHourContract[]
+  ): Promise<StoreOperatingHourContract[]>;
+  upsertStoreHourException(
+    storeId: string,
+    exception: StoreHourExceptionContract
+  ): Promise<StoreHourExceptionContract>;
+  deleteStoreHourException(
+    storeId: string,
+    exceptionDate: string
+  ): Promise<boolean>;
+
+  createStoreServiceArea(
+    area: StoreServiceAreaContract
+  ): Promise<StoreServiceAreaContract>;
+  updateStoreServiceArea(
+    storeId: string,
+    areaId: string,
+    patch: Partial<Omit<StoreServiceAreaContract, "id" | "storeId">>
+  ): Promise<StoreServiceAreaContract | null>;
+  deleteStoreServiceArea(storeId: string, areaId: string): Promise<boolean>;
+
+  createCatalogCategory(
+    storeId: string,
+    input: CatalogCategoryUpsertContract & { id?: string },
+    locale?: SupportedLocale
+  ): Promise<CatalogCategoryContract>;
+  updateCatalogCategory(
+    storeId: string,
+    categoryId: string,
+    patch: Partial<CatalogCategoryUpsertContract>,
+    locale?: SupportedLocale
+  ): Promise<CatalogCategoryContract | null>;
+  deleteCatalogCategory(storeId: string, categoryId: string): Promise<boolean>;
+
+  getProductStoreId(productId: string): Promise<string | null>;
+  createCatalogProduct(
+    storeId: string,
+    input: CatalogProductUpsertContract & { id?: string },
+    locale?: SupportedLocale
+  ): Promise<CatalogProductContract>;
+  updateCatalogProduct(
+    storeId: string,
+    productId: string,
+    patch: Partial<CatalogProductUpsertContract>,
+    locale?: SupportedLocale
+  ): Promise<CatalogProductContract | null>;
+  deleteCatalogProduct(storeId: string, productId: string): Promise<boolean>;
+
+  createCatalogOptionGroup(
+    productId: string,
+    storeId: string,
+    input: CatalogOptionGroupUpsertContract & { id?: string },
+    locale?: SupportedLocale
+  ): Promise<CatalogOptionGroupContract>;
+  updateCatalogOptionGroup(
+    productId: string,
+    groupId: string,
+    patch: Partial<CatalogOptionGroupUpsertContract>,
+    locale?: SupportedLocale
+  ): Promise<CatalogOptionGroupContract | null>;
+  deleteCatalogOptionGroup(
+    productId: string,
+    groupId: string
+  ): Promise<boolean>;
+  getOptionGroupContext(
+    groupId: string
+  ): Promise<{ productId: string; storeId: string } | null>;
+
+  createCatalogOption(
+    groupId: string,
+    storeId: string,
+    input: CatalogOptionUpsertContract & { id?: string },
+    locale?: SupportedLocale
+  ): Promise<CatalogOptionContract>;
+  updateCatalogOption(
+    optionId: string,
+    storeId: string,
+    patch: Partial<CatalogOptionUpsertContract>,
+    locale?: SupportedLocale
+  ): Promise<CatalogOptionContract | null>;
+  deleteCatalogOption(optionId: string, storeId: string): Promise<boolean>;
+  getOptionContext(
+    optionId: string
+  ): Promise<{ optionGroupId: string; productId: string; storeId: string } | null>;
+
+  saveStorageUploadIntent(params: {
+    id: string;
+    bucket: AuthorizedStorageBucket;
+    objectPath: string;
+    mimeType: string;
+    fileSizeBytes: number;
+    uploadedBy: string;
+    storeId: string | null;
+    organizationId: string | null;
+    signedTokenHash: string;
+    expiresAtIso: string;
+  }): Promise<void>;
 }
 
 /**
@@ -950,9 +1060,9 @@ export function createApiServer(deps: {
         return;
       }
 
-      // 9b. POST /v1/organizations/:orgId/catalog-batch (M09 Multi-unit batch update with partial results)
+      // 9b. POST /v1/organizations/:orgId/catalog-batch & /v1/organizations/:orgId/catalog/batch (M09 Multi-unit batch update with partial results)
       const orgBatchMatch = pathname.match(
-        /^\/v1\/organizations\/([^/]+)\/catalog-batch$/
+        /^\/v1\/organizations\/([^/]+)\/catalog(?:-batch|\/batch)$/
       );
       if (method === "POST" && orgBatchMatch) {
         if (!actor) {
@@ -969,6 +1079,17 @@ export function createApiServer(deps: {
         const { json: body } = await readRawAndJsonBody(req);
         const targetStoreIds = (body.targetStoreIds as string[]) ?? [];
         const productId = String(body.productId ?? "");
+        const dryRun = Boolean(body.dryRun);
+        const patch: Partial<CatalogProductUpsertContract> = {};
+        if (body.priceCents !== undefined) {
+          patch.priceCents = assertIntegerCents(Number(body.priceCents), "priceCents");
+        }
+        if (body.isAvailable !== undefined) {
+          patch.isAvailable = Boolean(body.isAvailable);
+        }
+        if (body.isPaused !== undefined) {
+          patch.isPaused = Boolean(body.isPaused);
+        }
         const results: BatchCatalogUpdateItemResultContract[] = [];
 
         for (const targetStoreId of targetStoreIds) {
@@ -991,11 +1112,28 @@ export function createApiServer(deps: {
               reasonCode: decision.reasonCode,
             });
           } else {
+            if (!dryRun && Object.keys(patch).length > 0) {
+              const updated = await deps.repository.updateCatalogProduct(
+                targetStoreId,
+                productId,
+                patch,
+                locale
+              );
+              if (!updated) {
+                results.push({
+                  storeId: targetStoreId,
+                  productId,
+                  status: "NOT_FOUND",
+                  reasonCode: "PRODUCT_NOT_FOUND_IN_UNIT",
+                });
+                continue;
+              }
+            }
             results.push({
               storeId: targetStoreId,
               productId,
               status: "APPLIED",
-              reasonCode: "APPLIED_TO_UNIT",
+              reasonCode: dryRun ? "DRY_RUN_ELIGIBLE" : "APPLIED_TO_UNIT",
             });
           }
         }
@@ -1003,19 +1141,22 @@ export function createApiServer(deps: {
         await deps.repository.appendAuditLog({
           id: crypto.randomUUID(),
           actorId: actor.id,
-          action: "MULTI_UNIT_CATALOG_BATCH_EXECUTED",
+          action: dryRun
+            ? "MULTI_UNIT_CATALOG_BATCH_DRY_RUN"
+            : "MULTI_UNIT_CATALOG_BATCH_EXECUTED",
           targetType: "ORGANIZATION",
           targetId: orgId,
           correlationId,
           reason: `Batch update for product ${productId}`,
           redactedPayload: {
+            dryRun,
             appliedCount: results.filter((r) => r.status === "APPLIED").length,
             deniedCount: results.filter((r) => r.status === "DENIED_SCOPE").length,
           },
           createdAt: new Date().toISOString(),
         });
 
-        sendJson(res, 200, correlationId, { data: results });
+        sendJson(res, 200, correlationId, { data: results, dryRun });
         return;
       }
 
@@ -1888,10 +2029,10 @@ export function createApiServer(deps: {
         }
       }
 
-      // 16. PATCH /v1/stores/:storeId/settings (M07 — Partner store pause/unpause, prep time, minOrderCents)
-      const storeSettingsMatch = pathname.match(
-        /^\/v1\/stores\/([^/]+)\/settings$/
-      );
+      // 16. PATCH /v1/stores/:storeId/settings & PATCH /v1/partner/stores/:storeId (M07 — Partner store pause/unpause, prep time, minOrderCents)
+      const storeSettingsMatch =
+        pathname.match(/^\/v1\/stores\/([^/]+)\/settings$/) ??
+        pathname.match(/^\/v1\/partner\/stores\/([^/]+)$/);
       if (method === "PATCH" && storeSettingsMatch) {
         if (!actor) {
           sendError(
@@ -1937,7 +2078,7 @@ export function createApiServer(deps: {
         const decision = authorizePartnerScope({
           actor,
           organizationId,
-          storeId,
+          storeId: targetStore.id,
           allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
         });
 
@@ -1954,6 +2095,13 @@ export function createApiServer(deps: {
 
         try {
           const patch: StoreSettingsPatchContract = {};
+          if (body.name !== undefined) patch.name = String(body.name).trim();
+          if (body.descriptionEn !== undefined)
+            patch.descriptionEn = String(body.descriptionEn);
+          if (body.descriptionPtBr !== undefined)
+            patch.descriptionPtBr = String(body.descriptionPtBr);
+          if (body.cuisineCategory !== undefined)
+            patch.cuisineCategory = String(body.cuisineCategory).trim();
           if (body.isPaused !== undefined) patch.isPaused = Boolean(body.isPaused);
           if (body.pauseReason !== undefined) {
             patch.pauseReason = body.pauseReason
@@ -1968,10 +2116,14 @@ export function createApiServer(deps: {
           if (body.prepTimeMaxMinutes !== undefined) {
             patch.prepTimeMaxMinutes = Number(body.prepTimeMaxMinutes);
           }
+          if (Array.isArray(body.supportedModalities)) {
+            patch.supportedModalities =
+              body.supportedModalities as FulfillmentModality[];
+          }
           validateStoreSettingsPatch(patch);
 
           const updatedStore = await deps.repository.updateStoreSettings(
-            storeId,
+            targetStore.id,
             patch,
             locale
           );
@@ -2994,6 +3146,1279 @@ export function createApiServer(deps: {
         await deps.repository.completeDeliveryTask(updatedTask);
 
         sendJson(res, 200, correlationId, { data: updatedTask });
+        return;
+      }
+
+      // ======================================================================
+      // FASE F: M04 / M07 / M09 / M02 Store Detail, Hours, Service Areas,
+      //         Catalog CRUD (Categories, Products, Option Groups, Options)
+      //         & Signed Storage Upload URLs
+      // ======================================================================
+
+      // 26. GET /v1/stores/:storeId (M04 — Public Store Detail by ID or Slug + Active Catalog + Availability + Service Areas)
+      const publicStoreDetailMatch = pathname.match(/^\/v1\/stores\/([^/]+)$/);
+      if (method === "GET" && publicStoreDetailMatch) {
+        const storeIdOrSlug = publicStoreDetailMatch[1] ?? "";
+        const catalogData = await deps.repository.getStoreCatalog(
+          storeIdOrSlug,
+          locale
+        );
+        if (!catalogData) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Published store ${storeIdOrSlug} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const availability = evaluateStoreAvailability({
+          storeId: catalogData.store.id,
+          isPublished: true,
+          isPaused: catalogData.store.isPaused,
+          weeklyHours: catalogData.weeklyHours,
+          exceptions: catalogData.exceptions,
+        });
+
+        const payload: StoreDetailResponseContract = {
+          store: catalogData.store,
+          availability,
+          categories: catalogData.categories,
+          serviceAreas: catalogData.serviceAreas,
+          hours: catalogData.weeklyHours,
+          exceptions: catalogData.exceptions,
+        };
+        sendJson(res, 200, correlationId, { data: payload });
+        return;
+      }
+
+      // 27. GET / PUT /v1/partner/stores/:storeId/hours (M07 — Store Weekly Operating Hours)
+      const partnerHoursMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/hours$/
+      );
+      if (partnerHoursMatch && (method === "GET" || method === "PUT")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerHoursMatch[1] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles:
+            method === "GET"
+              ? ["partner_owner", "partner_manager", "partner_operator", "partner_catalog"]
+              : ["partner_owner", "partner_manager"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage store operating hours.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const catalogData = await deps.repository.getStoreCatalog(targetStore.id, locale);
+          sendJson(res, 200, correlationId, {
+            data: {
+              hours: catalogData?.weeklyHours ?? [],
+              exceptions: catalogData?.exceptions ?? [],
+            },
+          });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        if (!Array.isArray(body.hours)) {
+          sendError(res, 400, "VALIDATION_ERROR", "hours array is required.", correlationId);
+          return;
+        }
+
+        const timeRegex = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+        const normalizedHours: StoreOperatingHourContract[] = [];
+        for (const raw of body.hours as Array<Record<string, unknown>>) {
+          const dayOfWeek = Number(raw.dayOfWeek);
+          const opensAt = String(raw.opensAt ?? "").trim();
+          const closesAt = String(raw.closesAt ?? "").trim();
+          if (
+            !Number.isInteger(dayOfWeek) ||
+            dayOfWeek < 0 ||
+            dayOfWeek > 6 ||
+            !timeRegex.test(opensAt) ||
+            !timeRegex.test(closesAt)
+          ) {
+            sendError(
+              res,
+              400,
+              "INVALID_STORE_HOURS",
+              "dayOfWeek must be 0..6 and opensAt/closesAt must be valid HH:mm or HH:mm:ss times.",
+              correlationId
+            );
+            return;
+          }
+          normalizedHours.push({
+            dayOfWeek,
+            opensAt: opensAt.length === 5 ? `${opensAt}:00` : opensAt,
+            closesAt: closesAt.length === 5 ? `${closesAt}:00` : closesAt,
+            isOvernight: Boolean(raw.isOvernight),
+            isClosed: Boolean(raw.isClosed),
+          });
+        }
+
+        const savedHours = await deps.repository.replaceStoreOperatingHours(
+          targetStore.id,
+          normalizedHours
+        );
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "STORE_OPERATING_HOURS_UPDATED",
+          targetType: "STORE",
+          targetId: targetStore.id,
+          correlationId,
+          reason: "Updated weekly operating hours",
+          redactedPayload: { count: savedHours.length },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 200, correlationId, { data: savedHours });
+        return;
+      }
+
+      // 28. POST /v1/partner/stores/:storeId/hour-exceptions & DELETE /v1/partner/stores/:storeId/hour-exceptions/:exceptionDate (M07)
+      const partnerExcPostMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/hour-exceptions$/
+      );
+      if (method === "POST" && partnerExcPostMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerExcPostMatch[1] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage store hour exceptions.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const exceptionDate = String(body.exceptionDate ?? "").trim();
+        const reason = String(body.reason ?? "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(exceptionDate) || !reason) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "exceptionDate (YYYY-MM-DD) and reason are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const savedExc = await deps.repository.upsertStoreHourException(targetStore.id, {
+          exceptionDate,
+          isClosed: body.isClosed !== undefined ? Boolean(body.isClosed) : true,
+          opensAt: body.opensAt ? String(body.opensAt) : null,
+          closesAt: body.closesAt ? String(body.closesAt) : null,
+          reason,
+        });
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "STORE_HOUR_EXCEPTION_UPSERTED",
+          targetType: "STORE",
+          targetId: targetStore.id,
+          correlationId,
+          reason,
+          redactedPayload: { exceptionDate, isClosed: savedExc.isClosed },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 201, correlationId, { data: savedExc });
+        return;
+      }
+
+      const partnerExcDeleteMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/hour-exceptions\/([^/]+)$/
+      );
+      if (method === "DELETE" && partnerExcDeleteMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerExcDeleteMatch[1] ?? "";
+        const exceptionDate = partnerExcDeleteMatch[2] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to delete store hour exceptions.", correlationId);
+          return;
+        }
+
+        const deleted = await deps.repository.deleteStoreHourException(
+          targetStore.id,
+          exceptionDate
+        );
+        if (!deleted) {
+          sendError(res, 404, "EXCEPTION_NOT_FOUND", `Exception ${exceptionDate} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { deleted: true, exceptionDate });
+        return;
+      }
+
+      // 29. GET / POST / PATCH / DELETE /v1/partner/stores/:storeId/service-areas (M04 / M07)
+      const partnerAreasCollectionMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/service-areas$/
+      );
+      if (partnerAreasCollectionMatch && (method === "GET" || method === "POST")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerAreasCollectionMatch[1] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles:
+            method === "GET"
+              ? ["partner_owner", "partner_manager", "partner_operator"]
+              : ["partner_owner", "partner_manager"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage service areas.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const catalogData = await deps.repository.getStoreCatalog(targetStore.id, locale);
+          sendJson(res, 200, correlationId, { data: catalogData?.serviceAreas ?? [] });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const name = String(body.name ?? "").trim();
+        const radiusMeters = Number(body.radiusMeters ?? 0);
+        const baseFeeCents = Number(body.baseFeeCents ?? -1);
+        const perKmFeeCents = Number(body.perKmFeeCents ?? 0);
+        const estimatedDeliveryMinutes = Number(body.estimatedDeliveryMinutes ?? 35);
+        const freeDeliveryMinOrderCents =
+          body.freeDeliveryMinOrderCents !== undefined &&
+          body.freeDeliveryMinOrderCents !== null
+            ? Number(body.freeDeliveryMinOrderCents)
+            : null;
+
+        if (
+          !name ||
+          !Number.isInteger(radiusMeters) ||
+          radiusMeters < 500 ||
+          radiusMeters > 50000 ||
+          !Number.isInteger(baseFeeCents) ||
+          baseFeeCents < 0 ||
+          !Number.isInteger(perKmFeeCents) ||
+          perKmFeeCents < 0 ||
+          !Number.isInteger(estimatedDeliveryMinutes) ||
+          estimatedDeliveryMinutes < 5 ||
+          estimatedDeliveryMinutes > 240
+        ) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "Invalid service area parameters (radiusMeters 500..50000, non-negative integer cents, estimatedDeliveryMinutes 5..240).",
+            correlationId
+          );
+          return;
+        }
+
+        const createdArea = await deps.repository.createStoreServiceArea({
+          id: body.id ? String(body.id) : crypto.randomUUID(),
+          storeId: targetStore.id,
+          name,
+          radiusMeters,
+          baseFeeCents,
+          perKmFeeCents,
+          freeDeliveryMinOrderCents,
+          estimatedDeliveryMinutes,
+          isActive: body.isActive !== undefined ? Boolean(body.isActive) : true,
+        });
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "STORE_SERVICE_AREA_CREATED",
+          targetType: "STORE",
+          targetId: targetStore.id,
+          correlationId,
+          reason: `Created service area ${name}`,
+          redactedPayload: {
+            areaId: createdArea.id,
+            radiusMeters,
+            baseFeeCents,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 201, correlationId, { data: createdArea });
+        return;
+      }
+
+      const partnerAreaItemMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/service-areas\/([^/]+)$/
+      );
+      if (partnerAreaItemMatch && (method === "PATCH" || method === "DELETE")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerAreaItemMatch[1] ?? "";
+        const areaId = partnerAreaItemMatch[2] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to modify service areas.", correlationId);
+          return;
+        }
+
+        if (method === "DELETE") {
+          const deleted = await deps.repository.deleteStoreServiceArea(targetStore.id, areaId);
+          if (!deleted) {
+            sendError(res, 404, "SERVICE_AREA_NOT_FOUND", `Service area ${areaId} not found.`, correlationId);
+            return;
+          }
+          sendJson(res, 200, correlationId, { deleted: true, id: areaId });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const patch: Partial<Omit<StoreServiceAreaContract, "id" | "storeId">> = {};
+        if (body.name !== undefined) patch.name = String(body.name).trim();
+        if (body.radiusMeters !== undefined) patch.radiusMeters = Number(body.radiusMeters);
+        if (body.baseFeeCents !== undefined)
+          patch.baseFeeCents = assertIntegerCents(Number(body.baseFeeCents), "baseFeeCents");
+        if (body.perKmFeeCents !== undefined)
+          patch.perKmFeeCents = assertIntegerCents(Number(body.perKmFeeCents), "perKmFeeCents");
+        if (body.freeDeliveryMinOrderCents !== undefined) {
+          patch.freeDeliveryMinOrderCents =
+            body.freeDeliveryMinOrderCents !== null
+              ? assertIntegerCents(
+                  Number(body.freeDeliveryMinOrderCents),
+                  "freeDeliveryMinOrderCents"
+                )
+              : null;
+        }
+        if (body.estimatedDeliveryMinutes !== undefined) {
+          patch.estimatedDeliveryMinutes = Number(body.estimatedDeliveryMinutes);
+        }
+        if (body.isActive !== undefined) patch.isActive = Boolean(body.isActive);
+
+        const updatedArea = await deps.repository.updateStoreServiceArea(
+          targetStore.id,
+          areaId,
+          patch
+        );
+        if (!updatedArea) {
+          sendError(res, 404, "SERVICE_AREA_NOT_FOUND", `Service area ${areaId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updatedArea });
+        return;
+      }
+
+      // 30. GET / POST / PATCH / DELETE /v1/partner/stores/:storeId/categories (M04 / M07)
+      const partnerCategoriesCollectionMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/categories$/
+      );
+      if (partnerCategoriesCollectionMatch && (method === "GET" || method === "POST")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerCategoriesCollectionMatch[1] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles:
+            method === "GET"
+              ? ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"]
+              : ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage catalog categories.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const catalogData = await deps.repository.getStoreCatalog(targetStore.id, locale);
+          sendJson(res, 200, correlationId, { data: catalogData?.categories ?? [] });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const nameEn = String(body.nameEn ?? "").trim();
+        const namePtBr = String(body.namePtBr ?? "").trim();
+        if (!nameEn || !namePtBr) {
+          sendError(res, 400, "VALIDATION_ERROR", "nameEn and namePtBr are required.", correlationId);
+          return;
+        }
+
+        const createdCat = await deps.repository.createCatalogCategory(
+          targetStore.id,
+          {
+            ...(body.id ? { id: String(body.id) } : {}),
+            nameEn,
+            namePtBr,
+            sortOrder: body.sortOrder !== undefined ? Number(body.sortOrder) : 0,
+            isActive: body.isActive !== undefined ? Boolean(body.isActive) : true,
+          },
+          locale
+        );
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "CATALOG_CATEGORY_CREATED",
+          targetType: "CATALOG_CATEGORY",
+          targetId: createdCat.id,
+          correlationId,
+          reason: `Created category ${nameEn}`,
+          redactedPayload: { storeId: targetStore.id, nameEn, namePtBr },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 201, correlationId, { data: createdCat });
+        return;
+      }
+
+      const partnerCategoryItemMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/categories\/([^/]+)$/
+      );
+      if (partnerCategoryItemMatch && (method === "PATCH" || method === "DELETE")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerCategoryItemMatch[1] ?? "";
+        const categoryId = partnerCategoryItemMatch[2] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to modify catalog categories.", correlationId);
+          return;
+        }
+
+        if (method === "DELETE") {
+          const deleted = await deps.repository.deleteCatalogCategory(targetStore.id, categoryId);
+          if (!deleted) {
+            sendError(res, 404, "CATEGORY_NOT_FOUND", `Category ${categoryId} not found.`, correlationId);
+            return;
+          }
+          sendJson(res, 200, correlationId, { deleted: true, id: categoryId });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const patch: Partial<CatalogCategoryUpsertContract> = {};
+        if (body.nameEn !== undefined) patch.nameEn = String(body.nameEn).trim();
+        if (body.namePtBr !== undefined) patch.namePtBr = String(body.namePtBr).trim();
+        if (body.sortOrder !== undefined) patch.sortOrder = Number(body.sortOrder);
+        if (body.isActive !== undefined) patch.isActive = Boolean(body.isActive);
+
+        const updatedCat = await deps.repository.updateCatalogCategory(
+          targetStore.id,
+          categoryId,
+          patch,
+          locale
+        );
+        if (!updatedCat) {
+          sendError(res, 404, "CATEGORY_NOT_FOUND", `Category ${categoryId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updatedCat });
+        return;
+      }
+
+      // 31. GET / POST / PATCH / DELETE /v1/partner/stores/:storeId/products (M04 / M07)
+      const partnerProductsCollectionMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/products$/
+      );
+      if (partnerProductsCollectionMatch && (method === "GET" || method === "POST")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerProductsCollectionMatch[1] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles:
+            method === "GET"
+              ? ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"]
+              : ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage catalog products.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const catalogData = await deps.repository.getStoreCatalog(targetStore.id, locale);
+          const allProducts = (catalogData?.categories ?? []).flatMap((c) => c.products);
+          sendJson(res, 200, correlationId, { data: allProducts });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const categoryId = String(body.categoryId ?? "").trim();
+        const nameEn = String(body.nameEn ?? "").trim();
+        const namePtBr = String(body.namePtBr ?? "").trim();
+        const rawPriceCents = Number(body.priceCents ?? -1);
+        if (
+          !categoryId ||
+          !nameEn ||
+          !namePtBr ||
+          !Number.isSafeInteger(rawPriceCents) ||
+          rawPriceCents < 0
+        ) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "categoryId, nameEn, namePtBr, and non-negative integer priceCents are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const createdProd = await deps.repository.createCatalogProduct(
+          targetStore.id,
+          {
+            ...(body.id ? { id: String(body.id) } : {}),
+            categoryId,
+            sku: body.sku ? String(body.sku) : null,
+            nameEn,
+            namePtBr,
+            descriptionEn: body.descriptionEn ? String(body.descriptionEn) : "",
+            descriptionPtBr: body.descriptionPtBr ? String(body.descriptionPtBr) : "",
+            priceCents: rawPriceCents,
+            imagePath: body.imagePath ? String(body.imagePath) : null,
+            isAvailable: body.isAvailable !== undefined ? Boolean(body.isAvailable) : true,
+            isPaused: body.isPaused !== undefined ? Boolean(body.isPaused) : false,
+            maxPerOrder: body.maxPerOrder !== undefined ? Number(body.maxPerOrder) : 20,
+            unitOfMeasure: (body.unitOfMeasure as "UNIT" | "GRAM" | "KG") ?? "UNIT",
+          },
+          locale
+        );
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "CATALOG_PRODUCT_CREATED",
+          targetType: "CATALOG_PRODUCT",
+          targetId: createdProd.id,
+          correlationId,
+          reason: `Created product ${nameEn}`,
+          redactedPayload: {
+            storeId: targetStore.id,
+            categoryId,
+            priceCents: rawPriceCents,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 201, correlationId, { data: createdProd });
+        return;
+      }
+
+      const partnerProductItemMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/products\/([^/]+)$/
+      );
+      if (partnerProductItemMatch && (method === "PATCH" || method === "DELETE")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = partnerProductItemMatch[1] ?? "";
+        const productId = partnerProductItemMatch[2] ?? "";
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles:
+            method === "DELETE"
+              ? ["partner_owner", "partner_manager", "partner_catalog"]
+              : ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to modify catalog products.", correlationId);
+          return;
+        }
+
+        if (method === "DELETE") {
+          const deleted = await deps.repository.deleteCatalogProduct(targetStore.id, productId);
+          if (!deleted) {
+            sendError(res, 404, "PRODUCT_NOT_FOUND", `Product ${productId} not found.`, correlationId);
+            return;
+          }
+          sendJson(res, 200, correlationId, { deleted: true, id: productId });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const patch: Partial<CatalogProductUpsertContract> = {};
+        if (body.categoryId !== undefined) patch.categoryId = String(body.categoryId);
+        if (body.sku !== undefined) patch.sku = body.sku ? String(body.sku) : null;
+        if (body.nameEn !== undefined) patch.nameEn = String(body.nameEn).trim();
+        if (body.namePtBr !== undefined) patch.namePtBr = String(body.namePtBr).trim();
+        if (body.descriptionEn !== undefined) patch.descriptionEn = String(body.descriptionEn);
+        if (body.descriptionPtBr !== undefined)
+          patch.descriptionPtBr = String(body.descriptionPtBr);
+        if (body.priceCents !== undefined) {
+          const priceCents = Number(body.priceCents);
+          if (!Number.isSafeInteger(priceCents) || priceCents < 0) {
+            sendError(res, 400, "INVALID_MONETARY_CENTS", "priceCents must be a non-negative integer.", correlationId);
+            return;
+          }
+          patch.priceCents = priceCents;
+        }
+        if (body.imagePath !== undefined)
+          patch.imagePath = body.imagePath ? String(body.imagePath) : null;
+        if (body.isAvailable !== undefined) patch.isAvailable = Boolean(body.isAvailable);
+        if (body.isPaused !== undefined) patch.isPaused = Boolean(body.isPaused);
+        if (body.maxPerOrder !== undefined) patch.maxPerOrder = Number(body.maxPerOrder);
+        if (body.unitOfMeasure !== undefined)
+          patch.unitOfMeasure = body.unitOfMeasure as "UNIT" | "GRAM" | "KG";
+
+        const updatedProd = await deps.repository.updateCatalogProduct(
+          targetStore.id,
+          productId,
+          patch,
+          locale
+        );
+        if (!updatedProd) {
+          sendError(res, 404, "PRODUCT_NOT_FOUND", `Product ${productId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updatedProd });
+        return;
+      }
+
+      // 32. POST / PATCH / DELETE /v1/partner/products/:productId/option-groups (M04 / M07)
+      const optionGroupsPostMatch = pathname.match(
+        /^\/v1\/partner\/products\/([^/]+)\/option-groups$/
+      );
+      if (method === "POST" && optionGroupsPostMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const productId = optionGroupsPostMatch[1] ?? "";
+        const storeId = await deps.repository.getProductStoreId(productId);
+        if (!storeId) {
+          sendError(res, 404, "PRODUCT_NOT_FOUND", `Product ${productId} not found.`, correlationId);
+          return;
+        }
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to manage option groups.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const nameEn = String(body.nameEn ?? "").trim();
+        const namePtBr = String(body.namePtBr ?? "").trim();
+        const minSelections = Number(body.minSelections ?? 0);
+        const maxSelections = Number(body.maxSelections ?? 1);
+
+        if (
+          !nameEn ||
+          !namePtBr ||
+          !Number.isInteger(minSelections) ||
+          minSelections < 0 ||
+          !Number.isInteger(maxSelections) ||
+          maxSelections < 1 ||
+          minSelections > maxSelections
+        ) {
+          sendError(
+            res,
+            400,
+            "INVALID_OPTION_GROUP_BOUNDS",
+            "nameEn, namePtBr, and valid bounds (0 <= minSelections <= maxSelections, maxSelections >= 1) are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const createdGroup = await deps.repository.createCatalogOptionGroup(
+          productId,
+          targetStore.id,
+          {
+            ...(body.id ? { id: String(body.id) } : {}),
+            nameEn,
+            namePtBr,
+            minSelections,
+            maxSelections,
+            sortOrder: body.sortOrder !== undefined ? Number(body.sortOrder) : 0,
+          },
+          locale
+        );
+
+        sendJson(res, 201, correlationId, { data: createdGroup });
+        return;
+      }
+
+      const optionGroupItemMatch = pathname.match(
+        /^\/v1\/partner\/products\/([^/]+)\/option-groups\/([^/]+)$/
+      );
+      if (optionGroupItemMatch && (method === "PATCH" || method === "DELETE")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const productId = optionGroupItemMatch[1] ?? "";
+        const groupId = optionGroupItemMatch[2] ?? "";
+        const storeId = await deps.repository.getProductStoreId(productId);
+        if (!storeId) {
+          sendError(res, 404, "PRODUCT_NOT_FOUND", `Product ${productId} not found.`, correlationId);
+          return;
+        }
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to modify option groups.", correlationId);
+          return;
+        }
+
+        if (method === "DELETE") {
+          const deleted = await deps.repository.deleteCatalogOptionGroup(productId, groupId);
+          if (!deleted) {
+            sendError(res, 404, "OPTION_GROUP_NOT_FOUND", `Option group ${groupId} not found.`, correlationId);
+            return;
+          }
+          sendJson(res, 200, correlationId, { deleted: true, id: groupId });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        if (
+          body.minSelections !== undefined &&
+          body.maxSelections !== undefined &&
+          Number(body.minSelections) > Number(body.maxSelections)
+        ) {
+          sendError(
+            res,
+            400,
+            "INVALID_OPTION_GROUP_BOUNDS",
+            "minSelections cannot exceed maxSelections.",
+            correlationId
+          );
+          return;
+        }
+
+        const groupPatch: Partial<CatalogOptionGroupUpsertContract> = {};
+        if (body.nameEn !== undefined) groupPatch.nameEn = String(body.nameEn).trim();
+        if (body.namePtBr !== undefined) groupPatch.namePtBr = String(body.namePtBr).trim();
+        if (body.minSelections !== undefined)
+          groupPatch.minSelections = Number(body.minSelections);
+        if (body.maxSelections !== undefined)
+          groupPatch.maxSelections = Number(body.maxSelections);
+        if (body.sortOrder !== undefined) groupPatch.sortOrder = Number(body.sortOrder);
+
+        const updatedGroup = await deps.repository.updateCatalogOptionGroup(
+          productId,
+          groupId,
+          groupPatch,
+          locale
+        );
+        if (!updatedGroup) {
+          sendError(res, 404, "OPTION_GROUP_NOT_FOUND", `Option group ${groupId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updatedGroup });
+        return;
+      }
+
+      // 33. POST / PATCH / DELETE Options under Option Groups (M04 / M07)
+      const optionsPostMatch =
+        pathname.match(
+          /^\/v1\/partner\/products\/[^/]+\/option-groups\/([^/]+)\/options$/
+        ) ?? pathname.match(/^\/v1\/partner\/option-groups\/([^/]+)\/options$/);
+      if (method === "POST" && optionsPostMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const groupId = optionsPostMatch[1] ?? "";
+        const ctx = await deps.repository.getOptionGroupContext(groupId);
+        if (!ctx) {
+          sendError(res, 404, "OPTION_GROUP_NOT_FOUND", `Option group ${groupId} not found.`, correlationId);
+          return;
+        }
+        const targetStore = await deps.repository.getStoreById(ctx.storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${ctx.storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_catalog"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to create catalog options.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const nameEn = String(body.nameEn ?? "").trim();
+        const namePtBr = String(body.namePtBr ?? "").trim();
+        const additionalPriceCents = Number(body.additionalPriceCents ?? 0);
+        if (
+          !nameEn ||
+          !namePtBr ||
+          !Number.isSafeInteger(additionalPriceCents) ||
+          additionalPriceCents < 0
+        ) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "nameEn, namePtBr, and non-negative integer additionalPriceCents are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const createdOpt = await deps.repository.createCatalogOption(
+          groupId,
+          targetStore.id,
+          {
+            ...(body.id ? { id: String(body.id) } : {}),
+            nameEn,
+            namePtBr,
+            additionalPriceCents,
+            isAvailable: body.isAvailable !== undefined ? Boolean(body.isAvailable) : true,
+            sortOrder: body.sortOrder !== undefined ? Number(body.sortOrder) : 0,
+          },
+          locale
+        );
+
+        sendJson(res, 201, correlationId, { data: createdOpt });
+        return;
+      }
+
+      const optionItemMatch =
+        pathname.match(/^\/v1\/partner\/products\/[^/]+\/options\/([^/]+)$/) ??
+        pathname.match(/^\/v1\/partner\/options\/([^/]+)$/);
+      if (optionItemMatch && (method === "PATCH" || method === "DELETE")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const optionId = optionItemMatch[1] ?? "";
+        const ctx = await deps.repository.getOptionContext(optionId);
+        if (!ctx) {
+          sendError(res, 404, "OPTION_NOT_FOUND", `Option ${optionId} not found.`, correlationId);
+          return;
+        }
+        const targetStore = await deps.repository.getStoreById(ctx.storeId, locale);
+        if (!targetStore) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${ctx.storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: targetStore.organizationId,
+          storeId: targetStore.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"],
+        });
+        if (!decision.allowed) {
+          sendError(res, 403, decision.reasonCode, "Not authorized to modify catalog options.", correlationId);
+          return;
+        }
+
+        if (method === "DELETE") {
+          const deleted = await deps.repository.deleteCatalogOption(optionId, targetStore.id);
+          if (!deleted) {
+            sendError(res, 404, "OPTION_NOT_FOUND", `Option ${optionId} not found.`, correlationId);
+            return;
+          }
+          sendJson(res, 200, correlationId, { deleted: true, id: optionId });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        if (
+          body.additionalPriceCents !== undefined &&
+          (!Number.isSafeInteger(Number(body.additionalPriceCents)) ||
+            Number(body.additionalPriceCents) < 0)
+        ) {
+          sendError(
+            res,
+            400,
+            "INVALID_MONETARY_CENTS",
+            "additionalPriceCents must be a non-negative integer.",
+            correlationId
+          );
+          return;
+        }
+
+        const optPatch: Partial<CatalogOptionUpsertContract> = {};
+        if (body.nameEn !== undefined) optPatch.nameEn = String(body.nameEn).trim();
+        if (body.namePtBr !== undefined) optPatch.namePtBr = String(body.namePtBr).trim();
+        if (body.additionalPriceCents !== undefined)
+          optPatch.additionalPriceCents = Number(body.additionalPriceCents);
+        if (body.isAvailable !== undefined) optPatch.isAvailable = Boolean(body.isAvailable);
+        if (body.sortOrder !== undefined) optPatch.sortOrder = Number(body.sortOrder);
+
+        const updatedOpt = await deps.repository.updateCatalogOption(
+          optionId,
+          targetStore.id,
+          optPatch,
+          locale
+        );
+        if (!updatedOpt) {
+          sendError(res, 404, "OPTION_NOT_FOUND", `Option ${optionId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updatedOpt });
+        return;
+      }
+
+      // 34. POST /v1/storage/signed-upload-url (M02 / M07 — Secure Server-Validated Upload URL Generation)
+      if (method === "POST" && pathname === "/v1/storage/signed-upload-url") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const bucket = String(body.bucket ?? "").trim() as AuthorizedStorageBucket;
+        const rawFileName = String(body.fileName ?? "").trim();
+        const mimeType = String(body.mimeType ?? "").trim().toLowerCase();
+        const fileSizeBytes = Number(body.fileSizeBytes ?? 0);
+        const requestedStoreId = body.storeId ? String(body.storeId).trim() : null;
+
+        const bucketPolicies: Record<
+          AuthorizedStorageBucket,
+          {
+            maxSizeBytes: number;
+            allowedMimeTypes: string[];
+            requiresStoreScope: boolean;
+          }
+        > = {
+          "store-assets": {
+            maxSizeBytes: 5_242_880,
+            allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"],
+            requiresStoreScope: true,
+          },
+          "catalog-media": {
+            maxSizeBytes: 5_242_880,
+            allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"],
+            requiresStoreScope: true,
+          },
+          "public-store-assets": {
+            maxSizeBytes: 5_242_880,
+            allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"],
+            requiresStoreScope: true,
+          },
+          "partner-kyc-docs": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: ["image/jpeg", "image/png", "application/pdf"],
+            requiresStoreScope: false,
+          },
+          "courier-kyc-docs": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: ["image/jpeg", "image/png", "application/pdf"],
+            requiresStoreScope: false,
+          },
+          "private-kyc-docs": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: ["image/jpeg", "image/png", "application/pdf"],
+            requiresStoreScope: false,
+          },
+          "support-attachments": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "application/pdf",
+            ],
+            requiresStoreScope: false,
+          },
+          "private-support-attachments": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "application/pdf",
+            ],
+            requiresStoreScope: false,
+          },
+          "private-pod-evidence": {
+            maxSizeBytes: 10_485_760,
+            allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"],
+            requiresStoreScope: false,
+          },
+        };
+
+        const policy = bucketPolicies[bucket];
+        if (!policy) {
+          sendError(
+            res,
+            400,
+            "STORAGE_INVALID_BUCKET",
+            `Bucket '${bucket}' is not an authorized storage bucket.`,
+            correlationId
+          );
+          return;
+        }
+
+        if (
+          !rawFileName ||
+          rawFileName.includes("..") ||
+          rawFileName.includes("/") ||
+          rawFileName.includes("\\")
+        ) {
+          sendError(
+            res,
+            400,
+            "STORAGE_INVALID_FILENAME",
+            "fileName must be a clean basename without path traversal characters.",
+            correlationId
+          );
+          return;
+        }
+
+        if (!policy.allowedMimeTypes.includes(mimeType)) {
+          sendError(
+            res,
+            400,
+            "STORAGE_INVALID_MIME_TYPE",
+            `MIME type '${mimeType}' is not allowed in bucket '${bucket}'.`,
+            correlationId
+          );
+          return;
+        }
+
+        if (
+          !Number.isSafeInteger(fileSizeBytes) ||
+          fileSizeBytes <= 0 ||
+          fileSizeBytes > policy.maxSizeBytes
+        ) {
+          sendError(
+            res,
+            400,
+            "STORAGE_FILE_TOO_LARGE",
+            `fileSizeBytes must be between 1 and ${policy.maxSizeBytes} bytes for bucket '${bucket}'.`,
+            correlationId
+          );
+          return;
+        }
+
+        let resolvedStoreId: string | null = null;
+        let resolvedOrgId: string | null = null;
+        let folderPrefix = actor.id;
+
+        if (policy.requiresStoreScope || requestedStoreId) {
+          if (!requestedStoreId) {
+            sendError(
+              res,
+              400,
+              "STORAGE_STORE_ID_REQUIRED",
+              `storeId is required when uploading to bucket '${bucket}'.`,
+              correlationId
+            );
+            return;
+          }
+          const targetStore = await deps.repository.getStoreById(
+            requestedStoreId,
+            locale
+          );
+          if (!targetStore) {
+            sendError(
+              res,
+              404,
+              "STORE_NOT_FOUND",
+              `Store ${requestedStoreId} not found.`,
+              correlationId
+            );
+            return;
+          }
+          const decision = authorizePartnerScope({
+            actor,
+            organizationId: targetStore.organizationId,
+            storeId: targetStore.id,
+            allowedRoles: ["partner_owner", "partner_manager", "partner_catalog"],
+          });
+          if (!decision.allowed) {
+            sendError(
+              res,
+              403,
+              decision.reasonCode,
+              "Not authorized to upload assets for this store.",
+              correlationId
+            );
+            return;
+          }
+          resolvedStoreId = targetStore.id;
+          resolvedOrgId = targetStore.organizationId;
+          folderPrefix = targetStore.id;
+        }
+
+        const sanitizedFileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const uploadIntentId = crypto.randomUUID();
+        const objectPath = `${folderPrefix}/${uploadIntentId}-${sanitizedFileName}`;
+        const expiresAtIso = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        const signingSecret =
+          env.SUPABASE_JWT_SECRET ?? "ideliveryfood_storage_signing_secret";
+        const uploadToken = crypto
+          .createHmac("sha256", signingSecret)
+          .update(`${uploadIntentId}:${bucket}:${objectPath}:${expiresAtIso}`)
+          .digest("hex");
+        const signedTokenHash = crypto
+          .createHash("sha256")
+          .update(uploadToken)
+          .digest("hex");
+
+        await deps.repository.saveStorageUploadIntent({
+          id: uploadIntentId,
+          bucket,
+          objectPath,
+          mimeType,
+          fileSizeBytes,
+          uploadedBy: actor.id,
+          storeId: resolvedStoreId,
+          organizationId: resolvedOrgId,
+          signedTokenHash,
+          expiresAtIso,
+        });
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "STORAGE_SIGNED_UPLOAD_URL_ISSUED",
+          targetType: "STORAGE_OBJECT",
+          targetId: uploadIntentId,
+          correlationId,
+          reason: `Signed upload URL for ${bucket}/${objectPath}`,
+          redactedPayload: {
+            bucket,
+            objectPath,
+            mimeType,
+            fileSizeBytes,
+            storeId: resolvedStoreId,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        const supabaseUrl = (
+          env.SUPABASE_URL ??
+          env.NEXT_PUBLIC_SUPABASE_URL ??
+          "https://dwsoochnfxldfvcaijie.supabase.co"
+        ).replace(/\/+$/, "");
+
+        const responsePayload: SignedUploadUrlResponseContract = {
+          uploadIntentId,
+          bucket,
+          objectPath,
+          signedUploadUrl: `${supabaseUrl}/storage/v1/object/upload/sign/${bucket}/${objectPath}?token=${uploadToken}`,
+          uploadToken,
+          expiresAtIso,
+          maxSizeBytes: policy.maxSizeBytes,
+          allowedMimeTypes: policy.allowedMimeTypes,
+        };
+
+        sendJson(res, 201, correlationId, { data: responsePayload });
         return;
       }
 

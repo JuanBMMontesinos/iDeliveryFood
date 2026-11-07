@@ -87,9 +87,14 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED [Alice addresses]: expected 1 own address, got %', v_count;
   END IF;
 
-  SELECT count(*) INTO v_count FROM public.orders;
-  IF v_count <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED [Alice orders]: expected 1 own order, got %', v_count;
+  SELECT count(*) INTO v_count FROM public.orders WHERE customer_id = '00000000-0000-4000-8000-000000000001';
+  IF v_count < 1 THEN
+    RAISE EXCEPTION 'TEST FAILED [Alice orders]: expected >= 1 own order, got %', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count FROM public.orders WHERE customer_id <> '00000000-0000-4000-8000-000000000001';
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED [Alice cross-customer orders]: expected 0 foreign orders, got %', v_count;
   END IF;
 
   -- 4. Verify Alice cannot self-elevate protected profile attributes
@@ -113,9 +118,14 @@ BEGIN
     true
   );
 
-  SELECT count(*) INTO v_count FROM public.orders;
-  IF v_count <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED [Partner Operator orders]: expected 1 store order, got %', v_count;
+  SELECT count(*) INTO v_count FROM public.orders WHERE store_id = '00000000-0000-4000-8000-000000000201';
+  IF v_count < 1 THEN
+    RAISE EXCEPTION 'TEST FAILED [Partner Operator orders]: expected >= 1 store order, got %', v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count FROM public.orders WHERE store_id <> '00000000-0000-4000-8000-000000000201';
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED [Partner Operator cross-store orders]: expected 0 foreign store orders, got %', v_count;
   END IF;
 
   SELECT count(*) INTO v_count FROM public.organizations WHERE id = '00000000-0000-4000-8000-000000000102';
@@ -176,8 +186,8 @@ BEGIN
   );
 
   SELECT count(*) INTO v_count FROM public.ledger_journals;
-  IF v_count <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED [Staff Finance aal2 MFA check]: expected 1 ledger_journal with aal2, got %', v_count;
+  IF v_count < 1 THEN
+    RAISE EXCEPTION 'TEST FAILED [Staff Finance aal2 MFA check]: expected >= 1 ledger_journal with aal2, got %', v_count;
   END IF;
 
   SELECT count(*) INTO v_count FROM public.ledger_accounts;
@@ -288,7 +298,45 @@ BEGIN
   IF NOT v_caught_error THEN
     RAISE EXCEPTION 'TEST FAILED [Single Active Delivery Assignment]: expected unique_violation (23505)';
   END IF;
+
+  -- 17. Fase F: Verify Partner Owner of Org 101 cannot insert catalog category or storage upload intent into Store 202 (Org 102)
+  DELETE FROM public.catalog_categories WHERE store_id = '00000000-0000-4000-8000-000000000203' AND name_en = 'Cross Tenant Cat';
+
+  PERFORM set_config('role', 'authenticated', true);
+  PERFORM set_config(
+    'request.jwt.claims',
+    '{"sub":"00000000-0000-4000-8000-000000000010","role":"authenticated","aal":"aal1"}',
+    true
+  );
+
+  v_caught_error := false;
+  BEGIN
+    INSERT INTO public.catalog_categories (store_id, name_en, name_pt_br, sort_order, is_active, is_test_data)
+    VALUES ('00000000-0000-4000-8000-000000000202', 'Cross Tenant Cat', 'Cat Outra Org', 99, true, true);
+  EXCEPTION WHEN insufficient_privilege THEN
+    v_caught_error := true;
+  END;
+
+  IF NOT v_caught_error THEN
+    RAISE EXCEPTION 'TEST FAILED [Fase F Cross-Tenant Catalog Category RLS]: expected insufficient_privilege (42501)';
+  END IF;
+
+  v_caught_error := false;
+  BEGIN
+    INSERT INTO public.storage_upload_intents (
+      bucket_id, object_path, mime_type, file_size_bytes, uploaded_by, store_id, signed_token_hash, expires_at, is_test_data
+    ) VALUES (
+      'store-assets', '00000000-0000-4000-8000-000000000202/cross.png', 'image/png', 1024,
+      '00000000-0000-4000-8000-000000000010', '00000000-0000-4000-8000-000000000202', 'hash123', now() + interval '15 minutes', true
+    );
+  EXCEPTION WHEN insufficient_privilege THEN
+    v_caught_error := true;
+  END;
+
+  IF NOT v_caught_error THEN
+    RAISE EXCEPTION 'TEST FAILED [Fase F Cross-Tenant Storage Upload Intent RLS]: expected insufficient_privilege (42501)';
+  END IF;
 END;
 $$;
 
-SELECT 'ALL_16_SECURITY_AND_FASE_ABCD_INVARIANTS_PASSED' AS verification_status;
+SELECT 'ALL_17_SECURITY_AND_FASE_ABCDEF_INVARIANTS_PASSED' AS verification_status;

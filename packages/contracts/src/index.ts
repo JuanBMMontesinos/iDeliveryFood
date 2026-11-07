@@ -393,12 +393,93 @@ export interface BatchCatalogUpdateItemResultContract {
 }
 
 export interface StoreSettingsPatchContract {
+  name?: string;
+  descriptionEn?: string;
+  descriptionPtBr?: string;
+  cuisineCategory?: string;
   isPaused?: boolean;
   pauseReason?: string | null;
   minOrderCents?: number;
   prepTimeMinMinutes?: number;
   prepTimeMaxMinutes?: number;
   supportedModalities?: FulfillmentModality[];
+}
+
+export interface StoreDetailResponseContract {
+  store: PublishedStoreContract;
+  availability: StoreAvailabilityEvaluationContract;
+  categories: CatalogCategoryContract[];
+  serviceAreas: StoreServiceAreaContract[];
+  hours: StoreOperatingHourContract[];
+  exceptions: StoreHourExceptionContract[];
+}
+
+export interface CatalogCategoryUpsertContract {
+  nameEn: string;
+  namePtBr: string;
+  sortOrder?: number;
+  isActive?: boolean;
+}
+
+export interface CatalogProductUpsertContract {
+  categoryId: string;
+  sku?: string | null;
+  nameEn: string;
+  namePtBr: string;
+  descriptionEn?: string;
+  descriptionPtBr?: string;
+  priceCents: number;
+  imagePath?: string | null;
+  isAvailable?: boolean;
+  isPaused?: boolean;
+  maxPerOrder?: number;
+  unitOfMeasure?: "UNIT" | "GRAM" | "KG";
+}
+
+export interface CatalogOptionGroupUpsertContract {
+  nameEn: string;
+  namePtBr: string;
+  minSelections: number;
+  maxSelections: number;
+  sortOrder?: number;
+}
+
+export interface CatalogOptionUpsertContract {
+  nameEn: string;
+  namePtBr: string;
+  additionalPriceCents: number;
+  isAvailable?: boolean;
+  sortOrder?: number;
+}
+
+export type AuthorizedStorageBucket =
+  | "store-assets"
+  | "catalog-media"
+  | "partner-kyc-docs"
+  | "courier-kyc-docs"
+  | "support-attachments"
+  | "public-store-assets"
+  | "private-kyc-docs"
+  | "private-pod-evidence"
+  | "private-support-attachments";
+
+export interface SignedUploadUrlRequestContract {
+  bucket: AuthorizedStorageBucket;
+  fileName: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  storeId?: string | null;
+}
+
+export interface SignedUploadUrlResponseContract {
+  uploadIntentId: string;
+  bucket: AuthorizedStorageBucket;
+  objectPath: string;
+  signedUploadUrl: string;
+  uploadToken: string;
+  expiresAtIso: string;
+  maxSizeBytes: number;
+  allowedMimeTypes: string[];
 }
 
 export interface BankAccountChangeRequestContract {

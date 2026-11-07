@@ -4,7 +4,16 @@ import {
   type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
   type BankAccountChangeRequestContract,
+  type BatchCatalogUpdateItemResultContract,
   type CartItemSelectionContract,
+  type CatalogCategoryContract,
+  type CatalogCategoryUpsertContract,
+  type CatalogOptionContract,
+  type CatalogOptionGroupContract,
+  type CatalogOptionGroupUpsertContract,
+  type CatalogOptionUpsertContract,
+  type CatalogProductContract,
+  type CatalogProductUpsertContract,
   type CourierLocationSampleContract,
   type CustomerAddressContract,
   type DeliveryOfferContract,
@@ -21,9 +30,15 @@ import {
   type ServerQuoteRecordContract,
   type SettlementRecordContract,
   type ServiceAreaEligibilityContract,
+  type SignedUploadUrlRequestContract,
+  type SignedUploadUrlResponseContract,
   type StoreAvailabilityEvaluationContract,
   type StoreCatalogResponseContract,
+  type StoreDetailResponseContract,
+  type StoreHourExceptionContract,
+  type StoreOperatingHourContract,
   type StoreOrdersQueueResponseContract,
+  type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
   type SupportedLocale,
   type UserPreferencesContract,
@@ -503,6 +518,129 @@ export class IDeliveryApiClient {
       },
       idempotencyKey: params.idempotencyKey,
       requireIdempotency: true,
+    });
+  }
+
+  public async getStoreDetail(
+    storeIdOrSlug: string
+  ): Promise<{ data: StoreDetailResponseContract }> {
+    return this.request<{ data: StoreDetailResponseContract }>({
+      path: `/stores/${encodeURIComponent(storeIdOrSlug)}?locale=${encodeURIComponent(this.locale)}`,
+      method: "GET",
+    });
+  }
+
+  public async replaceStoreHours(params: {
+    storeId: string;
+    hours: StoreOperatingHourContract[];
+  }): Promise<{ data: StoreOperatingHourContract[] }> {
+    return this.request<{ data: StoreOperatingHourContract[] }>({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/hours`,
+      method: "PUT",
+      body: { hours: params.hours },
+    });
+  }
+
+  public async upsertStoreHourException(params: {
+    storeId: string;
+    exception: StoreHourExceptionContract;
+  }): Promise<{ data: StoreHourExceptionContract }> {
+    return this.request<{ data: StoreHourExceptionContract }>({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/hour-exceptions`,
+      method: "POST",
+      body: params.exception as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async createStoreServiceArea(params: {
+    storeId: string;
+    area: Omit<StoreServiceAreaContract, "id" | "storeId">;
+  }): Promise<{ data: StoreServiceAreaContract }> {
+    return this.request<{ data: StoreServiceAreaContract }>({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/service-areas`,
+      method: "POST",
+      body: params.area as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async createCatalogCategory(params: {
+    storeId: string;
+    category: CatalogCategoryUpsertContract;
+  }): Promise<{ data: CatalogCategoryContract }> {
+    return this.request<{ data: CatalogCategoryContract }>({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/categories`,
+      method: "POST",
+      body: params.category as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async createCatalogProduct(params: {
+    storeId: string;
+    product: CatalogProductUpsertContract;
+  }): Promise<{ data: CatalogProductContract }> {
+    return this.request<{ data: CatalogProductContract }>({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/products`,
+      method: "POST",
+      body: params.product as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async createCatalogOptionGroup(params: {
+    productId: string;
+    optionGroup: CatalogOptionGroupUpsertContract;
+  }): Promise<{ data: CatalogOptionGroupContract }> {
+    return this.request<{ data: CatalogOptionGroupContract }>({
+      path: `/partner/products/${encodeURIComponent(params.productId)}/option-groups`,
+      method: "POST",
+      body: params.optionGroup as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async createCatalogOption(params: {
+    productId: string;
+    optionGroupId: string;
+    option: CatalogOptionUpsertContract;
+  }): Promise<{ data: CatalogOptionContract }> {
+    return this.request<{ data: CatalogOptionContract }>({
+      path: `/partner/products/${encodeURIComponent(params.productId)}/option-groups/${encodeURIComponent(params.optionGroupId)}/options`,
+      method: "POST",
+      body: params.option as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async executeMultiUnitCatalogBatch(params: {
+    organizationId: string;
+    targetStoreIds: string[];
+    productId: string;
+    priceCents?: number;
+    isAvailable?: boolean;
+    isPaused?: boolean;
+    dryRun?: boolean;
+  }): Promise<{ data: BatchCatalogUpdateItemResultContract[]; dryRun: boolean }> {
+    return this.request<{
+      data: BatchCatalogUpdateItemResultContract[];
+      dryRun: boolean;
+    }>({
+      path: `/organizations/${encodeURIComponent(params.organizationId)}/catalog/batch`,
+      method: "POST",
+      body: {
+        targetStoreIds: params.targetStoreIds,
+        productId: params.productId,
+        priceCents: params.priceCents,
+        isAvailable: params.isAvailable,
+        isPaused: params.isPaused,
+        dryRun: Boolean(params.dryRun),
+      },
+    });
+  }
+
+  public async createSignedUploadUrl(
+    params: SignedUploadUrlRequestContract
+  ): Promise<{ data: SignedUploadUrlResponseContract }> {
+    return this.request<{ data: SignedUploadUrlResponseContract }>({
+      path: "/storage/signed-upload-url",
+      method: "POST",
+      body: params as unknown as Record<string, unknown>,
     });
   }
 }
