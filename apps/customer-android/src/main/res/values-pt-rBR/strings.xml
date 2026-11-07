@@ -2,6 +2,10 @@
 <resources>
     <string name="app_name">iDeliveryFood</string>
     <string name="auth_sign_in_title">Entre na sua conta</string>
+    <string name="auth_sign_up_title">Crie sua conta</string>
+    <string name="auth_recover_title">Recuperar sua senha</string>
+    <string name="auth_email_label">Endereço de e-mail</string>
+    <string name="auth_submit_button">Continuar</string>
     <string name="auth_locale_label">Idioma</string>
     <string name="auth_locale_en">English (Padrão)</string>
     <string name="auth_locale_pt_br">Português (Brasil)</string>
@@ -11,9 +15,21 @@
     <string name="state_offline">Você está sem conexão. Reconectando automaticamente...</string>
     <string name="offline_stale_cache_banner">Modo offline: exibindo catálogo em cache. Preços em tempo real e checkout exigem conexão ativa.</string>
     <string name="marketplace_stores_heading">Restaurantes Disponíveis</string>
+    <string name="marketplace_search_placeholder">Buscar restaurantes ou pratos</string>
+    <string name="addresses_title">Meus Endereços de Entrega</string>
+    <string name="addresses_gps_fallback_notice">Permissão de localização negada ou indisponível. Informe seu endereço manualmente abaixo.</string>
+    <string name="store_detail_menu_heading">Cardápio e Complementos da Loja</string>
+    <string name="store_detail_required_options">Grupo de opções obrigatório</string>
+    <string name="cart_title">Sua Sacola</string>
+    <string name="cart_empty">Sua sacola está vazia.</string>
     <string name="cart_switch_store_title">Iniciar uma nova sacola em outra loja?</string>
     <string name="cart_switch_store_body">Sua sacola atual possui itens de outro restaurante. Ao confirmar, sua sacola será substituída.</string>
+    <string name="checkout_title">Cotação do Servidor e Checkout</string>
     <string name="checkout_psp_blocked_notice">A captura de pagamento online está bloqueada neste ambiente por ausência de credenciais do PSP.</string>
+    <string name="order_tracking_title">Acompanhamento do Pedido em Tempo Real</string>
+    <string name="order_tracking_otp_notice">Informe seu código de confirmação de entrega de 4 dígitos ao entregador apenas no recebimento.</string>
     <string name="order_cancel_window_expired">A janela de cancelamento direto expirou ou a cozinha já iniciou o preparo.</string>
+    <string name="profile_title">Meu Perfil, Dispositivos e Privacidade LGPD</string>
+    <string name="profile_revoke_device">Revogar sessão do dispositivo</string>
     <string name="privacy_delete_account">Solicitar exclusão de conta (LGPD)</string>
 </resources>

@@ -2,6 +2,10 @@
 <resources>
     <string name="app_name">iDeliveryFood</string>
     <string name="auth_sign_in_title">Sign in to your account</string>
+    <string name="auth_sign_up_title">Create your account</string>
+    <string name="auth_recover_title">Recover your password</string>
+    <string name="auth_email_label">Email address</string>
+    <string name="auth_submit_button">Continue</string>
     <string name="auth_locale_label">Language</string>
     <string name="auth_locale_en">English (Default)</string>
     <string name="auth_locale_pt_br">Português (Brasil)</string>
@@ -11,9 +15,21 @@
     <string name="state_offline">You are offline. Reconnecting automatically...</string>
     <string name="offline_stale_cache_banner">Offline mode: displaying cached catalog. Live prices and checkout require an active connection.</string>
     <string name="marketplace_stores_heading">Available Restaurants</string>
+    <string name="marketplace_search_placeholder">Search restaurants or dishes</string>
+    <string name="addresses_title">My Delivery Addresses</string>
+    <string name="addresses_gps_fallback_notice">Location permission denied or unavailable. Enter your delivery address manually below.</string>
+    <string name="store_detail_menu_heading">Store Menu &amp; Options</string>
+    <string name="store_detail_required_options">Required option group</string>
+    <string name="cart_title">Your Basket</string>
+    <string name="cart_empty">Your basket is empty.</string>
     <string name="cart_switch_store_title">Start a new basket at another store?</string>
     <string name="cart_switch_store_body">Your current basket has items from another restaurant. Confirming will replace your basket.</string>
+    <string name="checkout_title">Server Quote &amp; Checkout</string>
     <string name="checkout_psp_blocked_notice">Online payment capture is blocked in this environment due to missing PSP credentials.</string>
+    <string name="order_tracking_title">Live Order Tracking</string>
+    <string name="order_tracking_otp_notice">Share your 4-digit delivery confirmation code with the courier only upon handoff.</string>
     <string name="order_cancel_window_expired">Direct self-service cancellation window has elapsed or kitchen already started preparation.</string>
+    <string name="profile_title">My Profile, Devices &amp; LGPD Privacy</string>
+    <string name="profile_revoke_device">Revoke device session</string>
     <string name="privacy_delete_account">Request account deletion (LGPD)</string>
 </resources>

@@ -3,6 +3,7 @@
     package="com.ideliveryfood.customer">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
@@ -25,6 +26,21 @@
                 <data
                     android:scheme="ideliveryfood-customer"
                     android:host="auth-callback" />
+            </intent-filter>
+            <!-- Allowlisted Order Tracking & Store Discovery Deep Links -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="ideliveryfood-customer"
+                    android:host="orders" />
+                <data
+                    android:scheme="ideliveryfood-customer"
+                    android:host="stores" />
+                <data
+                    android:scheme="ideliveryfood"
+                    android:host="orders" />
             </intent-filter>
         </activity>
     </application>
