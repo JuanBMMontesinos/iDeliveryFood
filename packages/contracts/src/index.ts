@@ -695,6 +695,48 @@ export interface AuthenticatedActorProfileContract {
   }>;
 }
 
+export interface UserDeviceContract {
+  id: string;
+  userId: string;
+  platform: "ANDROID" | "IOS" | "WEB";
+  deviceIdentifier: string;
+  appVersion: string | null;
+  pushConsentGranted: boolean;
+  isRevoked: boolean;
+  revokedAtIso: string | null;
+  lastSeenAtIso: string;
+  createdAtIso: string;
+}
+
+export interface OrderReviewContract {
+  id: string;
+  orderId: string;
+  storeId: string;
+  customerId: string;
+  rating: number;
+  comment: string | null;
+  partnerReply: string | null;
+  partnerRepliedAtIso: string | null;
+  moderationStatus: "PUBLISHED" | "HIDDEN_BY_MODERATION";
+  createdAtIso: string;
+}
+
+export interface SupportCaseContract {
+  id: string;
+  caseNumber: number;
+  orderId: string | null;
+  organizationId: string | null;
+  storeId: string | null;
+  requesterId: string;
+  requesterRole: "CUSTOMER" | "PARTNER" | "COURIER";
+  category: string;
+  priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  status: "OPEN" | "IN_PROGRESS" | "WAITING_USER" | "RESOLVED" | "CLOSED";
+  subject: string;
+  slaDueAtIso: string;
+  createdAtIso: string;
+}
+
 /**
  * Validates that a monetary value is a safe non-negative integer in BRL centavos.
  */
@@ -819,7 +861,15 @@ export const I18N_MESSAGES = {
     "courier.gps.permission_denied_notice": "Location permission is denied. Live route tracking is paused; please enable GPS or contact support.",
     "courier.app.title": "iDeliveryFood Courier",
     "courier.status.online": "Online — Ready for dispatch offers",
-    "courier.status.offline": "Offline"
+    "courier.status.offline": "Offline",
+    "auth.sign_up.title": "Create your account",
+    "auth.recover.title": "Recover your password",
+    "customer.addresses.title": "My Delivery Addresses",
+    "customer.order_tracking.title": "Order #{orderNumber} — Live Tracking",
+    "customer.order_tracking.otp_notice": "Share your 4-digit delivery confirmation code with the courier only upon handoff.",
+    "customer.review.title": "Verified Order Review & Support",
+    "customer.support.title": "Open Order Support Ticket",
+    "customer.profile.title": "My Profile, Devices & LGPD Privacy"
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -885,7 +935,15 @@ export const I18N_MESSAGES = {
     "courier.gps.permission_denied_notice": "Permissão de localização negada. O rastreamento em rota está pausado; ative o GPS ou acione o suporte.",
     "courier.app.title": "iDeliveryFood Entregador",
     "courier.status.online": "Online — Pronto para ofertas de entrega",
-    "courier.status.offline": "Offline"
+    "courier.status.offline": "Offline",
+    "auth.sign_up.title": "Crie sua conta",
+    "auth.recover.title": "Recuperar sua senha",
+    "customer.addresses.title": "Meus Endereços de Entrega",
+    "customer.order_tracking.title": "Pedido #{orderNumber} — Acompanhamento em Tempo Real",
+    "customer.order_tracking.otp_notice": "Informe seu código de confirmação de entrega de 4 dígitos ao entregador apenas no recebimento.",
+    "customer.review.title": "Avaliação Verificada do Pedido e Suporte",
+    "customer.support.title": "Abrir Chamado de Suporte do Pedido",
+    "customer.profile.title": "Meu Perfil, Dispositivos e Privacidade LGPD"
   }
 } as const;
 

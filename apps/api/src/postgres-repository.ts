@@ -29,6 +29,7 @@ import {
   type FulfillmentModality,
   type OrderEventRecordContract,
   type OrderRecordContract,
+  type OrderReviewContract,
   type PartnerRole,
   type PaymentAttemptContract,
   type PaymentMethodCode,
@@ -42,7 +43,9 @@ import {
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportCaseContract,
   type SupportedLocale,
+  type UserDeviceContract,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
 import type { ApiDataRepository, AuditLogWriteRecord } from "./index.js";
@@ -2524,6 +2527,190 @@ export function createSupabasePostgresRepository(params: {
           isTestData,
         ]
       );
+    },
+
+    async listUserDevices(userId: string): Promise<UserDeviceContract[]> {
+      const userUuid = toDeterministicUuid(userId);
+      const res = await pool.query(
+        `SELECT id, user_id, platform, device_identifier, app_version, push_consent_granted,
+                is_revoked, revoked_at, last_seen_at, created_at
+         FROM public.user_devices
+         WHERE user_id = $1
+         ORDER BY last_seen_at DESC`,
+        [userUuid]
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        userId: restoreLogicalId(String(r.user_id)),
+        platform: String(r.platform) as UserDeviceContract["platform"],
+        deviceIdentifier: String(r.device_identifier),
+        appVersion: r.app_version ? String(r.app_version) : null,
+        pushConsentGranted: Boolean(r.push_consent_granted),
+        isRevoked: Boolean(r.is_revoked),
+        revokedAtIso: r.revoked_at ? new Date(String(r.revoked_at)).toISOString() : null,
+        lastSeenAtIso: new Date(String(r.last_seen_at)).toISOString(),
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
+    },
+
+    async getOrderReview(orderId: string): Promise<OrderReviewContract | null> {
+      const orderUuid = toDeterministicUuid(orderId);
+      const res = await pool.query(
+        `SELECT id, order_id, store_id, customer_id, rating, comment, partner_reply,
+                partner_replied_at, moderation_status, created_at
+         FROM public.order_reviews
+         WHERE order_id = $1
+         LIMIT 1`,
+        [orderUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async saveOrderReview(review: OrderReviewContract): Promise<OrderReviewContract> {
+      const revUuid = rememberLogicalId(review.id);
+      const orderUuid = toDeterministicUuid(review.orderId);
+      const storeUuid = toDeterministicUuid(review.storeId);
+      const custUuid = toDeterministicUuid(review.customerId);
+      const res = await pool.query(
+        `INSERT INTO public.order_reviews (
+           id, order_id, store_id, customer_id, rating, comment, moderation_status, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (order_id) DO UPDATE SET
+           rating = EXCLUDED.rating,
+           comment = EXCLUDED.comment
+         RETURNING id, order_id, store_id, customer_id, rating, comment, partner_reply,
+                   partner_replied_at, moderation_status, created_at`,
+        [
+          revUuid,
+          orderUuid,
+          storeUuid,
+          custUuid,
+          review.rating,
+          review.comment,
+          review.moderationStatus,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listOrderSupportCases(orderId: string): Promise<SupportCaseContract[]> {
+      const orderUuid = toDeterministicUuid(orderId);
+      const res = await pool.query(
+        `SELECT id, case_number, order_id, organization_id, store_id, requester_id,
+                requester_role, category, priority, status, subject, sla_due_at, created_at
+         FROM public.support_cases
+         WHERE order_id = $1
+         ORDER BY created_at DESC`,
+        [orderUuid]
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
+    },
+
+    async createSupportCase(
+      supportCase: Omit<SupportCaseContract, "caseNumber">
+    ): Promise<SupportCaseContract> {
+      const caseUuid = rememberLogicalId(supportCase.id);
+      const orderUuid = supportCase.orderId
+        ? toDeterministicUuid(supportCase.orderId)
+        : null;
+      const orgUuid = supportCase.organizationId
+        ? toDeterministicUuid(supportCase.organizationId)
+        : null;
+      const storeUuid = supportCase.storeId
+        ? toDeterministicUuid(supportCase.storeId)
+        : null;
+      const reqUuid = toDeterministicUuid(supportCase.requesterId);
+
+      const res = await pool.query(
+        `INSERT INTO public.support_cases (
+           id, order_id, organization_id, store_id, requester_id, requester_role,
+           category, priority, status, subject, sla_due_at, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, case_number, order_id, organization_id, store_id, requester_id,
+                   requester_role, category, priority, status, subject, sla_due_at, created_at`,
+        [
+          caseUuid,
+          orderUuid,
+          orgUuid,
+          storeUuid,
+          reqUuid,
+          supportCase.requesterRole,
+          supportCase.category,
+          supportCase.priority,
+          supportCase.status,
+          supportCase.subject,
+          supportCase.slaDueAtIso,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
     },
   };
 }

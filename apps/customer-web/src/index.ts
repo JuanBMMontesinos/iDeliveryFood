@@ -161,6 +161,30 @@ export class CustomerCartController {
       confirmationDialog: null,
     };
   }
+
+  public updateItemQuantity(productId: string, quantity: number): void {
+    if (quantity <= 0) {
+      this.removeItem(productId);
+      return;
+    }
+    this.items = this.items.map((item) =>
+      item.productId === productId ? { ...item, quantity } : item
+    );
+  }
+
+  public removeItem(productId: string): void {
+    this.items = this.items.filter((item) => item.productId !== productId);
+    if (this.items.length === 0) {
+      this.storeId = null;
+      this.storeName = null;
+    }
+  }
+
+  public clear(): void {
+    this.storeId = null;
+    this.storeName = null;
+    this.items = [];
+  }
 }
 
 export interface CustomerCheckoutScreenModel {
@@ -226,3 +250,18 @@ export function buildCustomerCheckoutScreenModel(params: {
     pspBlockedNotice,
   };
 }
+
+export * from "./app/layout.js";
+export * from "./app/page.js";
+export * from "./app/auth/login/page.js";
+export * from "./app/auth/signup/page.js";
+export * from "./app/auth/recover/page.js";
+export * from "./app/addresses/page.js";
+export * from "./app/stores/[slug]/page.js";
+export * from "./app/cart/page.js";
+export * from "./app/checkout/page.js";
+export * from "./app/orders/[orderId]/page.js";
+export * from "./app/orders/[orderId]/review/page.js";
+export * from "./app/profile/page.js";
+export * from "./server.js";
+

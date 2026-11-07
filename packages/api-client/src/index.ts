@@ -3,6 +3,7 @@ import {
   type AdminGovernanceActionContract,
   type AdminStaffScopeGrantRequestContract,
   type ApiErrorEnvelope,
+  type AuthenticatedActorProfileContract,
   type BankAccountChangeRequestContract,
   type BatchCatalogUpdateItemResultContract,
   type CartItemSelectionContract,
@@ -21,6 +22,7 @@ import {
   type FulfillmentModality,
   type OrderEventRecordContract,
   type OrderRecordContract,
+  type OrderReviewContract,
   type PaginatedResponse,
   type PaymentAttemptContract,
   type PaymentMethodCode,
@@ -40,7 +42,9 @@ import {
   type StoreOrdersQueueResponseContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportCaseContract,
   type SupportedLocale,
+  type UserDeviceContract,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
 
@@ -641,6 +645,119 @@ export class IDeliveryApiClient {
       path: "/storage/signed-upload-url",
       method: "POST",
       body: params as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async getMe(): Promise<{ data: AuthenticatedActorProfileContract }> {
+    return this.request<{ data: AuthenticatedActorProfileContract }>({
+      path: "/me",
+      method: "GET",
+    });
+  }
+
+  public async createMyAddress(
+    address: Omit<CustomerAddressContract, "id" | "userId"> & { id?: string }
+  ): Promise<{ data: CustomerAddressContract }> {
+    return this.request<{ data: CustomerAddressContract }>({
+      path: "/me/addresses",
+      method: "POST",
+      body: address as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async listMyDevices(): Promise<{ data: UserDeviceContract[] }> {
+    return this.request<{ data: UserDeviceContract[] }>({
+      path: "/me/devices",
+      method: "GET",
+    });
+  }
+
+  public async revokeMyDevice(deviceId: string): Promise<{
+    status: "REVOKED";
+    deviceId: string;
+    revokedAt: string;
+  }> {
+    return this.request({
+      path: "/me/devices/revoke",
+      method: "POST",
+      body: { deviceId },
+    });
+  }
+
+  public async requestAccountDeletion(params: {
+    hasActiveOrders: boolean;
+    hasOpenFinancialDisputes: boolean;
+    hasCompletedFiscalTransactions: boolean;
+    reason?: string;
+  }): Promise<{
+    data: {
+      userId: string;
+      outcome: "IMMEDIATE_ANONYMIZATION" | "DEFERRED_RETENTION_HOLD";
+      reasonCode: string;
+      holdUntilIso: string | null;
+    };
+  }> {
+    return this.request({
+      path: "/me/privacy-requests",
+      method: "POST",
+      body: params,
+    });
+  }
+
+  public async getOrder(orderId: string): Promise<{ data: OrderRecordContract }> {
+    return this.request<{ data: OrderRecordContract }>({
+      path: `/orders/${encodeURIComponent(orderId)}`,
+      method: "GET",
+    });
+  }
+
+  public async getOrderReview(
+    orderId: string
+  ): Promise<{ data: OrderReviewContract | null }> {
+    return this.request<{ data: OrderReviewContract | null }>({
+      path: `/orders/${encodeURIComponent(orderId)}/review`,
+      method: "GET",
+    });
+  }
+
+  public async submitOrderReview(params: {
+    orderId: string;
+    rating: number;
+    comment?: string | null;
+  }): Promise<{ data: OrderReviewContract }> {
+    return this.request<{ data: OrderReviewContract }>({
+      path: `/orders/${encodeURIComponent(params.orderId)}/review`,
+      method: "POST",
+      body: {
+        rating: params.rating,
+        comment: params.comment ?? null,
+      },
+    });
+  }
+
+  public async listOrderSupportCases(
+    orderId: string
+  ): Promise<{ data: SupportCaseContract[] }> {
+    return this.request<{ data: SupportCaseContract[] }>({
+      path: `/orders/${encodeURIComponent(orderId)}/support-cases`,
+      method: "GET",
+    });
+  }
+
+  public async createOrderSupportCase(params: {
+    orderId: string;
+    subject: string;
+    category?: string;
+    priority?: SupportCaseContract["priority"];
+  }): Promise<{ data: SupportCaseContract }> {
+    return this.request<{ data: SupportCaseContract }>({
+      path: `/orders/${encodeURIComponent(params.orderId)}/support-cases`,
+      method: "POST",
+      body: {
+        subject: params.subject,
+        category: params.category ?? "ORDER_ISSUE",
+        priority: params.priority ?? "MEDIUM",
+      },
     });
   }
 }

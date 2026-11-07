@@ -40,6 +40,7 @@ import {
   type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
+  type OrderReviewContract,
   type PaginatedResponse,
   type PaymentAttemptContract,
   type PaymentMethodCode,
@@ -56,7 +57,9 @@ import {
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportCaseContract,
   type SupportedLocale,
+  type UserDeviceContract,
   type UserPreferencesContract,
 } from "@ideliveryfood/contracts";
 import {
@@ -370,6 +373,12 @@ export interface ApiDataRepository {
     signedTokenHash: string;
     expiresAtIso: string;
   }): Promise<void>;
+
+  listUserDevices?(userId: string): Promise<UserDeviceContract[]>;
+  getOrderReview?(orderId: string): Promise<OrderReviewContract | null>;
+  saveOrderReview?(review: OrderReviewContract): Promise<OrderReviewContract>;
+  listOrderSupportCases?(orderId: string): Promise<SupportCaseContract[]>;
+  createSupportCase?(supportCase: Omit<SupportCaseContract, "caseNumber">): Promise<SupportCaseContract>;
 }
 
 /**
@@ -921,7 +930,25 @@ export function createApiServer(deps: {
         return;
       }
 
-      // 7. POST /v1/me/devices/revoke
+      // 7. GET /v1/me/devices & POST /v1/me/devices/revoke
+      if (method === "GET" && pathname === "/v1/me/devices") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const devices = deps.repository.listUserDevices
+          ? await deps.repository.listUserDevices(actor.id)
+          : [];
+        sendJson(res, 200, correlationId, { data: devices });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/me/devices/revoke") {
         if (!actor) {
           sendError(
@@ -1792,6 +1819,152 @@ export function createApiServer(deps: {
         const evts = await deps.repository.listOrderEvents(orderId);
         sendJson(res, 200, correlationId, { data: evts });
         return;
+      }
+
+      // 13e. GET & POST /v1/orders/:orderId/review (M05 / M19 Verified Order Review)
+      const orderReviewMatch = pathname.match(/^\/v1\/orders\/([^/]+)\/review$/);
+      if (orderReviewMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const orderId = orderReviewMatch[1] ?? "";
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
+          return;
+        }
+        if (method === "GET") {
+          const rev = deps.repository.getOrderReview
+            ? await deps.repository.getOrderReview(order.id)
+            : null;
+          sendJson(res, 200, correlationId, { data: rev });
+          return;
+        }
+        if (method === "POST") {
+          if (order.customerId !== actor.id) {
+            sendError(
+              res,
+              403,
+              "REVIEW_FORBIDDEN",
+              "Only the verified customer who placed the order can submit a review.",
+              correlationId
+            );
+            return;
+          }
+          const { json: body } = await readRawAndJsonBody(req);
+          const rating = Number(body.rating);
+          if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+            sendError(
+              res,
+              400,
+              "VALIDATION_ERROR",
+              "rating must be an integer between 1 and 5.",
+              correlationId
+            );
+            return;
+          }
+          const reviewInput: OrderReviewContract = {
+            id: body.id ? String(body.id) : crypto.randomUUID(),
+            orderId: order.id,
+            storeId: order.storeId,
+            customerId: actor.id,
+            rating,
+            comment: body.comment ? String(body.comment).trim() : null,
+            partnerReply: null,
+            partnerRepliedAtIso: null,
+            moderationStatus: "PUBLISHED",
+            createdAtIso: new Date().toISOString(),
+          };
+          const saved = deps.repository.saveOrderReview
+            ? await deps.repository.saveOrderReview(reviewInput)
+            : reviewInput;
+          sendJson(res, 201, correlationId, { data: saved });
+          return;
+        }
+      }
+
+      // 13f. GET & POST /v1/orders/:orderId/support-cases (M05 / M17 Order Help & Support)
+      const orderSupportMatch = pathname.match(
+        /^\/v1\/orders\/([^/]+)\/support-cases$/
+      );
+      if (orderSupportMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const orderId = orderSupportMatch[1] ?? "";
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
+          return;
+        }
+        if (method === "GET") {
+          const cases = deps.repository.listOrderSupportCases
+            ? await deps.repository.listOrderSupportCases(order.id)
+            : [];
+          sendJson(res, 200, correlationId, { data: cases });
+          return;
+        }
+        if (method === "POST") {
+          const { json: body } = await readRawAndJsonBody(req);
+          const subject = String(body.subject ?? "").trim();
+          const category = String(body.category ?? "ORDER_ISSUE").trim();
+          if (!subject) {
+            sendError(
+              res,
+              400,
+              "VALIDATION_ERROR",
+              "subject is required to open a support ticket.",
+              correlationId
+            );
+            return;
+          }
+          const now = new Date();
+          const caseInput: Omit<SupportCaseContract, "caseNumber"> = {
+            id: body.id ? String(body.id) : crypto.randomUUID(),
+            orderId: order.id,
+            organizationId: order.organizationId,
+            storeId: order.storeId,
+            requesterId: actor.id,
+            requesterRole: "CUSTOMER",
+            category,
+            priority: (body.priority as SupportCaseContract["priority"]) ?? "MEDIUM",
+            status: "OPEN",
+            subject,
+            slaDueAtIso: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+            createdAtIso: now.toISOString(),
+          };
+          const createdCase = deps.repository.createSupportCase
+            ? await deps.repository.createSupportCase(caseInput)
+            : { ...caseInput, caseNumber: 5000 };
+          sendJson(res, 201, correlationId, { data: createdCase });
+          return;
+        }
       }
 
       // 14. POST /v1/payments/attempts (M12 — Enforces honest BLOCKED_MISSING_CREDENTIALS when PSP keys are absent)

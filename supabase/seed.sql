@@ -800,4 +800,377 @@ INSERT INTO public.audit_logs (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- 16. Complete Coverage of Remaining Domain & Phase E/F Tables (Zero Empty Tables Policy)
+INSERT INTO public.store_hour_exceptions (
+  id, store_id, exception_date, is_closed, opens_at, closes_at, reason, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001701',
+  '00000000-0000-4000-8000-000000000201',
+  '2027-12-25',
+  true,
+  NULL,
+  NULL,
+  'Christmas Holiday / Feriado de Natal',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  reason = EXCLUDED.reason,
+  is_test_data = true;
+
+INSERT INTO public.invitations (
+  id, organization_id, store_id, invited_email, role, token_hash, status, invited_by, expires_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001702',
+  '00000000-0000-4000-8000-000000000101',
+  '00000000-0000-4000-8000-000000000201',
+  'manager.invite@test.ideliveryfood.invalid',
+  'partner_manager',
+  'seed_token_hash_manager_001',
+  'PENDING',
+  '00000000-0000-4000-8000-000000000010',
+  '2027-12-31T23:59:59Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.approval_events (
+  id, target_type, target_id, organization_id, previous_status, new_status, decided_by, reason, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001703',
+  'ORGANIZATION',
+  '00000000-0000-4000-8000-000000000101',
+  '00000000-0000-4000-8000-000000000101',
+  'PENDING',
+  'APPROVED',
+  '00000000-0000-4000-8000-000000000090',
+  'KYC and CNPJ verified for Paulista Artisan Burgers',
+  true
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.user_devices (
+  id, user_id, platform, push_token, device_identifier, app_version, push_consent_granted, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001704',
+  '00000000-0000-4000-8000-000000000001',
+  'WEB',
+  'webpush_redacted_alice_001',
+  'seed-web-pwa-alice-001',
+  '0.1.0',
+  true,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  app_version = EXCLUDED.app_version,
+  is_test_data = true;
+
+INSERT INTO public.privacy_requests (
+  id, user_id, request_type, status, reason, processed_by, completed_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001705',
+  '00000000-0000-4000-8000-000000000002',
+  'EXPORT_DATA',
+  'COMPLETED',
+  'LGPD portability export request',
+  '00000000-0000-4000-8000-000000000099',
+  '2026-11-02T12:00:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.promotion_redemptions (
+  id, promotion_id, order_id, customer_id, discount_applied_cents, status, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001706',
+  '00000000-0000-4000-8000-000000000901',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000001',
+  1000,
+  'REDEEMED',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  discount_applied_cents = EXCLUDED.discount_applied_cents,
+  is_test_data = true;
+
+INSERT INTO public.delivery_offers (
+  id, delivery_task_id, courier_id, offered_fee_cents, status, pickup_store_name, distance_meters,
+  dropoff_neighborhood_only, expires_at, responded_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001707',
+  '00000000-0000-4000-8000-000000001201',
+  '00000000-0000-4000-8000-000000000030',
+  690,
+  'ACCEPTED',
+  'Paulista Artisan Burgers - Jardins',
+  1420,
+  'Consolação',
+  '2026-11-03T15:10:00Z',
+  '2026-11-03T15:02:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.courier_location_samples (
+  id, courier_id, delivery_task_id, latitude, longitude, accuracy_meters, recorded_at, expires_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001708',
+  '00000000-0000-4000-8000-000000000030',
+  '00000000-0000-4000-8000-000000001201',
+  -23.562100,
+  -46.660200,
+  8.50,
+  '2026-11-03T15:05:00Z',
+  '2026-12-03T15:05:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  accuracy_meters = EXCLUDED.accuracy_meters,
+  is_test_data = true;
+
+INSERT INTO public.delivery_events (
+  id, delivery_task_id, courier_id, event_type, payload, idempotency_key, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001709',
+  '00000000-0000-4000-8000-000000001201',
+  '00000000-0000-4000-8000-000000000030',
+  'OFFER_ACCEPTED',
+  '{"offeredFeeCents":690}'::jsonb,
+  'seed_delivery_evt_1201_accepted',
+  true
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.payment_attempts (
+  id, order_id, customer_id, provider_code, payment_method, amount_cents, currency_code, status,
+  external_payment_id, idempotency_key, is_sandbox, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001710',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000001',
+  'stripe',
+  'PIX',
+  6232,
+  'BRL',
+  'CAPTURED',
+  'pi_seed_order_1001',
+  'seed_pay_attempt_1001',
+  true,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.payment_provider_events (
+  id, provider_code, external_event_id, payment_attempt_id, event_type, signature_verified, processed_at, redacted_payload, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001711',
+  'stripe',
+  'evt_seed_order_1001_captured',
+  '00000000-0000-4000-8000-000000001710',
+  'payment.captured',
+  true,
+  '2026-11-03T15:01:00Z',
+  '{"orderId":"00000000-0000-4000-8000-000000001001","amountCents":6232}'::jsonb,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  signature_verified = EXCLUDED.signature_verified,
+  is_test_data = true;
+
+INSERT INTO public.refunds (
+  id, order_id, payment_attempt_id, amount_cents, reason, requested_by, approved_by, status, idempotency_key, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001712',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000001710',
+  500,
+  'Missing side sauce compensation',
+  '00000000-0000-4000-8000-000000000090',
+  '00000000-0000-4000-8000-000000000090',
+  'APPROVED',
+  'seed_refund_order_1001_partial',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.settlements (
+  id, organization_id, courier_id, period_start, period_end, amount_cents, status, approved_by, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001713',
+  '00000000-0000-4000-8000-000000000101',
+  NULL,
+  '2026-11-01',
+  '2026-11-07',
+  4797,
+  'SCHEDULED',
+  '00000000-0000-4000-8000-000000000091',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.reconciliation_runs (
+  id, provider_code, run_date, matched_count, discrepancy_count, discrepancy_total_cents, status, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001714',
+  'stripe',
+  '2026-11-03',
+  1,
+  0,
+  0,
+  'COMPLETED',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.storage_upload_intents (
+  id, bucket_id, object_path, mime_type, file_size_bytes, uploaded_by, store_id, organization_id,
+  signed_token_hash, expires_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001717',
+  'store-assets',
+  '00000000-0000-4000-8000-000000000201/seed-banner.webp',
+  'image/webp',
+  128000,
+  '00000000-0000-4000-8000-000000000010',
+  '00000000-0000-4000-8000-000000000201',
+  '00000000-0000-4000-8000-000000000101',
+  'seed_signed_upload_hash_001',
+  '2027-12-31T23:59:59Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  file_size_bytes = EXCLUDED.file_size_bytes,
+  is_test_data = true;
+
+INSERT INTO public.support_messages (
+  id, case_id, sender_id, body, is_internal_note, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001718',
+  '00000000-0000-4000-8000-000000001501',
+  '00000000-0000-4000-8000-000000000001',
+  'Please leave with building concierge at intercom #42.',
+  false,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  body = EXCLUDED.body,
+  is_test_data = true;
+
+INSERT INTO public.support_action_requests (
+  id, case_id, order_id, requested_by, action_type, amount_cents, reason, status, decided_by, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001719',
+  '00000000-0000-4000-8000-000000001501',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000090',
+  'PARTIAL_REFUND',
+  500,
+  'Courtesy adjustment for delayed condiment',
+  'APPROVED',
+  '00000000-0000-4000-8000-000000000091',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.commercial_leads (
+  id, legal_name, trade_name, tax_id, contact_email, contact_phone, legal_basis, status, owner_staff_id, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001720',
+  'Bela Vista Pizzeria Napolitana Ltda',
+  'Napoli Bela Vista',
+  '00000000000353',
+  'contact.napoli@test.ideliveryfood.invalid',
+  '+5511900000040',
+  'PARTNER_INBOUND_APPLICATION',
+  'QUALIFYING',
+  '00000000-0000-4000-8000-000000000090',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.order_reviews (
+  id, order_id, store_id, customer_id, rating, comment, partner_reply, partner_replied_at, moderation_status, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001721',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000201',
+  '00000000-0000-4000-8000-000000000001',
+  5,
+  'Crisp smash burger crust and fast delivery!',
+  'Thank you for ordering with Paulista Artisan Burgers!',
+  '2026-11-03T17:00:00Z',
+  'PUBLISHED',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  rating = EXCLUDED.rating,
+  is_test_data = true;
+
+INSERT INTO public.outbox_events (
+  id, aggregate_type, aggregate_id, event_type, idempotency_key, payload, status, attempts, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001722',
+  'ORDER',
+  '00000000-0000-4000-8000-000000001001',
+  'ORDER_PREPARING',
+  'seed_outbox_order_1001_preparing',
+  '{"orderId":"00000000-0000-4000-8000-000000001001"}'::jsonb,
+  'PUBLISHED',
+  1,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.notification_deliveries (
+  id, outbox_event_id, recipient_user_id, channel, template_key, locale, status, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001723',
+  '00000000-0000-4000-8000-000000001722',
+  '00000000-0000-4000-8000-000000000001',
+  'IN_APP',
+  'order.status.preparing',
+  'en',
+  'DELIVERED',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  is_test_data = true;
+
+INSERT INTO public.risk_decisions (
+  id, subject_type, subject_id, rule_code, decision, human_reviewer_id, justification, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001724',
+  'ORDER',
+  '00000000-0000-4000-8000-000000001001',
+  'VELOCITY_CHECK_NORMAL',
+  'ALLOW',
+  '00000000-0000-4000-8000-000000000090',
+  'Order velocity and address match verified customer history',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  decision = EXCLUDED.decision,
+  is_test_data = true;
+
 COMMIT;

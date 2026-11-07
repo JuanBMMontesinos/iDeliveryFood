@@ -80,6 +80,30 @@ async function main() {
       await client.query(testSql);
       console.log("[RLS TEST OK] supabase/tests/rls_and_constraints_test.sql passed.");
     }
+
+    if (args.has("--check-empty")) {
+      const tablesRes = await client.query(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+      );
+      const emptyTables = [];
+      for (const row of tablesRes.rows) {
+        const tableName = String(row.tablename);
+        const cntRes = await client.query(`SELECT count(*)::int AS cnt FROM public.${tableName}`);
+        const count = Number(cntRes.rows[0].cnt);
+        if (count === 0) {
+          emptyTables.push(tableName);
+        }
+      }
+      if (emptyTables.length > 0) {
+        console.error(
+          `[EMPTY TABLES DETECTED] ${emptyTables.length} of ${tablesRes.rowCount} public tables have 0 rows: ${emptyTables.join(", ")}`
+        );
+        process.exit(1);
+      }
+      console.log(
+        `[NON-EMPTY CHECK OK] All ${tablesRes.rowCount} public tables have >= 1 row in Supabase.`
+      );
+    }
   } finally {
     await client.end();
   }
