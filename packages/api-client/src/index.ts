@@ -20,10 +20,14 @@ import {
   type DeliveryOfferContract,
   type DeliveryTaskContract,
   type FulfillmentModality,
+  type MerchantContractRecordContract,
+  type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type OrderReviewContract,
   type PaginatedResponse,
+  type PartnerFinanceSummaryContract,
+  type PartnerRole,
   type PaymentAttemptContract,
   type PaymentMethodCode,
   type PspReconciliationRunContract,
@@ -758,6 +762,72 @@ export class IDeliveryApiClient {
         category: params.category ?? "ORDER_ISSUE",
         priority: params.priority ?? "MEDIUM",
       },
+    });
+  }
+
+  public async listOrganizationMembers(organizationId: string): Promise<{
+    data: Array<{ userId: string; role: PartnerRole; storeId: string | null }>;
+  }> {
+    return this.request({
+      path: `/organizations/${encodeURIComponent(organizationId)}/members`,
+      method: "GET",
+    });
+  }
+
+  public async getOrganizationUnitsSummary(
+    organizationId: string
+  ): Promise<{ data: MultiUnitStoreSummaryContract[] }> {
+    return this.request({
+      path: `/organizations/${encodeURIComponent(organizationId)}/units-summary`,
+      method: "GET",
+    });
+  }
+
+  public async getPartnerFinanceSummary(
+    organizationId: string
+  ): Promise<{ data: PartnerFinanceSummaryContract }> {
+    return this.request({
+      path: `/partner/organizations/${encodeURIComponent(organizationId)}/finance-summary`,
+      method: "GET",
+    });
+  }
+
+  public async getMerchantContract(
+    organizationId: string
+  ): Promise<{ data: MerchantContractRecordContract | null }> {
+    return this.request({
+      path: `/partner/organizations/${encodeURIComponent(organizationId)}/contract`,
+      method: "GET",
+    });
+  }
+
+  public async listStoreReviews(
+    storeId: string
+  ): Promise<{ data: OrderReviewContract[] }> {
+    return this.request({
+      path: `/partner/stores/${encodeURIComponent(storeId)}/reviews`,
+      method: "GET",
+    });
+  }
+
+  public async replyToStoreReview(params: {
+    storeId: string;
+    reviewId: string;
+    reply: string;
+  }): Promise<{ data: OrderReviewContract }> {
+    return this.request({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/reviews/${encodeURIComponent(params.reviewId)}/reply`,
+      method: "POST",
+      body: { reply: params.reply },
+    });
+  }
+
+  public async listStoreSupportCases(
+    storeId: string
+  ): Promise<{ data: SupportCaseContract[] }> {
+    return this.request({
+      path: `/partner/stores/${encodeURIComponent(storeId)}/support-cases`,
+      method: "GET",
     });
   }
 }

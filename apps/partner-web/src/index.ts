@@ -388,3 +388,16 @@ export class KitchenOrderConsoleController {
     };
   }
 }
+
+export * from "./app/layout.js";
+export * from "./app/dashboard/page.js";
+export * from "./app/onboarding/page.js";
+export * from "./app/store/settings/page.js";
+export * from "./app/catalog/page.js";
+export * from "./app/team/page.js";
+export * from "./app/finance/page.js";
+export * from "./app/reviews/page.js";
+export * from "./app/kitchen/page.js";
+export * from "./app/chain/page.js";
+export * from "./server.js";
+

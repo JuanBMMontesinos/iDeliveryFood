@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import fs from "node:fs";
+import type http from "node:http";
+import type { AddressInfo } from "node:net";
+import path from "node:path";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  createApiServer,
+  createSupabasePostgresRepository,
+  signSupabaseHs256Jwt,
+} from "@ideliveryfood/api";
+import { IDeliveryApiClient } from "@ideliveryfood/api-client";
 import type {
   AuthenticatedActorProfileContract,
   OrderEventRecordContract,
@@ -8,6 +19,7 @@ import type {
 import {
   KitchenOrderConsoleController,
   buildPartnerPortalScreenModel,
+  createPartnerWebServer,
   evaluateMultiUnitCatalogBatch,
   submitPartnerBankAccountChangeRequest,
 } from "../src/index.js";
@@ -288,3 +300,235 @@ describe("@ideliveryfood/partner-web — Multi-Tenant Scope, Partner Finance Seg
     assert.equal(vmAfterReconnect.queue.columns.PREPARING.length, 1);
   });
 });
+
+function loadRootEnv(): void {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const envPath = path.resolve(__dirname, "../../../../.env");
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx > 0) {
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      if (!process.env[key]) {
+        process.env[key] = val;
+      }
+    }
+  }
+}
+
+describe("@ideliveryfood/partner-web — Live Supabase & SSR App Router Integration (Fase H)", () => {
+  let repo: ReturnType<typeof createSupabasePostgresRepository>;
+  let apiServer: http.Server;
+  let partnerServer: http.Server;
+  let apiBaseUrl = "";
+  let partnerBaseUrl = "";
+  let currentToken: string | null = null;
+  let apiClient: IDeliveryApiClient;
+
+  const jwtSecret = "fase-h-partner-web-jwt-secret-key-minimum-32-chars!!";
+  const org101Id = "00000000-0000-4000-8000-000000000101";
+  const store201Id = "00000000-0000-4000-8000-000000000201";
+  const ownerHelenaId = "00000000-0000-4000-8000-000000000010";
+  const operatorLucasId = "00000000-0000-4000-8000-000000000011";
+  const financeClaraId = "00000000-0000-4000-8000-000000000012";
+
+  before(async () => {
+    loadRootEnv();
+    const dbUrl = process.env.DATABASE_URL;
+    assert.ok(dbUrl, "DATABASE_URL must be configured in root .env for live Partner Web tests");
+
+    repo = createSupabasePostgresRepository({ connectionString: dbUrl });
+    apiServer = createApiServer({
+      repository: repo,
+      env: {
+        ...process.env,
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+    });
+
+    await new Promise<void>((resolve) => apiServer.listen(0, resolve));
+    const apiPort = (apiServer.address() as AddressInfo).port;
+    apiBaseUrl = `http://127.0.0.1:${apiPort}/v1`;
+
+    currentToken = signSupabaseHs256Jwt(
+      {
+        sub: ownerHelenaId,
+        role: "authenticated",
+        aal: "aal2",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      jwtSecret
+    );
+
+    apiClient = new IDeliveryApiClient({
+      baseUrl: apiBaseUrl,
+      getAccessToken: () => currentToken,
+    });
+
+    partnerServer = createPartnerWebServer({
+      apiClient,
+      defaultOrganizationId: org101Id,
+      defaultStoreId: store201Id,
+    });
+
+    await new Promise<void>((resolve) => partnerServer.listen(0, resolve));
+    const partnerPort = (partnerServer.address() as AddressInfo).port;
+    partnerBaseUrl = `http://127.0.0.1:${partnerPort}`;
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve) => partnerServer.close(() => resolve()));
+    await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    await repo.close();
+  });
+
+  it("renders /dashboard, /onboarding (with KYC signed upload URL), /store/settings, /store/hours, /store/coverage & /catalog from live Supabase", async () => {
+    // 1. /dashboard
+    const dashRes = await fetch(`${partnerBaseUrl}/dashboard?locale=pt-BR`);
+    assert.equal(dashRes.status, 200);
+    const dashHtml = await dashRes.text();
+    assert.match(dashHtml, /Paulista Artisan Burgers - Jardins/);
+    assert.match(dashHtml, /data-testid="kpi-active-orders"/);
+    assert.match(dashHtml, /data-testid="kpi-gmv"/);
+
+    // 2. /onboarding with KYC signed upload URL
+    const onbRes = await fetch(
+      `${partnerBaseUrl}/onboarding?kycFile=contrato-social.pdf&locale=pt-BR`
+    );
+    assert.equal(onbRes.status, 200);
+    const onbHtml = await onbRes.text();
+    assert.match(onbHtml, /data-testid="onboarding-checklist"/);
+    assert.match(onbHtml, /data-testid="kyc-signed-url-result"/);
+    assert.match(onbHtml, /partner-kyc-docs/);
+
+    // 3. /store/settings, /store/hours, /store/coverage
+    const settingsRes = await fetch(`${partnerBaseUrl}/store/settings?locale=pt-BR`);
+    assert.equal(settingsRes.status, 200);
+    const settingsHtml = await settingsRes.text();
+    assert.match(settingsHtml, /data-testid="store-settings-card"/);
+    assert.match(settingsHtml, /data-testid="store-hours-card"/);
+    assert.match(settingsHtml, /data-testid="store-coverage-card"/);
+    assert.match(settingsHtml, /Jardins &amp; Bela Vista/);
+
+    // 4. /catalog with catalog-media signed upload URL
+    const catRes = await fetch(
+      `${partnerBaseUrl}/catalog?mediaFile=picanha-premium.webp&locale=pt-BR`
+    );
+    assert.equal(catRes.status, 200);
+    const catHtml = await catRes.text();
+    assert.match(catHtml, /Duplo Smash Paulista Trufado/);
+    assert.match(catHtml, /data-testid="catalog-media-upload-intent"/);
+    assert.match(catHtml, /catalog-media/);
+  });
+
+  it("renders /team and enforces strict role segregation on /finance between partner_operator (403) and partner_finance (200)", async () => {
+    // 1. /team as partner_owner Helena
+    const teamRes = await fetch(`${partnerBaseUrl}/team?locale=pt-BR`);
+    assert.equal(teamRes.status, 200);
+    const teamHtml = await teamRes.text();
+    assert.match(teamHtml, /00000000-0000-4000-8000-000000000010/);
+    assert.match(teamHtml, /00000000-0000-4000-8000-000000000011/);
+    assert.match(teamHtml, /00000000-0000-4000-8000-000000000012/);
+    assert.match(teamHtml, /partner_owner/);
+    assert.match(teamHtml, /partner_operator/);
+    assert.match(teamHtml, /partner_finance/);
+
+    // 2. Switch token to partner_operator Lucas -> /finance must return 403 and segregated banner
+    currentToken = signSupabaseHs256Jwt(
+      {
+        sub: operatorLucasId,
+        role: "authenticated",
+        aal: "aal1",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      jwtSecret
+    );
+
+    const operatorFinRes = await fetch(`${partnerBaseUrl}/finance?locale=pt-BR`);
+    assert.equal(operatorFinRes.status, 403);
+    const operatorFinHtml = await operatorFinRes.text();
+    assert.match(operatorFinHtml, /data-testid="finance-segregation-card"/);
+
+    // Also verify backend API directly rejects partner_operator on /v1/partner/organizations/:orgId/finance-summary
+    await assert.rejects(
+      async () => apiClient.getPartnerFinanceSummary(org101Id),
+      /restricted to Partner Owner and Partner Finance roles/
+    );
+
+    // 3. Switch token to partner_finance Clara -> /finance returns 200 with real ledger balance & settlements
+    currentToken = signSupabaseHs256Jwt(
+      {
+        sub: financeClaraId,
+        role: "authenticated",
+        aal: "aal1",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      jwtSecret
+    );
+
+    const claraFinRes = await fetch(`${partnerBaseUrl}/finance?locale=pt-BR`);
+    assert.equal(claraFinRes.status, 200);
+    const claraFinHtml = await claraFinRes.text();
+    assert.match(claraFinHtml, /data-testid="finance-payable-balance"/);
+    assert.match(claraFinHtml, /data-testid="settlements-table"/);
+  });
+
+  it("renders /reviews (and persists partner reply), /contract, /support, /kitchen KDS & /chain M09 multi-unit portal", async () => {
+    // Restore partner_owner Helena token
+    currentToken = signSupabaseHs256Jwt(
+      {
+        sub: ownerHelenaId,
+        role: "authenticated",
+        aal: "aal2",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      jwtSecret
+    );
+
+    // 1. Reply to verified customer review via API client and verify on /reviews
+    const reviewsList = await apiClient.listStoreReviews(store201Id);
+    assert.ok(reviewsList.data.length >= 1);
+    const targetReviewId = reviewsList.data[0]!.id;
+
+    const replied = await apiClient.replyToStoreReview({
+      storeId: store201Id,
+      reviewId: targetReviewId,
+      reply:
+        "Thank you for ordering with Paulista Artisan Burgers! — Muito obrigado pela preferência! Equipe Sabor Paulista.",
+    });
+    assert.equal(
+      replied.data.partnerReply,
+      "Thank you for ordering with Paulista Artisan Burgers! — Muito obrigado pela preferência! Equipe Sabor Paulista."
+    );
+
+    const revPageRes = await fetch(`${partnerBaseUrl}/reviews?locale=pt-BR`);
+    assert.equal(revPageRes.status, 200);
+    const revPageHtml = await revPageRes.text();
+    assert.match(revPageHtml, /Muito obrigado pela preferência! Equipe Sabor Paulista\./);
+    assert.match(revPageHtml, /data-testid="partner-contract-section"/);
+    assert.match(revPageHtml, /data-testid="partner-support-section"/);
+
+    // 2. /kitchen KDS Kanban board
+    const kdsRes = await fetch(`${partnerBaseUrl}/kitchen?audio=1&locale=pt-BR`);
+    assert.equal(kdsRes.status, 200);
+    const kdsHtml = await kdsRes.text();
+    assert.match(kdsHtml, /data-testid="kds-kanban-board"/);
+    assert.match(kdsHtml, /data-testid="kds-column-NEW"/);
+    assert.match(kdsHtml, /@media print/);
+    assert.match(kdsHtml, /ON/);
+
+    // 3. /chain M09 Multi-Unit Franchise Portal
+    const chainRes = await fetch(`${partnerBaseUrl}/chain?locale=pt-BR`);
+    assert.equal(chainRes.status, 200);
+    const chainHtml = await chainRes.text();
+    assert.match(chainHtml, /00000000-0000-4000-8000-000000000101/);
+    assert.match(chainHtml, /Paulista Artisan Burgers - Jardins/);
+    assert.match(chainHtml, /Tokyo Bay Sushi - Pinheiros/);
+    assert.match(chainHtml, /data-testid="chain-units-table"/);
+  });
+});
+

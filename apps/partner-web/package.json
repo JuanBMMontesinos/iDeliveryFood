@@ -13,8 +13,13 @@
     "@ideliveryfood/domain": "workspace:*",
     "@ideliveryfood/ui-web": "workspace:*"
   },
+  "devDependencies": {
+    "@ideliveryfood/api": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/main.js",
+    "dev": "tsc -p tsconfig.json && node dist/src/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js"

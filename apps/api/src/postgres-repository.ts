@@ -27,9 +27,11 @@ import {
   type DeliveryOfferContract,
   type DeliveryTaskContract,
   type FulfillmentModality,
+  type MerchantContractRecordContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type OrderReviewContract,
+  type PartnerFinanceSummaryContract,
   type PartnerRole,
   type PaymentAttemptContract,
   type PaymentMethodCode,
@@ -2711,6 +2713,210 @@ export function createSupabasePostgresRepository(params: {
         slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
+    },
+
+    async getPartnerFinanceSummary(
+      organizationId: string
+    ): Promise<PartnerFinanceSummaryContract> {
+      const orgUuid = toDeterministicUuid(organizationId);
+      const [ledgerRes, ordersRes, settlementsRes] = await Promise.all([
+        pool.query(
+          `SELECT COALESCE(SUM(
+             CASE WHEN le.direction = 'CREDIT' THEN le.amount_cents ELSE -le.amount_cents END
+           ), 0) AS payable_balance_cents
+           FROM public.ledger_accounts la
+           LEFT JOIN public.ledger_entries le ON le.account_id = la.id
+           WHERE la.organization_id = $1`,
+          [orgUuid]
+        ),
+        pool.query(
+          `SELECT count(*) AS orders_count,
+                  COALESCE(SUM(subtotal_cents + addons_cents), 0) AS gmv_cents,
+                  COALESCE(SUM(platform_commission_cents), 0) AS commission_cents,
+                  COALESCE(SUM(merchant_net_cents), 0) AS net_cents
+           FROM public.orders
+           WHERE organization_id = $1`,
+          [orgUuid]
+        ),
+        pool.query(
+          `SELECT id, organization_id, courier_id, period_start, period_end,
+                  amount_cents, status, approved_by, external_payout_reference, created_at
+           FROM public.settlements
+           WHERE organization_id = $1
+           ORDER BY period_end DESC`,
+          [orgUuid]
+        ),
+      ]);
+
+      const payableBalanceCents = Number(
+        ledgerRes.rows[0]?.payable_balance_cents ?? 0
+      );
+      const ordRow = (ordersRes.rows[0] ?? {}) as Record<string, unknown>;
+      const settlements: SettlementRecordContract[] = settlementsRes.rows.map(
+        (r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          organizationId: r.organization_id
+            ? restoreLogicalId(String(r.organization_id))
+            : null,
+          courierId: r.courier_id ? restoreLogicalId(String(r.courier_id)) : null,
+          periodStart:
+            r.period_start instanceof Date
+              ? r.period_start.toISOString().slice(0, 10)
+              : String(r.period_start).slice(0, 10),
+          periodEnd:
+            r.period_end instanceof Date
+              ? r.period_end.toISOString().slice(0, 10)
+              : String(r.period_end).slice(0, 10),
+          amountCents: Number(r.amount_cents),
+          status: String(r.status) as SettlementRecordContract["status"],
+          approvedBy: r.approved_by
+            ? restoreLogicalId(String(r.approved_by))
+            : null,
+          externalPayoutReference: r.external_payout_reference
+            ? String(r.external_payout_reference)
+            : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })
+      );
+
+      return {
+        organizationId: restoreLogicalId(orgUuid),
+        payableBalanceCents,
+        ordersCount: Number(ordRow.orders_count ?? 0),
+        grossMerchandiseCents: Number(ordRow.gmv_cents ?? 0),
+        platformCommissionCents: Number(ordRow.commission_cents ?? 0),
+        merchantNetCents: Number(ordRow.net_cents ?? 0),
+        settlements,
+      };
+    },
+
+    async getMerchantContract(
+      organizationId: string
+    ): Promise<MerchantContractRecordContract | null> {
+      const orgUuid = toDeterministicUuid(organizationId);
+      const res = await pool.query(
+        `SELECT id, organization_id, version_number, platform_delivery_commission_bps,
+                merchant_delivery_commission_bps, pickup_commission_bps, payout_cycle_days,
+                legal_template_status, effective_from, effective_until, approved_by, created_at
+         FROM public.merchant_contracts
+         WHERE organization_id = $1
+         ORDER BY version_number DESC
+         LIMIT 1`,
+        [orgUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        organizationId: restoreLogicalId(String(r.organization_id)),
+        versionNumber: Number(r.version_number),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        payoutCycleDays: Number(r.payout_cycle_days),
+        legalTemplateStatus: String(
+          r.legal_template_status
+        ) as MerchantContractRecordContract["legalTemplateStatus"],
+        effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+        effectiveUntilIso: r.effective_until
+          ? new Date(String(r.effective_until)).toISOString()
+          : null,
+        approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listStoreReviews(storeId: string): Promise<OrderReviewContract[]> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `SELECT id, order_id, store_id, customer_id, rating, comment,
+                partner_reply, partner_replied_at, moderation_status, created_at
+         FROM public.order_reviews
+         WHERE store_id = $1
+         ORDER BY created_at DESC`,
+        [storeUuid]
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
+    },
+
+    async replyToStoreReview(
+      storeId: string,
+      reviewId: string,
+      replyText: string
+    ): Promise<OrderReviewContract | null> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const revUuid = toDeterministicUuid(reviewId);
+      const res = await pool.query(
+        `UPDATE public.order_reviews
+         SET partner_reply = $1,
+             partner_replied_at = timezone('utc', now())
+         WHERE id = $2 AND store_id = $3
+         RETURNING id, order_id, store_id, customer_id, rating, comment,
+                   partner_reply, partner_replied_at, moderation_status, created_at`,
+        [replyText, revUuid, storeUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listStoreSupportCases(storeId: string): Promise<SupportCaseContract[]> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const res = await pool.query(
+        `SELECT id, case_number, order_id, organization_id, store_id, requester_id,
+                requester_role, category, priority, status, subject, sla_due_at, created_at
+         FROM public.support_cases
+         WHERE store_id = $1
+         ORDER BY created_at DESC`,
+        [storeUuid]
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
     },
   };
 }

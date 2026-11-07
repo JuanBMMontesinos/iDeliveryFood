@@ -37,11 +37,13 @@ import {
   type DeliveryOfferContract,
   type DeliveryTaskContract,
   type FulfillmentModality,
+  type MerchantContractRecordContract,
   type MultiUnitStoreSummaryContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
   type OrderReviewContract,
   type PaginatedResponse,
+  type PartnerFinanceSummaryContract,
   type PaymentAttemptContract,
   type PaymentMethodCode,
   type PspReconciliationRunContract,
@@ -379,6 +381,11 @@ export interface ApiDataRepository {
   saveOrderReview?(review: OrderReviewContract): Promise<OrderReviewContract>;
   listOrderSupportCases?(orderId: string): Promise<SupportCaseContract[]>;
   createSupportCase?(supportCase: Omit<SupportCaseContract, "caseNumber">): Promise<SupportCaseContract>;
+  getPartnerFinanceSummary?(organizationId: string): Promise<PartnerFinanceSummaryContract>;
+  getMerchantContract?(organizationId: string): Promise<MerchantContractRecordContract | null>;
+  listStoreReviews?(storeId: string): Promise<OrderReviewContract[]>;
+  replyToStoreReview?(storeId: string, reviewId: string, replyText: string): Promise<OrderReviewContract | null>;
+  listStoreSupportCases?(storeId: string): Promise<SupportCaseContract[]>;
 }
 
 /**
@@ -4592,6 +4599,242 @@ export function createApiServer(deps: {
         };
 
         sendJson(res, 201, correlationId, { data: responsePayload });
+        return;
+      }
+
+      // 33. Fase H: GET /v1/partner/organizations/:orgId/finance-summary (M07 / M13 — Partner Owner & Partner Finance only)
+      const partnerFinanceMatch = pathname.match(
+        /^\/v1\/partner\/organizations\/([^/]+)\/finance-summary$/
+      );
+      if (method === "GET" && partnerFinanceMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const orgId = partnerFinanceMatch[1] ?? "";
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: orgId,
+          storeId: null,
+          allowedRoles: ["partner_owner", "partner_finance"],
+        });
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Financial ledger and settlements are restricted to Partner Owner and Partner Finance roles.",
+            correlationId
+          );
+          return;
+        }
+        const summary = deps.repository.getPartnerFinanceSummary
+          ? await deps.repository.getPartnerFinanceSummary(orgId)
+          : {
+              organizationId: orgId,
+              payableBalanceCents: 0,
+              ordersCount: 0,
+              grossMerchandiseCents: 0,
+              platformCommissionCents: 0,
+              merchantNetCents: 0,
+              settlements: [],
+            };
+        sendJson(res, 200, correlationId, { data: summary });
+        return;
+      }
+
+      // 34. Fase H: GET /v1/partner/organizations/:orgId/contract (M07 / M18)
+      const partnerContractMatch = pathname.match(
+        /^\/v1\/partner\/organizations\/([^/]+)\/contract$/
+      );
+      if (method === "GET" && partnerContractMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const orgId = partnerContractMatch[1] ?? "";
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: orgId,
+          storeId: null,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_finance",
+          ],
+        });
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to view merchant commercial contract.",
+            correlationId
+          );
+          return;
+        }
+        const contract = deps.repository.getMerchantContract
+          ? await deps.repository.getMerchantContract(orgId)
+          : null;
+        sendJson(res, 200, correlationId, { data: contract });
+        return;
+      }
+
+      // 35. Fase H: GET /v1/partner/stores/:storeId/reviews & POST /v1/partner/stores/:storeId/reviews/:reviewId/reply (M07 / M19)
+      const partnerStoreReviewsMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/reviews(?:\s*|\/([^/]+)\/reply)?$/
+      );
+      if (partnerStoreReviewsMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const storeId = partnerStoreReviewsMatch[1] ?? "";
+        const reviewId = partnerStoreReviewsMatch[2];
+        const store = await deps.repository.getStoreById(storeId, locale);
+        if (!store) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Store ${storeId} not found.`,
+            correlationId
+          );
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_support",
+          ],
+        });
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to access store reviews.",
+            correlationId
+          );
+          return;
+        }
+        if (method === "GET" && !reviewId) {
+          const reviews = deps.repository.listStoreReviews
+            ? await deps.repository.listStoreReviews(store.id)
+            : [];
+          sendJson(res, 200, correlationId, { data: reviews });
+          return;
+        }
+        if (method === "POST" && reviewId) {
+          const { json: body } = await readRawAndJsonBody(req);
+          const replyText = String(body.reply ?? "").trim();
+          if (!replyText) {
+            sendError(
+              res,
+              400,
+              "VALIDATION_ERROR",
+              "reply text is required.",
+              correlationId
+            );
+            return;
+          }
+          const updated = deps.repository.replyToStoreReview
+            ? await deps.repository.replyToStoreReview(
+                store.id,
+                reviewId,
+                replyText
+              )
+            : null;
+          if (!updated) {
+            sendError(
+              res,
+              404,
+              "REVIEW_NOT_FOUND",
+              `Review ${reviewId} not found.`,
+              correlationId
+            );
+            return;
+          }
+          sendJson(res, 200, correlationId, { data: updated });
+          return;
+        }
+      }
+
+      // 36. Fase H: GET /v1/partner/stores/:storeId/support-cases (M07 / M17)
+      const partnerSupportCasesMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/support-cases$/
+      );
+      if (method === "GET" && partnerSupportCasesMatch) {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const storeId = partnerSupportCasesMatch[1] ?? "";
+        const store = await deps.repository.getStoreById(storeId, locale);
+        if (!store) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Store ${storeId} not found.`,
+            correlationId
+          );
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_support",
+          ],
+        });
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to view store support cases.",
+            correlationId
+          );
+          return;
+        }
+        const cases = deps.repository.listStoreSupportCases
+          ? await deps.repository.listStoreSupportCases(store.id)
+          : [];
+        sendJson(res, 200, correlationId, { data: cases });
         return;
       }
 

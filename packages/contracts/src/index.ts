@@ -737,6 +737,31 @@ export interface SupportCaseContract {
   createdAtIso: string;
 }
 
+export interface MerchantContractRecordContract {
+  id: string;
+  organizationId: string;
+  versionNumber: number;
+  platformDeliveryCommissionBps: number;
+  merchantDeliveryCommissionBps: number;
+  pickupCommissionBps: number;
+  payoutCycleDays: number;
+  legalTemplateStatus: "PENDING_LEGAL_REVIEW" | "APPROVED_TEMPLATE";
+  effectiveFromIso: string;
+  effectiveUntilIso: string | null;
+  approvedBy: string | null;
+  createdAtIso: string;
+}
+
+export interface PartnerFinanceSummaryContract {
+  organizationId: string;
+  payableBalanceCents: number;
+  ordersCount: number;
+  grossMerchandiseCents: number;
+  platformCommissionCents: number;
+  merchantNetCents: number;
+  settlements: SettlementRecordContract[];
+}
+
 /**
  * Validates that a monetary value is a safe non-negative integer in BRL centavos.
  */
