@@ -16,11 +16,53 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Entre na sua conta" } }
       }
     },
+    "auth_sign_up_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Create your account" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Crie sua conta" } }
+      }
+    },
+    "auth_recover_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Recover your password" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Recuperar sua senha" } }
+      }
+    },
+    "auth_email_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Email address" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Endereço de e-mail" } }
+      }
+    },
+    "auth_submit_button": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Continue" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Continuar" } }
+      }
+    },
     "auth_locale_label": {
       "extractionState": "manual",
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Language" } },
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Idioma" } }
+      }
+    },
+    "auth_locale_en": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "English (Default)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "English (Padrão)" } }
+      }
+    },
+    "auth_locale_pt_br": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Português (Brasil)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Português (Brasil)" } }
       }
     },
     "state_loading": {
@@ -65,6 +107,55 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Restaurantes Disponíveis" } }
       }
     },
+    "marketplace_search_placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Search restaurants or dishes" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Buscar restaurantes ou pratos" } }
+      }
+    },
+    "addresses_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "My Delivery Addresses" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Meus Endereços de Entrega" } }
+      }
+    },
+    "addresses_gps_fallback_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Location permission denied or unavailable. Enter your delivery address manually below." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Permissão de localização negada ou indisponível. Informe seu endereço manualmente abaixo." } }
+      }
+    },
+    "store_detail_menu_heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Store Menu & Options" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Cardápio e Complementos da Loja" } }
+      }
+    },
+    "store_detail_required_options": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Required option group" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Grupo de opções obrigatório" } }
+      }
+    },
+    "cart_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Your Basket" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Sua Sacola" } }
+      }
+    },
+    "cart_empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Your basket is empty." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Sua sacola está vazia." } }
+      }
+    },
     "cart_switch_store_title": {
       "extractionState": "manual",
       "localizations": {
@@ -79,11 +170,32 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Sua sacola atual possui itens de outro restaurante. Ao confirmar, sua sacola será substituída." } }
       }
     },
+    "checkout_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Server Quote & Checkout" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Cotação do Servidor e Checkout" } }
+      }
+    },
     "checkout_psp_blocked_notice": {
       "extractionState": "manual",
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Online payment capture is blocked in this environment due to missing PSP credentials." } },
         "pt-BR": { "stringUnit": { "state": "translated", "value": "A captura de pagamento online está bloqueada neste ambiente por ausência de credenciais do PSP." } }
+      }
+    },
+    "order_tracking_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Live Order Tracking" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Acompanhamento do Pedido em Tempo Real" } }
+      }
+    },
+    "order_tracking_otp_notice": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Share your 4-digit delivery confirmation code with the courier only upon handoff." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Informe seu código de confirmação de entrega de 4 dígitos ao entregador apenas no recebimento." } }
       }
     },
     "order_cancel_window_expired": {
@@ -93,11 +205,39 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "A janela de cancelamento direto expirou ou a cozinha já iniciou o preparo." } }
       }
     },
+    "profile_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "My Profile, Devices & LGPD Privacy" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Meu Perfil, Dispositivos e Privacidade LGPD" } }
+      }
+    },
+    "profile_revoke_device": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Revoke device session" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Revogar sessão do dispositivo" } }
+      }
+    },
     "privacy_delete_account": {
       "extractionState": "manual",
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Request account deletion (LGPD)" } },
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Solicitar exclusão de conta (LGPD)" } }
+      }
+    },
+    "order_review_submit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Submit Order Review" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Enviar Avaliação do Pedido" } }
+      }
+    },
+    "order_support_submit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Open Support Ticket" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Abrir Chamado de Suporte" } }
       }
     }
   }

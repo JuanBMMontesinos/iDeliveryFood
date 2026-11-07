@@ -1,6 +1,43 @@
 import Foundation
 
-public struct MobileCartItem: Equatable {
+public struct MobilePublishedStore: Equatable, Codable {
+    public let id: String
+    public let slug: String
+    public let name: String
+    public let descriptionEn: String
+    public let descriptionPtBr: String
+    public let cuisineCategory: String
+    public let isPaused: Bool
+    public let minOrderCents: Int
+    public let prepTimeMinMinutes: Int
+    public let prepTimeMaxMinutes: Int
+
+    public init(
+        id: String,
+        slug: String,
+        name: String,
+        descriptionEn: String,
+        descriptionPtBr: String,
+        cuisineCategory: String,
+        isPaused: Bool,
+        minOrderCents: Int,
+        prepTimeMinMinutes: Int,
+        prepTimeMaxMinutes: Int
+    ) {
+        self.id = id
+        self.slug = slug
+        self.name = name
+        self.descriptionEn = descriptionEn
+        self.descriptionPtBr = descriptionPtBr
+        self.cuisineCategory = cuisineCategory
+        self.isPaused = isPaused
+        self.minOrderCents = minOrderCents
+        self.prepTimeMinMinutes = prepTimeMinMinutes
+        self.prepTimeMaxMinutes = prepTimeMaxMinutes
+    }
+}
+
+public struct MobileCartItem: Equatable, Codable {
     public let productId: String
     public var quantity: Int
     public let notes: String?
@@ -45,6 +82,16 @@ public final class CustomerMarketplaceController {
     public func setLocale(_ rawLocale: String) -> String {
         currentLocale = rawLocale.lowercased().hasPrefix("pt") ? "pt-BR" : "en"
         return currentLocale
+    }
+
+    public func formatBrlCents(_ cents: Int) -> String {
+        precondition(cents >= 0, "Monetary cents must be a non-negative integer.")
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "BRL"
+        formatter.locale = Locale(identifier: currentLocale == "pt-BR" ? "pt_BR" : "en_US")
+        let major = Double(cents) / 100.0
+        return formatter.string(from: NSNumber(value: major)) ?? "R$ \(String(format: "%.2f", major))"
     }
 
     public func addItemToBasket(
