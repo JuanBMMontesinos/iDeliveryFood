@@ -13,11 +13,14 @@
     "lint": "node scripts/secret-scan.mjs && pnpm -r lint",
     "test": "pnpm -r test",
     "db:reset:local": "node scripts/db-reset-local.mjs",
+    "db:migrate": "node scripts/db-apply-migrations.mjs",
     "bootstrap:first-admin": "node scripts/bootstrap-first-admin.mjs",
     "security:scan": "node scripts/secret-scan.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
+    "pg": "^8.13.3",
     "typescript": "^5.8.2"
   }
 }

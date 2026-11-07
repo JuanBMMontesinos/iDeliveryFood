@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import type {
+  AdminGovernanceActionContract,
+  AdminStaffScopeGrantRequestContract,
   AuthenticatedActorProfileContract,
+  BankAccountChangeRequestContract,
   BatchCatalogUpdateItemResultContract,
+  CourierLocationSampleContract,
+  CustomerAddressContract,
+  DeliveryOfferContract,
+  DeliveryTaskContract,
+  OrderEventRecordContract,
   OrderRecordContract,
+  PaymentAttemptContract,
+  PspReconciliationRunContract,
   PublishedStoreContract,
   RefundRecordContract,
   ServerQuoteRecordContract,
+  SettlementRecordContract,
+  StoreSettingsPatchContract,
   SupportedLocale,
   UserPreferencesContract,
 } from "@ideliveryfood/contracts";
@@ -15,16 +30,70 @@ import type { StoredInvitationRecord } from "@ideliveryfood/authz";
 import { computePspWebhookSignature } from "@ideliveryfood/domain";
 import {
   createApiServer,
+  createSupabasePostgresRepository,
+  signSupabaseHs256Jwt,
+  verifySupabaseHs256Jwt,
   type ApiDataRepository,
   type AuditLogWriteRecord,
 } from "../src/index.js";
 
-describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05, M09, M10, M12)", () => {
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function loadDotEnvForTests(): void {
+  const candidates = [
+    path.resolve(__dirname, "../../../.env"),
+    path.resolve(__dirname, "../../../../.env"),
+    path.resolve(process.cwd(), ".env"),
+  ];
+  for (const envPath of candidates) {
+    if (!fs.existsSync(envPath)) continue;
+    const content = fs.readFileSync(envPath, "utf8");
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eqIdx = line.indexOf("=");
+      if (eqIdx <= 0) continue;
+      const key = line.slice(0, eqIdx).trim();
+      const val = line.slice(eqIdx + 1).trim();
+      if (!process.env[key]) {
+        process.env[key] = val;
+      }
+    }
+    break;
+  }
+}
+
+loadDotEnvForTests();
+
+function createCompleteUnitTestRepository(): ApiDataRepository {
   const auditLogs: AuditLogWriteRecord[] = [];
   const invitations = new Map<string, StoredInvitationRecord>();
   const userLocales = new Map<string, SupportedLocale>([
     ["00000000-0000-4000-8000-000000000001", "en"],
   ]);
+  const addressesByUserId = new Map<string, CustomerAddressContract[]>();
+  const quotesById = new Map<string, ServerQuoteRecordContract>();
+  const quotesByCustomerIdem = new Map<string, ServerQuoteRecordContract>();
+  const ordersById = new Map<string, OrderRecordContract>();
+  const ordersByCustomerIdem = new Map<string, OrderRecordContract>();
+  const orderEventsByOrderId = new Map<string, OrderEventRecordContract[]>();
+  const processedWebhooks = new Set<string>();
+  const paymentAttemptsById = new Map<string, PaymentAttemptContract>();
+  const refundsByOrderId = new Map<string, RefundRecordContract[]>();
+  const storeOverridesById = new Map<string, StoreSettingsPatchContract>();
+  const bankChangeRequestsById = new Map<string, BankAccountChangeRequestContract>();
+  const settlementsById = new Map<string, SettlementRecordContract>();
+  const reconciliationRunsById = new Map<string, PspReconciliationRunContract>();
+  const deliveryTasksById = new Map<
+    string,
+    {
+      task: DeliveryTaskContract;
+      fullAddress: string | null;
+      confirmationCodeHash: string | null;
+    }
+  >();
+  const deliveryOffersById = new Map<string, DeliveryOfferContract>();
+  let orderSequence = 10010;
 
   const actors: Record<string, AuthenticatedActorProfileContract> = {
     "00000000-0000-4000-8000-000000000001": {
@@ -115,8 +184,9 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     },
   };
 
-  const repository: ApiDataRepository = {
+  return {
     async listPublishedStores(locale: SupportedLocale): Promise<PublishedStoreContract[]> {
+      const override = storeOverridesById.get("00000000-0000-4000-8000-000000000201");
       return [
         {
           id: "00000000-0000-4000-8000-000000000201",
@@ -129,23 +199,31 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
               ? "Smash burgers maturados, batatas rústicas e shakes artesanais."
               : "Dry-aged smash burgers, hand-cut fries, and craft shakes.",
           cuisineCategory: "BURGERS",
-          isPaused: false,
+          isPaused: override?.isPaused ?? false,
           timezone: "America/Sao_Paulo",
           city: "São Paulo",
           stateCode: "SP",
           latitude: -23.561414,
           longitude: -46.655881,
-          minOrderCents: 2500,
-          prepTimeMinMinutes: 20,
-          prepTimeMaxMinutes: 35,
+          minOrderCents: override?.minOrderCents ?? 2500,
+          prepTimeMinMinutes: override?.prepTimeMinMinutes ?? 20,
+          prepTimeMaxMinutes: override?.prepTimeMaxMinutes ?? 35,
           supportedModalities: ["PLATFORM_DELIVERY", "MERCHANT_DELIVERY", "PICKUP"],
         },
       ];
     },
-    async getStoreCatalog(storeId: string, locale: SupportedLocale) {
+    async getStoreById(storeId: string, locale: SupportedLocale) {
       if (storeId !== "00000000-0000-4000-8000-000000000201") return null;
       const stores = await this.listPublishedStores(locale);
-      const store = stores[0]!;
+      return {
+        ...stores[0]!,
+        organizationId: "00000000-0000-4000-8000-000000000101",
+      };
+    },
+    async getStoreCatalog(storeId: string, locale: SupportedLocale) {
+      const storeWithOrg = await this.getStoreById(storeId, locale);
+      if (!storeWithOrg) return null;
+      const { organizationId: _orgId, ...store } = storeWithOrg;
       return {
         store,
         weeklyHours: [
@@ -207,6 +285,14 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
         ],
       };
     },
+    async updateStoreSettings(storeId: string, patch: StoreSettingsPatchContract, locale: SupportedLocale) {
+      const merged = { ...(storeOverridesById.get(storeId) ?? {}), ...patch };
+      storeOverridesById.set(storeId, merged);
+      const storeWithOrg = await this.getStoreById(storeId, locale);
+      if (!storeWithOrg) return null;
+      const { organizationId: _orgId, ...store } = storeWithOrg;
+      return store;
+    },
     async getActorById(userId: string, aal: "aal1" | "aal2") {
       const found = actors[userId];
       if (!found) return null;
@@ -227,6 +313,8 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
         emailMarketing: false,
       };
     },
+    async revokeUserDevice() {},
+    async savePrivacyRequest() {},
     async listOrganizationMembers(organizationId: string) {
       return [
         {
@@ -255,9 +343,129 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     async getAuditLogs() {
       return auditLogs;
     },
+    async listCustomerAddresses(userId: string) {
+      return addressesByUserId.get(userId) ?? [];
+    },
+    async saveCustomerAddress(address: CustomerAddressContract) {
+      const list = addressesByUserId.get(address.userId) ?? [];
+      list.push(address);
+      addressesByUserId.set(address.userId, list);
+    },
+    async saveQuote(quote: ServerQuoteRecordContract) {
+      quotesById.set(quote.id, quote);
+      quotesByCustomerIdem.set(`${quote.customerId}:${quote.idempotencyKey}`, quote);
+    },
+    async getQuoteById(quoteId: string) {
+      return quotesById.get(quoteId) ?? null;
+    },
+    async getQuoteByCustomerIdempotencyKey(customerId: string, idempotencyKey: string) {
+      return quotesByCustomerIdem.get(`${customerId}:${idempotencyKey}`) ?? null;
+    },
+    async markQuoteConsumed(quoteId: string, consumedAtIso: string) {
+      const q = quotesById.get(quoteId);
+      if (q) quotesById.set(quoteId, { ...q, consumedAtIso });
+    },
+    async nextOrderNumber() {
+      orderSequence += 1;
+      return orderSequence;
+    },
+    async saveOrder(order: OrderRecordContract, initialEvent: OrderEventRecordContract) {
+      ordersById.set(order.id, order);
+      ordersByCustomerIdem.set(`${order.customerId}:${order.idempotencyKey}`, order);
+      orderEventsByOrderId.set(order.id, [initialEvent]);
+    },
+    async getOrderById(orderId: string) {
+      return ordersById.get(orderId) ?? null;
+    },
+    async getOrderByCustomerIdempotencyKey(customerId: string, idempotencyKey: string) {
+      return ordersByCustomerIdem.get(`${customerId}:${idempotencyKey}`) ?? null;
+    },
+    async listOrdersByStore(storeId: string) {
+      return Array.from(ordersById.values()).filter((o) => o.storeId === storeId);
+    },
+    async updateOrderWithEvent(order: OrderRecordContract, event: OrderEventRecordContract) {
+      ordersById.set(order.id, order);
+      const evts = orderEventsByOrderId.get(order.id) ?? [];
+      evts.push(event);
+      orderEventsByOrderId.set(order.id, evts);
+    },
+    async listOrderEvents(orderId: string) {
+      return orderEventsByOrderId.get(orderId) ?? [];
+    },
+    async hasProcessedWebhookEvent(providerCode: string, externalEventId: string) {
+      return processedWebhooks.has(`${providerCode}:${externalEventId}`);
+    },
+    async recordProcessedWebhookEvent(params) {
+      processedWebhooks.add(`${params.providerCode}:${params.externalEventId}`);
+    },
+    async savePaymentAttempt(attempt: PaymentAttemptContract) {
+      paymentAttemptsById.set(attempt.id, attempt);
+    },
+    async listRefundsByOrder(orderId: string) {
+      return refundsByOrderId.get(orderId) ?? [];
+    },
+    async saveRefundAndUpdateOrder(refund: RefundRecordContract, updatedOrder: OrderRecordContract) {
+      const list = refundsByOrderId.get(refund.orderId) ?? [];
+      list.push(refund);
+      refundsByOrderId.set(refund.orderId, list);
+      ordersById.set(updatedOrder.id, updatedOrder);
+    },
+    async saveBankAccountChangeRequest(req: BankAccountChangeRequestContract) {
+      bankChangeRequestsById.set(req.id, req);
+    },
+    async grantStaffScope(_grant: AdminStaffScopeGrantRequestContract & { grantedBy: string }) {},
+    async saveGovernanceApprovalEvent(_action: AdminGovernanceActionContract) {},
+    async saveReconciliationRun(run: PspReconciliationRunContract) {
+      reconciliationRunsById.set(run.id, run);
+    },
+    async getSettlementById(settlementId: string) {
+      return settlementsById.get(settlementId) ?? null;
+    },
+    async saveSettlement(settlement: SettlementRecordContract) {
+      settlementsById.set(settlement.id, settlement);
+    },
+    async saveDeliveryTaskAndOffer(params) {
+      deliveryTasksById.set(params.task.id, {
+        task: params.task,
+        fullAddress: params.fullAddress,
+        confirmationCodeHash: params.confirmationCodeHash,
+      });
+      deliveryOffersById.set(params.offer.id, params.offer);
+    },
+    async getDeliveryOfferById(offerId: string) {
+      return deliveryOffersById.get(offerId) ?? null;
+    },
+    async getDeliveryTaskById(taskId: string) {
+      return deliveryTasksById.get(taskId) ?? null;
+    },
+    async saveAcceptedDeliveryOffer(params) {
+      deliveryOffersById.set(params.offer.id, params.offer);
+      const prev = deliveryTasksById.get(params.task.id);
+      deliveryTasksById.set(params.task.id, {
+        task: params.task,
+        fullAddress: params.fullAddress,
+        confirmationCodeHash: prev?.confirmationCodeHash ?? null,
+      });
+    },
+    async completeDeliveryTask(task: DeliveryTaskContract) {
+      const prev = deliveryTasksById.get(task.id);
+      deliveryTasksById.set(task.id, {
+        task,
+        fullAddress: prev?.fullAddress ?? null,
+        confirmationCodeHash: prev?.confirmationCodeHash ?? null,
+      });
+    },
+    async saveCourierLocationSample(_sample: CourierLocationSampleContract) {},
   };
+}
 
-  const server = createApiServer({ repository, env: {} });
+describe("@ideliveryfood/api — /v1 HTTP Unit & Contract Suite (Fase A–E)", () => {
+  const repository = createCompleteUnitTestRepository();
+  const testJwtSecret = "test_supabase_jwt_secret_minimum_32_characters_long";
+  const server = createApiServer({
+    repository,
+    env: { SUPABASE_JWT_SECRET: testJwtSecret },
+  });
   let baseUrl = "";
 
   before(async () => {
@@ -272,6 +480,103 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
+  });
+
+  it("verifies cryptographic Supabase HS256 JWT authentication, aal2 claims, expired tokens, and production header block (Fase E / M03)", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const validToken = signSupabaseHs256Jwt(
+      {
+        sub: "00000000-0000-4000-8000-000000000090",
+        aal: "aal2",
+        exp: nowSec + 300,
+      },
+      testJwtSecret
+    );
+    const claims = verifySupabaseHs256Jwt({
+      token: validToken,
+      jwtSecret: testJwtSecret,
+      nowSeconds: nowSec,
+    });
+    assert.equal(claims.sub, "00000000-0000-4000-8000-000000000090");
+    assert.equal(claims.aal, "aal2");
+
+    // 1. Authenticated /v1/me via Bearer JWT
+    const meRes = await fetch(`${baseUrl}/me`, {
+      headers: { Authorization: `Bearer ${validToken}` },
+    });
+    assert.equal(meRes.status, 200);
+    const meJson = (await meRes.json()) as { data: AuthenticatedActorProfileContract };
+    assert.equal(meJson.data.id, "00000000-0000-4000-8000-000000000090");
+    assert.equal(meJson.data.aal, "aal2");
+
+    // 2. Expired token rejected with 401 AUTH_JWT_EXPIRED
+    const expiredToken = signSupabaseHs256Jwt(
+      {
+        sub: "00000000-0000-4000-8000-000000000001",
+        aal: "aal1",
+        exp: nowSec - 10,
+      },
+      testJwtSecret
+    );
+    const expRes = await fetch(`${baseUrl}/me`, {
+      headers: { Authorization: `Bearer ${expiredToken}` },
+    });
+    assert.equal(expRes.status, 401);
+
+    // 3. Tampered signature rejected with 401 AUTH_JWT_INVALID_SIGNATURE
+    const tamperedRes = await fetch(`${baseUrl}/me`, {
+      headers: { Authorization: `Bearer ${validToken}tampered` },
+    });
+    assert.equal(tamperedRes.status, 401);
+
+    // 4. Production server strictly rejects raw X-Actor-Id header without Bearer JWT
+    const prodServer = createApiServer({
+      repository,
+      env: { APP_ENV: "production", SUPABASE_JWT_SECRET: testJwtSecret },
+    });
+    await new Promise<void>((resolve) => prodServer.listen(0, "127.0.0.1", () => resolve()));
+    const prodPort = (prodServer.address() as AddressInfo).port;
+    try {
+      const rawHeaderRes = await fetch(`http://127.0.0.1:${prodPort}/v1/me`, {
+        headers: { "X-Actor-Id": "00000000-0000-4000-8000-000000000001" },
+      });
+      assert.equal(rawHeaderRes.status, 401);
+
+      const jwtProdRes = await fetch(`http://127.0.0.1:${prodPort}/v1/me`, {
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      assert.equal(jwtProdRes.status, 200);
+    } finally {
+      await new Promise<void>((resolve) => prodServer.close(() => resolve()));
+    }
+  });
+
+  it("rejects missing required fields instead of falling back to hardcoded UUIDs or addresses (Fase E Rule #3 Zero-Mock)", async () => {
+    const missingStoreQuoteRes = await fetch(`${baseUrl}/quotes`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
+      },
+      body: JSON.stringify({
+        fulfillmentModality: "PLATFORM_DELIVERY",
+        cartItems: [],
+      }),
+    });
+    assert.equal(missingStoreQuoteRes.status, 400);
+
+    const missingAddressOfferRes = await fetch(`${baseUrl}/logistics/offers`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
+        "X-Actor-Aal": "aal2",
+      },
+      body: JSON.stringify({
+        deliveryTaskId: "dtask_missing_addr",
+      }),
+    });
+    assert.equal(missingAddressOfferRes.status, 400);
   });
 
   it("serves /v1/health/live, /v1/health/ready, and /v1/system/providers with honest BLOCKED_MISSING_CREDENTIALS status", async () => {
@@ -352,7 +657,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     );
     assert.equal(deniedRes.status, 403);
 
-    // Lucas is partner_operator only for Store 201, NOT Store 203!
     const batchRes = await fetch(
       `${baseUrl}/organizations/00000000-0000-4000-8000-000000000101/catalog-batch`,
       {
@@ -377,7 +681,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
   });
 
   it("executes full M10 quote -> order -> payment attempt (honest 503 block) -> webhook capture -> command -> M12 refund flow", async () => {
-    // 1. Create Quote
     const quoteRes = await fetch(`${baseUrl}/quotes`, {
       method: "POST",
       headers: {
@@ -402,7 +705,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     const quoteJson = (await quoteRes.json()) as { data: ServerQuoteRecordContract };
     assert.equal(quoteJson.data.subtotalCents, 3890);
 
-    // 2. Create Order from Quote
     const orderRes = await fetch(`${baseUrl}/orders`, {
       method: "POST",
       headers: {
@@ -420,7 +722,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(orderJson.data.orderStatus, "AWAITING_PAYMENT");
     assert.equal(orderJson.data.version, 1);
 
-    // 3. Attempting to reuse the consumed quote with a different idempotency key fails with 409 QUOTE_ALREADY_CONSUMED
     const reuseQuoteRes = await fetch(`${baseUrl}/orders`, {
       method: "POST",
       headers: {
@@ -434,7 +735,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(reuseQuoteRes.status, 409);
 
-    // 4. Attempting online payment without PSP credentials returns honest 503 PSP_PROVIDER_BLOCKED_MISSING_CREDENTIALS
     const payAttemptRes = await fetch(`${baseUrl}/payments/attempts`, {
       method: "POST",
       headers: {
@@ -450,7 +750,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(payAttemptRes.status, 503);
 
-    // 5. Signed PSP Webhook captures payment and transitions order to PENDING_MERCHANT_ACCEPTANCE (version 2)
     const rawWebhookPayload = JSON.stringify({
       orderId: orderJson.data.id,
       externalEventId: "evt_stripe_capture_001",
@@ -476,7 +775,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(webhookRes.status, 200);
 
-    // 6. Partner accepts order (version 2 -> 3)
     const acceptCmdRes = await fetch(`${baseUrl}/orders/${orderJson.data.id}/commands`, {
       method: "POST",
       headers: {
@@ -491,7 +789,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(acceptCmdRes.status, 200);
 
-    // 7. Staff approves partial refund with MFA aal2
     const refundRes = await fetch(`${baseUrl}/refunds`, {
       method: "POST",
       headers: {
@@ -547,7 +844,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
   });
 
   it("handles Fase C endpoints: M07 store pause settings, M08 kitchen orders queue, and M16 admin self-grant prohibition & audit logs", async () => {
-    // 1. Partner Operator pauses Store 201 with mandatory reason (M07)
     const pauseRes = await fetch(
       `${baseUrl}/stores/00000000-0000-4000-8000-000000000201/settings`,
       {
@@ -566,7 +862,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     );
     assert.equal(pauseRes.status, 200);
 
-    // 2. Kitchen orders queue remains accessible and shows active orders while paused (M08)
     const queueRes = await fetch(
       `${baseUrl}/stores/00000000-0000-4000-8000-000000000201/orders-queue?organizationId=00000000-0000-4000-8000-000000000101`,
       {
@@ -582,7 +877,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(queueJson.data.isStorePaused, true);
     assert.ok(queueJson.data.activeOrderCount >= 1);
 
-    // 3. Tech Admin attempts to self-grant a staff scope -> blocked with 403 DENIED_SELF_GRANT_FORBIDDEN (M16)
     const selfGrantRes = await fetch(`${baseUrl}/admin/staff-scopes`, {
       method: "POST",
       headers: {
@@ -600,7 +894,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(selfGrantRes.status, 403);
 
-    // 4. Tech Admin reads immutable audit logs at aal2 (M16)
     const auditLogsRes = await fetch(`${baseUrl}/admin/audit-logs`, {
       headers: {
         "X-Actor-Id": "00000000-0000-4000-8000-000000000090",
@@ -613,7 +906,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
   });
 
   it("verifies Fase D (M13, M14, M11) HTTP flows: PSP reconciliation, payout Segregation of Duties, transactional offer acceptance, GPS telemetry & 4-digit OTP completion", async () => {
-    // 0. Operations staff (non-finance) is denied PSP reconciliation even at aal2 (M13 RBAC)
     const reconDeniedRes = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
       method: "POST",
       headers: {
@@ -626,7 +918,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(reconDeniedRes.status, 403);
 
-    // 0b. Finance staff at aal1 is denied (MFA aal2 step-up required)
     const reconAal1Res = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
       method: "POST",
       headers: {
@@ -639,7 +930,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(reconAal1Res.status, 403);
 
-    // 1. Finance Staff runs PSP Reconciliation at aal2 (M13)
     const reconRes = await fetch(`${baseUrl}/finance/reconciliation-runs`, {
       method: "POST",
       headers: {
@@ -669,7 +959,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(reconJson.data.discrepancyCount, 1);
     assert.equal(reconJson.data.discrepancyTotalCents, 100);
 
-    // 2. Settlement Payout Execution: Segregation of Duties violation returns 403
     const sodViolationRes = await fetch(`${baseUrl}/finance/settlements/settle_001/execute`, {
       method: "POST",
       headers: {
@@ -679,13 +968,14 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
         "X-Idempotency-Key": "idem_settle_sod_001",
       },
       body: JSON.stringify({
+        organizationId: "00000000-0000-4000-8000-000000000101",
+        amountCents: 42500,
         providerCode: "stripe",
-        bankAccountApprovedByActorId: "00000000-0000-4000-8000-000000000091", // Same actor!
+        bankAccountApprovedByActorId: "00000000-0000-4000-8000-000000000091",
       }),
     });
     assert.equal(sodViolationRes.status, 403);
 
-    // 3. Settlement Payout Execution with different approver & unconfigured PSP returns honest BLOCKED_NO_PSP
     const blockedSettleRes = await fetch(`${baseUrl}/finance/settlements/settle_001/execute`, {
       method: "POST",
       headers: {
@@ -695,6 +985,8 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
         "X-Idempotency-Key": "idem_settle_ok_001",
       },
       body: JSON.stringify({
+        organizationId: "00000000-0000-4000-8000-000000000101",
+        amountCents: 42500,
         providerCode: "stripe",
         bankAccountApprovedByActorId: "00000000-0000-4000-8000-000000000099",
       }),
@@ -706,18 +998,22 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(blockedSettleJson.data.status, "BLOCKED_NO_PSP");
     assert.equal(blockedSettleJson.data.externalPayoutReference, null);
 
-    // 4a. A courier/customer actor (no staff scope) cannot create dispatch offers
     const offerForbiddenRes = await fetch(`${baseUrl}/logistics/offers`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Actor-Id": "00000000-0000-4000-8000-000000000001",
       },
-      body: JSON.stringify({ deliveryTaskId: "dtask_forbidden", offerId: "doff_forbidden" }),
+      body: JSON.stringify({
+        deliveryTaskId: "dtask_forbidden",
+        offerId: "doff_forbidden",
+        dropoffNeighborhoodOnly: "Bela Vista",
+        dropoffFullAddress: "Av. Paulista, 1578",
+        confirmationCode: "4829",
+      }),
     });
     assert.equal(offerForbiddenRes.status, 403);
 
-    // 4. Create delivery task and offer (M14): full customer address is hidden prior to acceptance
     const offerCreateRes = await fetch(`${baseUrl}/logistics/offers`, {
       method: "POST",
       headers: {
@@ -741,7 +1037,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     };
     assert.equal(offerCreateJson.data.task.dropoffFullAddress, null);
 
-    // 5. Courier accepts offer transactionally (M11/M14): reveals full dropoff address
     const acceptOfferRes = await fetch(`${baseUrl}/logistics/offers/doff_http_1/accept`, {
       method: "POST",
       headers: {
@@ -763,7 +1058,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
       "Av. Paulista, 1578 - Apt 42, Bela Vista"
     );
 
-    // 6. Second offer acceptance on the same task returns 409 Conflict
     const acceptDuplicateRes = await fetch(`${baseUrl}/logistics/offers/doff_http_1/accept`, {
       method: "POST",
       headers: {
@@ -777,7 +1071,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(acceptDuplicateRes.status, 409);
 
-    // 7. Submit courier GPS location sample (M11/M14)
     const locRes = await fetch(`${baseUrl}/logistics/location-samples`, {
       method: "POST",
       headers: {
@@ -795,7 +1088,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(locRes.status, 201);
 
-    // 8. Complete delivery task with wrong OTP returns 409, then right OTP ("4829") returns 200 DELIVERED
     const wrongOtpRes = await fetch(`${baseUrl}/logistics/tasks/dtask_http_1/complete`, {
       method: "POST",
       headers: {
@@ -820,7 +1112,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     const validOtpJson = (await validOtpRes.json()) as { data: { status: string } };
     assert.equal(validOtpJson.data.status, "DELIVERED");
 
-    // 9. Re-completing an already delivered task returns 409 (no double completion)
     const replayCompleteRes = await fetch(`${baseUrl}/logistics/tasks/dtask_http_1/complete`, {
       method: "POST",
       headers: {
@@ -832,7 +1123,6 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     });
     assert.equal(replayCompleteRes.status, 409);
 
-    // 10. GPS sample referencing a nonexistent task returns 404 (never silently accepted)
     const ghostLocRes = await fetch(`${baseUrl}/logistics/location-samples`, {
       method: "POST",
       headers: {
@@ -851,3 +1141,136 @@ describe("@ideliveryfood/api — /v1 HTTP Integration (Fase A & Fase B: M04, M05
     assert.equal(ghostLocRes.status, 404);
   });
 });
+
+// Live Supabase PostgreSQL Integration Test (executes when DATABASE_URL is configured)
+const liveDbUrl = process.env.DATABASE_URL;
+describe(
+  "@ideliveryfood/api — Live Supabase PostgreSQL Persistence (dwsoochnfxldfvcaijie)",
+  { skip: !liveDbUrl },
+  () => {
+    const pgRepo = liveDbUrl
+      ? createSupabasePostgresRepository({
+          connectionString: liveDbUrl,
+          isTestData: true,
+        })
+      : null;
+    const liveJwtSecret = "live_test_supabase_jwt_secret_32_characters_minimum";
+    const liveServer = pgRepo
+      ? createApiServer({
+          repository: pgRepo,
+          env: { SUPABASE_JWT_SECRET: liveJwtSecret, APP_ENV: "production" },
+        })
+      : null;
+    let liveBaseUrl = "";
+
+    before(async () => {
+      if (!liveServer) return;
+      await new Promise<void>((resolve) => {
+        liveServer.listen(0, "127.0.0.1", () => resolve());
+      });
+      const addr = liveServer.address() as AddressInfo;
+      liveBaseUrl = `http://127.0.0.1:${addr.port}/v1`;
+    });
+
+    after(async () => {
+      if (liveServer) {
+        await new Promise<void>((resolve, reject) => {
+          liveServer.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+      if (pgRepo) {
+        await pgRepo.close();
+      }
+    });
+
+    it("reads published stores & catalogs from live Supabase and persists quotes, orders, webhooks, refunds, and audit logs using verified Bearer JWTs", async () => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const customerToken = signSupabaseHs256Jwt(
+        {
+          sub: "00000000-0000-4000-8000-000000000001",
+          aal: "aal1",
+          exp: nowSec + 600,
+        },
+        liveJwtSecret
+      );
+      const staffTokenAal2 = signSupabaseHs256Jwt(
+        {
+          sub: "00000000-0000-4000-8000-000000000090",
+          aal: "aal2",
+          exp: nowSec + 600,
+        },
+        liveJwtSecret
+      );
+
+      // 1. Live store discovery from public.published_stores_v
+      const storesRes = await fetch(`${liveBaseUrl}/stores?locale=pt-BR`);
+      assert.equal(storesRes.status, 200);
+      const storesJson = (await storesRes.json()) as { data: PublishedStoreContract[] };
+      assert.ok(storesJson.data.length >= 2);
+
+      // 2. Live store catalog from public.stores + catalog_categories + catalog_products
+      const catRes = await fetch(
+        `${liveBaseUrl}/stores/00000000-0000-4000-8000-000000000201/catalog?locale=en`
+      );
+      assert.equal(catRes.status, 200);
+
+      // 3. Create quote persisted in public.quotes
+      const runTag = Date.now();
+      const quoteRes = await fetch(`${liveBaseUrl}/quotes`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${customerToken}`,
+          "X-Idempotency-Key": `live_quote_${runTag}`,
+        },
+        body: JSON.stringify({
+          storeId: "00000000-0000-4000-8000-000000000201",
+          fulfillmentModality: "PLATFORM_DELIVERY",
+          cartItems: [
+            {
+              productId: "00000000-0000-4000-8000-000000000601",
+              quantity: 1,
+              selectedOptions: [],
+            },
+          ],
+          deliveryFeeCents: 690,
+        }),
+      });
+      assert.equal(quoteRes.status, 201);
+      const quoteJson = (await quoteRes.json()) as { data: ServerQuoteRecordContract };
+
+      // 4. Create order persisted in public.orders + public.order_events + public.outbox_events
+      const orderRes = await fetch(`${liveBaseUrl}/orders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${customerToken}`,
+          "X-Idempotency-Key": `live_order_${runTag}`,
+        },
+        body: JSON.stringify({
+          quoteId: quoteJson.data.id,
+          customerNotes: "Live PostgreSQL persistence check",
+        }),
+      });
+      assert.equal(orderRes.status, 201);
+      const orderJson = (await orderRes.json()) as { data: OrderRecordContract };
+
+      // 5. Read back order directly from a separate GET /v1/orders/:id query
+      const getOrderRes = await fetch(`${liveBaseUrl}/orders/${orderJson.data.id}`, {
+        headers: { Authorization: `Bearer ${customerToken}` },
+      });
+      assert.equal(getOrderRes.status, 200);
+      const fetchedOrder = (await getOrderRes.json()) as { data: OrderRecordContract };
+      assert.equal(fetchedOrder.data.id, orderJson.data.id);
+      assert.equal(fetchedOrder.data.totalCents, orderJson.data.totalCents);
+
+      // 6. Read audit logs as staff with MFA aal2 from public.audit_logs
+      const logsRes = await fetch(`${liveBaseUrl}/admin/audit-logs`, {
+        headers: { Authorization: `Bearer ${staffTokenAal2}` },
+      });
+      assert.equal(logsRes.status, 200);
+      const logsJson = (await logsRes.json()) as { data: AuditLogWriteRecord[] };
+      assert.ok(logsJson.data.length >= 1);
+    });
+  }
+);

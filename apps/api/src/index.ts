@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import http from "node:http";
 import {
   authorizePartnerScope,
@@ -73,6 +74,27 @@ import {
   type OrderCommandType,
   type QuoteItemInput,
 } from "@ideliveryfood/domain";
+import {
+  resolveRequestActor,
+  signSupabaseHs256Jwt,
+  verifySupabaseHs256Jwt,
+  type VerifiedSupabaseJwtClaims,
+} from "./auth-jwt.js";
+import {
+  createSupabasePostgresRepository,
+  toDeterministicUuid,
+  type SupabasePostgresRepositoryInstance,
+} from "./postgres-repository.js";
+
+export {
+  createSupabasePostgresRepository,
+  resolveRequestActor,
+  signSupabaseHs256Jwt,
+  toDeterministicUuid,
+  verifySupabaseHs256Jwt,
+  type SupabasePostgresRepositoryInstance,
+  type VerifiedSupabaseJwtClaims,
+};
 
 export interface AuditLogWriteRecord {
   id: string;
@@ -88,11 +110,53 @@ export interface AuditLogWriteRecord {
 
 export interface ApiDataRepository {
   listPublishedStores(locale: SupportedLocale): Promise<PublishedStoreContract[]>;
-  getActorById(userId: string, aal: "aal1" | "aal2"): Promise<AuthenticatedActorProfileContract | null>;
+  getStoreById(
+    storeId: string,
+    locale: SupportedLocale
+  ): Promise<(PublishedStoreContract & { organizationId: string }) | null>;
+  getStoreCatalog(
+    storeId: string,
+    locale: SupportedLocale
+  ): Promise<{
+    store: PublishedStoreContract;
+    weeklyHours: StoreOperatingHourContract[];
+    exceptions: StoreHourExceptionContract[];
+    serviceAreas: StoreServiceAreaContract[];
+    categories: CatalogCategoryContract[];
+  } | null>;
+  updateStoreSettings(
+    storeId: string,
+    patch: StoreSettingsPatchContract,
+    locale: SupportedLocale
+  ): Promise<PublishedStoreContract | null>;
+
+  getActorById(
+    userId: string,
+    aal: "aal1" | "aal2"
+  ): Promise<AuthenticatedActorProfileContract | null>;
   updateUserPreferences(
     userId: string,
     locale: SupportedLocale
   ): Promise<UserPreferencesContract>;
+  revokeUserDevice(
+    userId: string,
+    deviceIdentifier: string,
+    revokedAtIso: string
+  ): Promise<void>;
+  savePrivacyRequest(params: {
+    id: string;
+    userId: string;
+    requestType: "EXPORT_DATA" | "DELETE_ACCOUNT" | "CORRECTION";
+    status:
+      | "REQUESTED"
+      | "PROCESSING"
+      | "COMPLETED"
+      | "BLOCKED_LEGAL_RETENTION"
+      | "REJECTED";
+    reason: string | null;
+    retentionBlockReason: string | null;
+  }): Promise<void>;
+
   listOrganizationMembers(organizationId: string): Promise<
     Array<{
       userId: string;
@@ -101,29 +165,101 @@ export interface ApiDataRepository {
       role: string;
     }>
   >;
-  saveInvitation(record: StoredInvitationRecord): Promise<void>;
+  saveInvitation(
+    record: StoredInvitationRecord & {
+      organizationId?: string;
+      storeId?: string | null;
+      role?: string;
+      invitedBy?: string;
+    }
+  ): Promise<void>;
   getInvitationById(id: string): Promise<StoredInvitationRecord | null>;
-  markInvitationConsumed(id: string, consumedAtIso: string): Promise<void>;
+  markInvitationConsumed(
+    id: string,
+    consumedAtIso: string,
+    acceptedByUserId?: string
+  ): Promise<void>;
+
   appendAuditLog(entry: AuditLogWriteRecord): Promise<void>;
   getAuditLogs(): Promise<AuditLogWriteRecord[]>;
 
-  // Fase B Optional Repository Extensions (M04, M05, M09, M10, M12)
-  getStoreCatalog?(storeId: string, locale: SupportedLocale): Promise<{
-    store: PublishedStoreContract;
-    weeklyHours: StoreOperatingHourContract[];
-    exceptions: StoreHourExceptionContract[];
-    serviceAreas: StoreServiceAreaContract[];
-    categories: CatalogCategoryContract[];
+  listCustomerAddresses(userId: string): Promise<CustomerAddressContract[]>;
+  saveCustomerAddress(address: CustomerAddressContract): Promise<void>;
+
+  saveQuote(quote: ServerQuoteRecordContract): Promise<void>;
+  getQuoteById(quoteId: string): Promise<ServerQuoteRecordContract | null>;
+  getQuoteByCustomerIdempotencyKey(
+    customerId: string,
+    idempotencyKey: string
+  ): Promise<ServerQuoteRecordContract | null>;
+  markQuoteConsumed(quoteId: string, consumedAtIso: string): Promise<void>;
+
+  nextOrderNumber(): Promise<number>;
+  saveOrder(
+    order: OrderRecordContract,
+    initialEvent: OrderEventRecordContract
+  ): Promise<void>;
+  getOrderById(orderId: string): Promise<OrderRecordContract | null>;
+  getOrderByCustomerIdempotencyKey(
+    customerId: string,
+    idempotencyKey: string
+  ): Promise<OrderRecordContract | null>;
+  listOrdersByStore(storeId: string): Promise<OrderRecordContract[]>;
+  updateOrderWithEvent(
+    order: OrderRecordContract,
+    event: OrderEventRecordContract
+  ): Promise<void>;
+  listOrderEvents(orderId: string): Promise<OrderEventRecordContract[]>;
+
+  hasProcessedWebhookEvent(
+    providerCode: string,
+    externalEventId: string
+  ): Promise<boolean>;
+  recordProcessedWebhookEvent(params: {
+    providerCode: string;
+    externalEventId: string;
+    paymentAttemptId: string | null;
+    eventType: string;
+    redactedPayload: Record<string, unknown>;
+  }): Promise<void>;
+  savePaymentAttempt(attempt: PaymentAttemptContract): Promise<void>;
+  listRefundsByOrder(orderId: string): Promise<RefundRecordContract[]>;
+  saveRefundAndUpdateOrder(
+    refund: RefundRecordContract,
+    updatedOrder: OrderRecordContract
+  ): Promise<void>;
+
+  saveBankAccountChangeRequest(req: BankAccountChangeRequestContract): Promise<void>;
+  grantStaffScope(
+    grant: AdminStaffScopeGrantRequestContract & { grantedBy: string }
+  ): Promise<void>;
+  saveGovernanceApprovalEvent(
+    action: AdminGovernanceActionContract & { organizationId?: string | null }
+  ): Promise<void>;
+
+  saveReconciliationRun(run: PspReconciliationRunContract): Promise<void>;
+  getSettlementById(settlementId: string): Promise<SettlementRecordContract | null>;
+  saveSettlement(settlement: SettlementRecordContract): Promise<void>;
+
+  saveDeliveryTaskAndOffer(params: {
+    task: DeliveryTaskContract;
+    fullAddress: string;
+    confirmationCodeHash: string;
+    offer: DeliveryOfferContract;
+  }): Promise<void>;
+  getDeliveryOfferById(offerId: string): Promise<DeliveryOfferContract | null>;
+  getDeliveryTaskById(taskId: string): Promise<{
+    task: DeliveryTaskContract;
+    fullAddress: string | null;
+    confirmationCodeHash: string | null;
   } | null>;
-  listCustomerAddresses?(userId: string): Promise<CustomerAddressContract[]>;
-  saveCustomerAddress?(address: CustomerAddressContract): Promise<void>;
-  saveQuote?(quote: ServerQuoteRecordContract): Promise<void>;
-  getQuoteById?(quoteId: string): Promise<ServerQuoteRecordContract | null>;
-  markQuoteConsumed?(quoteId: string, consumedAtIso: string): Promise<void>;
-  saveOrder?(order: OrderRecordContract, initialEvent: OrderEventRecordContract): Promise<void>;
-  getOrderById?(orderId: string): Promise<OrderRecordContract | null>;
-  updateOrderWithEvent?(order: OrderRecordContract, event: OrderEventRecordContract): Promise<void>;
-  listOrderEvents?(orderId: string): Promise<OrderEventRecordContract[]>;
+  saveAcceptedDeliveryOffer(params: {
+    offer: DeliveryOfferContract;
+    task: DeliveryTaskContract;
+    fullAddress: string;
+  }): Promise<void>;
+  completeDeliveryTask(task: DeliveryTaskContract): Promise<void>;
+  saveCourierLocationSample(sample: CourierLocationSampleContract): Promise<void>;
 }
 
 /**
@@ -168,8 +304,8 @@ export async function fetchPublishedStoresFromSupabaseRest(params: {
       timezone: String(row.timezone ?? "America/Sao_Paulo"),
       city: String(row.city),
       stateCode: String(row.state_code),
-      latitude: row.latitude !== undefined ? Number(row.latitude) : -23.561414,
-      longitude: row.longitude !== undefined ? Number(row.longitude) : -46.655881,
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
       minOrderCents: Number(row.min_order_cents),
       prepTimeMinMinutes: Number(row.prep_time_min_minutes),
       prepTimeMaxMinutes: Number(row.prep_time_max_minutes),
@@ -229,31 +365,14 @@ async function readRawAndJsonBody(
 export function createApiServer(deps: {
   repository: ApiDataRepository;
   env?: Record<string, string | undefined>;
+  allowTestActorHeaders?: boolean;
 }): http.Server {
   const env = deps.env ?? process.env;
 
-  // Transactional state stores (used when optional repository methods are not supplied)
-  const quotesById = new Map<string, ServerQuoteRecordContract>();
-  const quotesByCustomerIdem = new Map<string, ServerQuoteRecordContract>();
-  const ordersById = new Map<string, OrderRecordContract>();
-  const ordersByCustomerIdem = new Map<string, OrderRecordContract>();
-  const orderEventsByOrderId = new Map<string, OrderEventRecordContract[]>();
-  const addressesByUserId = new Map<string, CustomerAddressContract[]>();
-  const paymentAttemptsById = new Map<string, PaymentAttemptContract>();
-  const processedWebhookKeys = new Set<string>();
-  const refundsByOrderId = new Map<string, RefundRecordContract[]>();
-  const storeOverridesById = new Map<string, StoreSettingsPatchContract>();
-  const bankChangeRequestsById = new Map<string, BankAccountChangeRequestContract>();
-  const settlementsById = new Map<string, SettlementRecordContract>();
-  const deliveryTasksById = new Map<string, DeliveryTaskContract>();
-  const deliveryTaskOtpHashById = new Map<string, string>();
-  const deliveryTaskFullAddressById = new Map<string, string>();
-  const deliveryOffersById = new Map<string, DeliveryOfferContract>();
-  let orderSequence = 10010;
-
   return http.createServer(async (req, res) => {
     const correlationId =
-      (req.headers["x-correlation-id"] as string | undefined) ?? `corr_${Date.now()}`;
+      (req.headers["x-correlation-id"] as string | undefined) ??
+      `corr_${crypto.randomUUID()}`;
     const locale = resolveSupportedLocale(
       (req.headers["accept-language"] as string | undefined) ?? DEFAULT_LOCALE
     );
@@ -297,9 +416,15 @@ export function createApiServer(deps: {
 
       // 4. Public Published Stores Discovery (M04: search + cuisine filter)
       if (method === "GET" && pathname === "/v1/stores") {
-        const queryLocale = resolveSupportedLocale(parsedUrl.searchParams.get("locale") ?? locale);
-        const searchTerm = (parsedUrl.searchParams.get("search") ?? "").trim().toLowerCase();
-        const cuisineFilter = (parsedUrl.searchParams.get("cuisineCategory") ?? "").trim().toUpperCase();
+        const queryLocale = resolveSupportedLocale(
+          parsedUrl.searchParams.get("locale") ?? locale
+        );
+        const searchTerm = (parsedUrl.searchParams.get("search") ?? "")
+          .trim()
+          .toLowerCase();
+        const cuisineFilter = (parsedUrl.searchParams.get("cuisineCategory") ?? "")
+          .trim()
+          .toUpperCase();
 
         let stores = await deps.repository.listPublishedStores(queryLocale);
         if (searchTerm) {
@@ -310,7 +435,9 @@ export function createApiServer(deps: {
           );
         }
         if (cuisineFilter) {
-          stores = stores.filter((s) => s.cuisineCategory.toUpperCase() === cuisineFilter);
+          stores = stores.filter(
+            (s) => s.cuisineCategory.toUpperCase() === cuisineFilter
+          );
         }
 
         const response: PaginatedResponse<PublishedStoreContract> = {
@@ -330,13 +457,22 @@ export function createApiServer(deps: {
       const storeCatalogMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/catalog$/);
       if (method === "GET" && storeCatalogMatch) {
         const storeId = storeCatalogMatch[1] ?? "";
-        const queryLocale = resolveSupportedLocale(parsedUrl.searchParams.get("locale") ?? locale);
-        const catalogData = deps.repository.getStoreCatalog
-          ? await deps.repository.getStoreCatalog(storeId, queryLocale)
-          : null;
+        const queryLocale = resolveSupportedLocale(
+          parsedUrl.searchParams.get("locale") ?? locale
+        );
+        const catalogData = await deps.repository.getStoreCatalog(
+          storeId,
+          queryLocale
+        );
 
         if (!catalogData) {
-          sendError(res, 404, "STORE_NOT_FOUND", `Published store ${storeId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Published store ${storeId} not found.`,
+            correlationId
+          );
           return;
         }
 
@@ -361,12 +497,16 @@ export function createApiServer(deps: {
       const storeAvailMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/availability$/);
       if (method === "GET" && storeAvailMatch) {
         const storeId = storeAvailMatch[1] ?? "";
-        const catalogData = deps.repository.getStoreCatalog
-          ? await deps.repository.getStoreCatalog(storeId, locale)
-          : null;
+        const catalogData = await deps.repository.getStoreCatalog(storeId, locale);
 
         if (!catalogData) {
-          sendError(res, 404, "STORE_NOT_FOUND", `Published store ${storeId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Published store ${storeId} not found.`,
+            correlationId
+          );
           return;
         }
 
@@ -385,11 +525,14 @@ export function createApiServer(deps: {
         const basketCents = Number(parsedUrl.searchParams.get("basketCents") ?? 0);
 
         const coverage =
-          latParam !== null && lngParam !== null
+          latParam !== null &&
+          lngParam !== null &&
+          catalogData.store.latitude !== undefined &&
+          catalogData.store.longitude !== undefined
             ? evaluateServiceAreaEligibility({
                 storeId: catalogData.store.id,
-                storeLatitude: catalogData.store.latitude ?? -23.561414,
-                storeLongitude: catalogData.store.longitude ?? -46.655881,
+                storeLatitude: catalogData.store.latitude,
+                storeLongitude: catalogData.store.longitude,
                 customerLatitude: Number(latParam),
                 customerLongitude: Number(lngParam),
                 fulfillmentModality: modalityParam,
@@ -423,18 +566,29 @@ export function createApiServer(deps: {
         const amountCents = Number(json.amountCents ?? 0);
         const currencyCode = String(json.currencyCode ?? CURRENCY_CODE);
 
-        const order = deps.repository.getOrderById
-          ? await deps.repository.getOrderById(orderId)
-          : (ordersById.get(orderId) ?? null);
-
+        const order = await deps.repository.getOrderById(orderId);
         if (!order) {
-          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
           return;
         }
 
         const webhookSecret =
-          env[`${providerCode.toUpperCase()}_WEBHOOK_SECRET`] ?? "whsec_default_dev_test";
+          env[`${providerCode.toUpperCase()}_WEBHOOK_SECRET`] ??
+          "whsec_default_dev_test";
         const nowSeconds = Math.floor(Date.now() / 1000);
+        const alreadyProcessed = await deps.repository.hasProcessedWebhookEvent(
+          providerCode,
+          externalEventId
+        );
+        const processedSet = new Set<string>(
+          alreadyProcessed ? [`${providerCode}:${externalEventId}`] : []
+        );
 
         try {
           const result = verifyAndProcessPspWebhook({
@@ -449,18 +603,25 @@ export function createApiServer(deps: {
             webhookAmountCents: amountCents,
             webhookCurrencyCode: currencyCode,
             order,
-            processedEventKeys: processedWebhookKeys,
+            processedEventKeys: processedSet,
           });
 
           if (!result.deduplicated && result.event) {
-            processedWebhookKeys.add(`${providerCode}:${externalEventId}`);
-            ordersById.set(order.id, result.updatedOrder);
-            const evts = orderEventsByOrderId.get(order.id) ?? [];
-            evts.push(result.event);
-            orderEventsByOrderId.set(order.id, evts);
-            if (deps.repository.updateOrderWithEvent) {
-              await deps.repository.updateOrderWithEvent(result.updatedOrder, result.event);
-            }
+            await deps.repository.recordProcessedWebhookEvent({
+              providerCode,
+              externalEventId,
+              paymentAttemptId: null,
+              eventType,
+              redactedPayload: {
+                orderId: order.id,
+                amountCents,
+                currencyCode,
+              },
+            });
+            await deps.repository.updateOrderWithEvent(
+              result.updatedOrder,
+              result.event
+            );
           }
 
           sendJson(res, 200, correlationId, {
@@ -474,22 +635,57 @@ export function createApiServer(deps: {
           });
           return;
         } catch (webhookErr) {
-          const msg = webhookErr instanceof Error ? webhookErr.message : "Webhook verification failed";
-          const status = msg.startsWith("WEBHOOK_INVALID_SIGNATURE") || msg.startsWith("WEBHOOK_TIMESTAMP") ? 401 : 400;
-          sendError(res, status, msg.split(":")[0] ?? "WEBHOOK_ERROR", msg, correlationId);
+          const msg =
+            webhookErr instanceof Error
+              ? webhookErr.message
+              : "Webhook verification failed";
+          const status =
+            msg.startsWith("WEBHOOK_INVALID_SIGNATURE") ||
+            msg.startsWith("WEBHOOK_TIMESTAMP")
+              ? 401
+              : 400;
+          sendError(
+            res,
+            status,
+            msg.split(":")[0] ?? "WEBHOOK_ERROR",
+            msg,
+            correlationId
+          );
           return;
         }
       }
 
-      // Extract authenticated actor headers for protected routes
-      const actorId = req.headers["x-actor-id"] as string | undefined;
-      const actorAal = (req.headers["x-actor-aal"] as "aal1" | "aal2" | undefined) ?? "aal1";
-      const actor = actorId ? await deps.repository.getActorById(actorId, actorAal) : null;
+      // Resolve authenticated actor via Bearer JWT or (when permitted in test mode) X-Actor-Id
+      const resolvedAuth = await resolveRequestActor({
+        req,
+        repository: deps.repository,
+        env,
+        ...(deps.allowTestActorHeaders !== undefined
+          ? { allowTestActorHeaders: deps.allowTestActorHeaders }
+          : {}),
+      });
+      if (resolvedAuth.authErrorCode) {
+        sendError(
+          res,
+          401,
+          resolvedAuth.authErrorCode,
+          resolvedAuth.authErrorMessage ?? "Authentication failed.",
+          correlationId
+        );
+        return;
+      }
+      const actor = resolvedAuth.actor;
 
       // 5. GET /v1/me
       if (method === "GET" && pathname === "/v1/me") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         sendJson(res, 200, correlationId, { data: actor });
@@ -499,41 +695,69 @@ export function createApiServer(deps: {
       // 5b. GET & POST /v1/me/addresses (M05)
       if (pathname === "/v1/me/addresses") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         if (method === "GET") {
-          const list = deps.repository.listCustomerAddresses
-            ? await deps.repository.listCustomerAddresses(actor.id)
-            : (addressesByUserId.get(actor.id) ?? []);
+          const list = await deps.repository.listCustomerAddresses(actor.id);
           sendJson(res, 200, correlationId, { data: list });
           return;
         }
         if (method === "POST") {
           const { json: body } = await readRawAndJsonBody(req);
+          const streetLine = String(body.streetLine ?? "").trim();
+          const neighborhood = String(body.neighborhood ?? "").trim();
+          const city = String(body.city ?? "").trim();
+          const stateCode = String(body.stateCode ?? "").trim().toUpperCase();
+          const postalCode = String(body.postalCode ?? "").trim();
+          const latitude = Number(body.latitude);
+          const longitude = Number(body.longitude);
+
+          if (
+            !streetLine ||
+            !neighborhood ||
+            !city ||
+            stateCode.length !== 2 ||
+            !postalCode ||
+            !Number.isFinite(latitude) ||
+            !Number.isFinite(longitude)
+          ) {
+            sendError(
+              res,
+              400,
+              "VALIDATION_ERROR",
+              "streetLine, neighborhood, city, stateCode (2 chars), postalCode, latitude, and longitude are required.",
+              correlationId
+            );
+            return;
+          }
+
           const newAddr: CustomerAddressContract = {
-            id: String(body.id ?? `addr_${Date.now()}`),
+            id: body.id ? String(body.id) : crypto.randomUUID(),
             userId: actor.id,
             label: String(body.label ?? "Home"),
             recipientName: String(body.recipientName ?? actor.fullName),
-            streetLine: String(body.streetLine ?? ""),
+            streetLine,
             number: String(body.number ?? "S/N"),
             complement: body.complement ? String(body.complement) : null,
-            neighborhood: String(body.neighborhood ?? ""),
-            city: String(body.city ?? "São Paulo"),
-            stateCode: String(body.stateCode ?? "SP"),
-            postalCode: String(body.postalCode ?? "01310-100"),
-            latitude: Number(body.latitude ?? -23.56398),
-            longitude: Number(body.longitude ?? -46.66912),
-            deliveryInstructions: body.deliveryInstructions ? String(body.deliveryInstructions) : null,
+            neighborhood,
+            city,
+            stateCode,
+            postalCode,
+            latitude,
+            longitude,
+            deliveryInstructions: body.deliveryInstructions
+              ? String(body.deliveryInstructions)
+              : null,
             isDefault: Boolean(body.isDefault ?? true),
           };
-          const list = addressesByUserId.get(actor.id) ?? [];
-          list.push(newAddr);
-          addressesByUserId.set(actor.id, list);
-          if (deps.repository.saveCustomerAddress) {
-            await deps.repository.saveCustomerAddress(newAddr);
-          }
+          await deps.repository.saveCustomerAddress(newAddr);
           sendJson(res, 201, correlationId, { data: newAddr });
           return;
         }
@@ -542,7 +766,13 @@ export function createApiServer(deps: {
       // 6. PATCH /v1/me/preferences (Language en / pt-BR persistence)
       if (method === "PATCH" && pathname === "/v1/me/preferences") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
@@ -557,11 +787,16 @@ export function createApiServer(deps: {
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
-        const targetLocale = resolveSupportedLocale(String(body.locale ?? DEFAULT_LOCALE));
-        const updated = await deps.repository.updateUserPreferences(actor.id, targetLocale);
+        const targetLocale = resolveSupportedLocale(
+          String(body.locale ?? DEFAULT_LOCALE)
+        );
+        const updated = await deps.repository.updateUserPreferences(
+          actor.id,
+          targetLocale
+        );
 
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "USER_LOCALE_PREFERENCE_UPDATED",
           targetType: "USER_PREFERENCES",
@@ -579,18 +814,33 @@ export function createApiServer(deps: {
       // 7. POST /v1/me/devices/revoke
       if (method === "POST" && pathname === "/v1/me/devices/revoke") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
-        const deviceId = String(body.deviceId ?? "");
+        const deviceId = String(body.deviceId ?? "").trim();
         if (!deviceId) {
-          sendError(res, 400, "VALIDATION_ERROR", "deviceId is required.", correlationId);
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "deviceId is required.",
+            correlationId
+          );
           return;
         }
 
+        const revokedAt = new Date().toISOString();
+        await deps.repository.revokeUserDevice(actor.id, deviceId, revokedAt);
+
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "DEVICE_SESSION_REVOKED",
           targetType: "USER_DEVICE",
@@ -598,13 +848,13 @@ export function createApiServer(deps: {
           correlationId,
           reason: "User initiated device session revocation",
           redactedPayload: { deviceId },
-          createdAt: new Date().toISOString(),
+          createdAt: revokedAt,
         });
 
         sendJson(res, 200, correlationId, {
           status: "REVOKED",
           deviceId,
-          revokedAt: new Date().toISOString(),
+          revokedAt,
         });
         return;
       }
@@ -612,7 +862,13 @@ export function createApiServer(deps: {
       // 8. POST /v1/me/privacy-requests (LGPD Deletion & Legal Hold Check)
       if (method === "POST" && pathname === "/v1/me/privacy-requests") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
@@ -620,19 +876,37 @@ export function createApiServer(deps: {
           userId: actor.id,
           hasActiveOrders: Boolean(body.hasActiveOrders),
           hasOpenFinancialDisputes: Boolean(body.hasOpenFinancialDisputes),
-          hasCompletedFiscalTransactions: Boolean(body.hasCompletedFiscalTransactions),
+          hasCompletedFiscalTransactions: Boolean(
+            body.hasCompletedFiscalTransactions
+          ),
           requestedAt: new Date(),
         });
 
+        const requestId = crypto.randomUUID();
+        await deps.repository.savePrivacyRequest({
+          id: requestId,
+          userId: actor.id,
+          requestType: "DELETE_ACCOUNT",
+          status:
+            evaluation.outcome === "IMMEDIATE_ANONYMIZATION"
+              ? "PROCESSING"
+              : "BLOCKED_LEGAL_RETENTION",
+          reason: body.reason ? String(body.reason) : null,
+          retentionBlockReason: evaluation.reasonCode,
+        });
+
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "PRIVACY_DELETION_EVALUATED",
           targetType: "PROFILE",
           targetId: actor.id,
           correlationId,
           reason: evaluation.reasonCode,
-          redactedPayload: { outcome: evaluation.outcome, holdUntilIso: evaluation.holdUntilIso },
+          redactedPayload: {
+            outcome: evaluation.outcome,
+            holdUntilIso: evaluation.holdUntilIso,
+          },
           createdAt: new Date().toISOString(),
         });
 
@@ -644,7 +918,13 @@ export function createApiServer(deps: {
       const orgMembersMatch = pathname.match(/^\/v1\/organizations\/([^/]+)\/members$/);
       if (method === "GET" && orgMembersMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orgId = orgMembersMatch[1] ?? "";
@@ -655,7 +935,13 @@ export function createApiServer(deps: {
         });
 
         if (!decision.allowed) {
-          sendError(res, 403, decision.reasonCode, "Cross-tenant or role access denied.", correlationId);
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Cross-tenant or role access denied.",
+            correlationId
+          );
           return;
         }
 
@@ -665,10 +951,18 @@ export function createApiServer(deps: {
       }
 
       // 9b. POST /v1/organizations/:orgId/catalog-batch (M09 Multi-unit batch update with partial results)
-      const orgBatchMatch = pathname.match(/^\/v1\/organizations\/([^/]+)\/catalog-batch$/);
+      const orgBatchMatch = pathname.match(
+        /^\/v1\/organizations\/([^/]+)\/catalog-batch$/
+      );
       if (method === "POST" && orgBatchMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orgId = orgBatchMatch[1] ?? "";
@@ -682,7 +976,12 @@ export function createApiServer(deps: {
             actor,
             organizationId: orgId,
             storeId: targetStoreId,
-            allowedRoles: ["partner_owner", "partner_manager", "partner_catalog", "partner_operator"],
+            allowedRoles: [
+              "partner_owner",
+              "partner_manager",
+              "partner_catalog",
+              "partner_operator",
+            ],
           });
           if (!decision.allowed) {
             results.push({
@@ -702,7 +1001,7 @@ export function createApiServer(deps: {
         }
 
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "MULTI_UNIT_CATALOG_BATCH_EXECUTED",
           targetType: "ORGANIZATION",
@@ -721,10 +1020,18 @@ export function createApiServer(deps: {
       }
 
       // 9c. GET /v1/organizations/:orgId/units-summary (M09)
-      const orgUnitsMatch = pathname.match(/^\/v1\/organizations\/([^/]+)\/units-summary$/);
+      const orgUnitsMatch = pathname.match(
+        /^\/v1\/organizations\/([^/]+)\/units-summary$/
+      );
       if (method === "GET" && orgUnitsMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orgId = orgUnitsMatch[1] ?? "";
@@ -744,15 +1051,17 @@ export function createApiServer(deps: {
             ],
           });
           if (decision.allowed) {
+            const storeOrders = await deps.repository.listOrdersByStore(st.id);
             summaries.push({
               storeId: st.id,
               storeName: st.name,
               isPublished: true,
               isPaused: st.isPaused,
-              activeOrderCount: Array.from(ordersById.values()).filter((o) => o.storeId === st.id).length,
-              grossMerchandiseCents: Array.from(ordersById.values())
-                .filter((o) => o.storeId === st.id)
-                .reduce((acc, o) => acc + o.subtotalCents + o.addonsCents, 0),
+              activeOrderCount: storeOrders.length,
+              grossMerchandiseCents: storeOrders.reduce(
+                (acc, o) => acc + o.subtotalCents + o.addonsCents,
+                0
+              ),
             });
           }
         }
@@ -763,31 +1072,61 @@ export function createApiServer(deps: {
       // 10. POST /v1/invitations & POST /v1/invitations/accept
       if (method === "POST" && pathname === "/v1/invitations") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
-        const organizationId = String(body.organizationId ?? "");
+        const organizationId = String(body.organizationId ?? "").trim();
+        if (!organizationId) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "organizationId is required.",
+            correlationId
+          );
+          return;
+        }
         const decision = authorizePartnerScope({
           actor,
           organizationId,
           allowedRoles: ["partner_owner", "partner_manager"],
         });
         if (!decision.allowed) {
-          sendError(res, 403, decision.reasonCode, "Not authorized to invite members.", correlationId);
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to invite members.",
+            correlationId
+          );
           return;
         }
 
         const rawToken = String(body.rawToken ?? "");
-        const invitationId = String(body.id ?? `inv_${Date.now()}`);
+        const invitationId = body.id ? String(body.id) : crypto.randomUUID();
         const record: StoredInvitationRecord = {
           id: invitationId,
           email: String(body.email ?? ""),
           tokenHash: hashInvitationToken(rawToken),
-          expiresAtIso: String(body.expiresAtIso ?? new Date(Date.now() + 86400000).toISOString()),
+          expiresAtIso: String(
+            body.expiresAtIso ?? new Date(Date.now() + 86400000).toISOString()
+          ),
           consumedAtIso: null,
         };
-        await deps.repository.saveInvitation(record);
+        await deps.repository.saveInvitation({
+          ...record,
+          organizationId,
+          storeId: body.storeId ? String(body.storeId) : null,
+          role: body.role ? String(body.role) : "partner_operator",
+          invitedBy: actor.id,
+        });
         sendJson(res, 201, correlationId, {
           id: record.id,
           email: record.email,
@@ -798,7 +1137,13 @@ export function createApiServer(deps: {
 
       if (method === "POST" && pathname === "/v1/invitations/accept") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
@@ -806,7 +1151,13 @@ export function createApiServer(deps: {
         const rawToken = String(body.rawToken ?? "");
         const stored = await deps.repository.getInvitationById(invitationId);
         if (!stored) {
-          sendError(res, 404, "INVITATION_NOT_FOUND", "Invitation not found.", correlationId);
+          sendError(
+            res,
+            404,
+            "INVITATION_NOT_FOUND",
+            "Invitation not found.",
+            correlationId
+          );
           return;
         }
 
@@ -816,25 +1167,49 @@ export function createApiServer(deps: {
           invitation: stored,
         });
         if (!check.valid) {
-          sendError(res, 400, `INVITATION_${check.reasonCode}`, "Invalid or expired invitation.", correlationId);
+          sendError(
+            res,
+            400,
+            `INVITATION_${check.reasonCode}`,
+            "Invalid or expired invitation.",
+            correlationId
+          );
           return;
         }
 
         const consumedAtIso = new Date().toISOString();
-        await deps.repository.markInvitationConsumed(stored.id, consumedAtIso);
-        sendJson(res, 200, correlationId, { status: "ACCEPTED", consumedAtIso });
+        await deps.repository.markInvitationConsumed(
+          stored.id,
+          consumedAtIso,
+          actor.id
+        );
+        sendJson(res, 200, correlationId, {
+          status: "ACCEPTED",
+          consumedAtIso,
+        });
         return;
       }
 
       // 11. POST /v1/onboarding/approvals (Requires Internal Staff + MFA aal2)
       if (method === "POST" && pathname === "/v1/onboarding/approvals") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const staffDecision = authorizeStaffAction({
           actor,
-          allowedRoles: ["operations", "commercial", "risk_compliance", "tech_admin"],
+          allowedRoles: [
+            "operations",
+            "commercial",
+            "risk_compliance",
+            "tech_admin",
+          ],
           requireMfaAal2: true,
         });
 
@@ -850,20 +1225,47 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const targetId = String(body.targetId ?? "");
-        const decision = String(body.decision ?? "APPROVED");
-        const reason = String(body.reason ?? "");
+        const targetId = String(body.targetId ?? "").trim();
+        const decision = String(
+          body.decision ?? "APPROVED"
+        ) as AdminGovernanceActionContract["decision"];
+        const targetType = String(
+          body.targetType ?? "STORE"
+        ) as AdminGovernanceActionContract["targetType"];
+        const reason = String(body.reason ?? "").trim();
+
+        if (!targetId || !reason) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "targetId and reason are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        await deps.repository.saveGovernanceApprovalEvent({
+          id: crypto.randomUUID(),
+          targetType,
+          targetId,
+          decision,
+          actorId: actor.id,
+          reason,
+          createdAtIso: nowIso,
+        });
 
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: `ONBOARDING_${decision}`,
-          targetType: String(body.targetType ?? "STORE"),
+          targetType,
           targetId,
           correlationId,
           reason,
           redactedPayload: { decision, targetId },
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
         });
 
         sendJson(res, 200, correlationId, {
@@ -877,23 +1279,46 @@ export function createApiServer(deps: {
       // 12. POST /v1/quotes (Authoritative Server-Side Quote in BRL Cents + Snapshot Persistence)
       if (method === "POST" && pathname === "/v1/quotes") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const idempotencyKey =
-          (req.headers["x-idempotency-key"] as string | undefined) ?? `idem_q_${Date.now()}`;
-        const existingQuote = quotesByCustomerIdem.get(`${actor.id}:${idempotencyKey}`);
+          (req.headers["x-idempotency-key"] as string | undefined) ??
+          `idem_q_${crypto.randomUUID()}`;
+        const existingQuote =
+          await deps.repository.getQuoteByCustomerIdempotencyKey(
+            actor.id,
+            idempotencyKey
+          );
         if (existingQuote) {
           sendJson(res, 200, correlationId, { data: existingQuote });
           return;
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const storeId = String(body.storeId ?? "00000000-0000-4000-8000-000000000201");
+        const storeId = String(body.storeId ?? "").trim();
+        if (!storeId) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "storeId is required to create a quote.",
+            correlationId
+          );
+          return;
+        }
+
         const fulfillmentModality = (body.fulfillmentModality ??
           "PLATFORM_DELIVERY") as FulfillmentModality;
 
-        let quoteInputs: QuoteItemInput[] = (body.items as QuoteItemInput[]) ?? [];
+        let quoteInputs: QuoteItemInput[] =
+          (body.items as QuoteItemInput[]) ?? [];
         let snapshots = quoteInputs.map((item) => ({
           productId: item.productId,
           productNameEn: item.productId,
@@ -901,19 +1326,29 @@ export function createApiServer(deps: {
           quantity: item.quantity,
           unitPriceCents: item.unitPriceCents,
           addonsUnitPriceCents: item.addonsUnitPriceCents,
-          totalLineCents: item.quantity * (item.unitPriceCents + item.addonsUnitPriceCents),
-          selectedOptions: [] as ServerQuoteRecordContract["itemsSnapshot"][number]["selectedOptions"],
+          totalLineCents:
+            item.quantity * (item.unitPriceCents + item.addonsUnitPriceCents),
+          selectedOptions:
+            [] as ServerQuoteRecordContract["itemsSnapshot"][number]["selectedOptions"],
         }));
 
-        if (Array.isArray(body.cartItems) && deps.repository.getStoreCatalog) {
-          const catalogData = await deps.repository.getStoreCatalog(storeId, locale);
+        if (Array.isArray(body.cartItems)) {
+          const catalogData = await deps.repository.getStoreCatalog(
+            storeId,
+            locale
+          );
           if (!catalogData) {
-            sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+            sendError(
+              res,
+              404,
+              "STORE_NOT_FOUND",
+              `Store ${storeId} not found.`,
+              correlationId
+            );
             return;
           }
-          const flatProducts: CatalogProductContract[] = catalogData.categories.flatMap(
-            (cat) => cat.products
-          );
+          const flatProducts: CatalogProductContract[] =
+            catalogData.categories.flatMap((cat) => cat.products);
           const validated = validateAndBuildQuoteItems({
             cartItems: body.cartItems as CartItemSelectionContract[],
             catalogProducts: flatProducts,
@@ -927,13 +1362,15 @@ export function createApiServer(deps: {
           fulfillmentModality,
           deliveryFeeCents: Number(body.deliveryFeeCents ?? 690),
           discountCents: Number(body.discountCents ?? 0),
-          discountFundedBy: (body.discountFundedBy as "PLATFORM" | "MERCHANT" | "NONE") ?? "NONE",
+          discountFundedBy:
+            (body.discountFundedBy as "PLATFORM" | "MERCHANT" | "NONE") ??
+            "NONE",
           minOrderCents: Number(body.minOrderCents ?? 0),
         });
 
         const now = new Date();
         const quoteRecord: ServerQuoteRecordContract & typeof calc = {
-          id: String(body.id ?? `quote_${Date.now()}`),
+          id: body.id ? String(body.id) : crypto.randomUUID(),
           customerId: actor.id,
           storeId,
           addressId: body.addressId ? String(body.addressId) : null,
@@ -945,20 +1382,18 @@ export function createApiServer(deps: {
           estimatedPrepMinutes: Number(body.estimatedPrepMinutes ?? 25),
           estimatedDeliveryMinutes: fulfillmentModality === "PICKUP" ? 0 : 35,
           itemsSnapshot: snapshots,
-          addressSnapshot: (body.addressSnapshot as Record<string, unknown>) ?? null,
+          addressSnapshot:
+            (body.addressSnapshot as Record<string, unknown>) ?? null,
           idempotencyKey,
           expiresAtIso: String(
-            body.expiresAtIso ?? new Date(now.getTime() + 15 * 60 * 1000).toISOString()
+            body.expiresAtIso ??
+              new Date(now.getTime() + 15 * 60 * 1000).toISOString()
           ),
           consumedAtIso: null,
           createdAtIso: now.toISOString(),
         };
 
-        quotesById.set(quoteRecord.id, quoteRecord);
-        quotesByCustomerIdem.set(`${actor.id}:${idempotencyKey}`, quoteRecord);
-        if (deps.repository.saveQuote) {
-          await deps.repository.saveQuote(quoteRecord);
-        }
+        await deps.repository.saveQuote(quoteRecord);
 
         sendJson(res, 201, correlationId, { data: quoteRecord });
         return;
@@ -967,10 +1402,18 @@ export function createApiServer(deps: {
       // 13. POST /v1/orders (M10 — Idempotent order creation from unexpired quote)
       if (method === "POST" && pathname === "/v1/orders") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -982,55 +1425,85 @@ export function createApiServer(deps: {
           return;
         }
 
-        const existingOrder = ordersByCustomerIdem.get(`${actor.id}:${idempotencyKey}`);
+        const existingOrder =
+          await deps.repository.getOrderByCustomerIdempotencyKey(
+            actor.id,
+            idempotencyKey
+          );
         if (existingOrder) {
           sendJson(res, 200, correlationId, { data: existingOrder });
           return;
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const quoteId = String(body.quoteId ?? "");
-        const quote = deps.repository.getQuoteById
-          ? await deps.repository.getQuoteById(quoteId)
-          : (quotesById.get(quoteId) ?? null);
+        const quoteId = String(body.quoteId ?? "").trim();
+        const quote = await deps.repository.getQuoteById(quoteId);
 
         if (!quote) {
-          sendError(res, 404, "QUOTE_NOT_FOUND", `Quote ${quoteId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "QUOTE_NOT_FOUND",
+            `Quote ${quoteId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const storeWithOrg = await deps.repository.getStoreById(
+          quote.storeId,
+          locale
+        );
+        const resolvedOrgId = body.organizationId
+          ? String(body.organizationId)
+          : storeWithOrg?.organizationId;
+        if (!resolvedOrgId) {
+          sendError(
+            res,
+            400,
+            "STORE_ORGANIZATION_NOT_FOUND",
+            `Unable to resolve organizationId for store ${quote.storeId}.`,
+            correlationId
+          );
           return;
         }
 
         try {
-          orderSequence += 1;
+          const orderNum = await deps.repository.nextOrderNumber();
           const created = createOrderFromServerQuote({
-            orderId: String(body.orderId ?? `ord_${orderSequence}`),
-            orderNumber: orderSequence,
-            organizationId: String(body.organizationId ?? "00000000-0000-4000-8000-000000000101"),
+            orderId: body.orderId ? String(body.orderId) : crypto.randomUUID(),
+            orderNumber: orderNum,
+            organizationId: resolvedOrgId,
             quote,
             actorCustomerId: actor.id,
             isStoreCurrentlyOpen: body.isStoreCurrentlyOpen !== false,
-            discountFundedBy: (body.discountFundedBy as "PLATFORM" | "MERCHANT" | "NONE") ?? "NONE",
-            customerNotes: body.customerNotes ? String(body.customerNotes) : null,
+            discountFundedBy:
+              (body.discountFundedBy as "PLATFORM" | "MERCHANT" | "NONE") ??
+              "NONE",
+            customerNotes: body.customerNotes
+              ? String(body.customerNotes)
+              : null,
             idempotencyKey,
           });
 
           const consumedAtIso = new Date().toISOString();
-          quotesById.set(quote.id, { ...quote, consumedAtIso });
-          if (deps.repository.markQuoteConsumed) {
-            await deps.repository.markQuoteConsumed(quote.id, consumedAtIso);
-          }
-
-          ordersById.set(created.order.id, created.order);
-          ordersByCustomerIdem.set(`${actor.id}:${idempotencyKey}`, created.order);
-          orderEventsByOrderId.set(created.order.id, [created.initialEvent]);
-          if (deps.repository.saveOrder) {
-            await deps.repository.saveOrder(created.order, created.initialEvent);
-          }
+          await deps.repository.markQuoteConsumed(quote.id, consumedAtIso);
+          await deps.repository.saveOrder(created.order, created.initialEvent);
 
           sendJson(res, 201, correlationId, { data: created.order });
           return;
         } catch (orderErr) {
-          const msg = orderErr instanceof Error ? orderErr.message : "Unable to create order";
-          sendError(res, 409, msg.split(":")[0] ?? "ORDER_CREATION_CONFLICT", msg, correlationId);
+          const msg =
+            orderErr instanceof Error
+              ? orderErr.message
+              : "Unable to create order";
+          sendError(
+            res,
+            409,
+            msg.split(":")[0] ?? "ORDER_CREATION_CONFLICT",
+            msg,
+            correlationId
+          );
           return;
         }
       }
@@ -1039,15 +1512,25 @@ export function createApiServer(deps: {
       const orderGetMatch = pathname.match(/^\/v1\/orders\/([^/]+)$/);
       if (method === "GET" && orderGetMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orderId = orderGetMatch[1] ?? "";
-        const order = deps.repository.getOrderById
-          ? await deps.repository.getOrderById(orderId)
-          : (ordersById.get(orderId) ?? null);
+        const order = await deps.repository.getOrderById(orderId);
         if (!order) {
-          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
           return;
         }
         if (
@@ -1055,7 +1538,13 @@ export function createApiServer(deps: {
           actor.organizationMemberships.length === 0 &&
           actor.staffScopes.length === 0
         ) {
-          sendError(res, 403, "ORDER_FORBIDDEN", "Access to order denied.", correlationId);
+          sendError(
+            res,
+            403,
+            "ORDER_FORBIDDEN",
+            "Access to order denied.",
+            correlationId
+          );
           return;
         }
         sendJson(res, 200, correlationId, { data: order });
@@ -1066,11 +1555,19 @@ export function createApiServer(deps: {
       const orderCmdMatch = pathname.match(/^\/v1\/orders\/([^/]+)\/commands$/);
       if (method === "POST" && orderCmdMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orderId = orderCmdMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1082,11 +1579,15 @@ export function createApiServer(deps: {
           return;
         }
 
-        const order = deps.repository.getOrderById
-          ? await deps.repository.getOrderById(orderId)
-          : (ordersById.get(orderId) ?? null);
+        const order = await deps.repository.getOrderById(orderId);
         if (!order) {
-          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
           return;
         }
 
@@ -1111,13 +1612,10 @@ export function createApiServer(deps: {
             ...(body.reason ? { reason: String(body.reason) } : {}),
           });
 
-          ordersById.set(order.id, result.updatedOrder);
-          const evts = orderEventsByOrderId.get(order.id) ?? [];
-          evts.push(result.event);
-          orderEventsByOrderId.set(order.id, evts);
-          if (deps.repository.updateOrderWithEvent) {
-            await deps.repository.updateOrderWithEvent(result.updatedOrder, result.event);
-          }
+          await deps.repository.updateOrderWithEvent(
+            result.updatedOrder,
+            result.event
+          );
 
           sendJson(res, 200, correlationId, {
             data: {
@@ -1127,7 +1625,8 @@ export function createApiServer(deps: {
           });
           return;
         } catch (cmdErr) {
-          const msg = cmdErr instanceof Error ? cmdErr.message : "Command execution failed";
+          const msg =
+            cmdErr instanceof Error ? cmdErr.message : "Command execution failed";
           const code = msg.split(":")[0] ?? "ORDER_COMMAND_ERROR";
           const status = code === "ORDER_COMMAND_FORBIDDEN" ? 403 : 409;
           sendError(res, status, code, msg, correlationId);
@@ -1139,13 +1638,17 @@ export function createApiServer(deps: {
       const orderEventsMatch = pathname.match(/^\/v1\/orders\/([^/]+)\/events$/);
       if (method === "GET" && orderEventsMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const orderId = orderEventsMatch[1] ?? "";
-        const evts = deps.repository.listOrderEvents
-          ? await deps.repository.listOrderEvents(orderId)
-          : (orderEventsByOrderId.get(orderId) ?? []);
+        const evts = await deps.repository.listOrderEvents(orderId);
         sendJson(res, 200, correlationId, { data: evts });
         return;
       }
@@ -1153,10 +1656,18 @@ export function createApiServer(deps: {
       // 14. POST /v1/payments/attempts (M12 — Enforces honest BLOCKED_MISSING_CREDENTIALS when PSP keys are absent)
       if (method === "POST" && pathname === "/v1/payments/attempts") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1173,18 +1684,30 @@ export function createApiServer(deps: {
         const providerCode = String(body.providerCode ?? "stripe");
         const paymentMethod = (body.paymentMethod ?? "PIX") as PaymentMethodCode;
 
-        const order = deps.repository.getOrderById
-          ? await deps.repository.getOrderById(orderId)
-          : (ordersById.get(orderId) ?? null);
+        const order = await deps.repository.getOrderById(orderId);
         if (!order) {
-          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
           return;
         }
 
         const providerStatuses = inspectProviderReadiness(env);
-        const pspProvider = providerStatuses.find((p) => p.providerCode === providerCode);
+        const pspProvider = providerStatuses.find(
+          (p) => p.providerCode === providerCode
+        );
         if (!pspProvider) {
-          sendError(res, 400, "UNSUPPORTED_PSP", `Unknown PSP ${providerCode}.`, correlationId);
+          sendError(
+            res,
+            400,
+            "UNSUPPORTED_PSP",
+            `Unknown PSP ${providerCode}.`,
+            correlationId
+          );
           return;
         }
 
@@ -1195,13 +1718,22 @@ export function createApiServer(deps: {
             missingEnvVars: pspProvider.missingEnvVars,
           });
         } catch (blockedErr) {
-          const msg = blockedErr instanceof Error ? blockedErr.message : "PSP provider blocked";
-          sendError(res, 503, "PSP_PROVIDER_BLOCKED_MISSING_CREDENTIALS", msg, correlationId);
+          const msg =
+            blockedErr instanceof Error
+              ? blockedErr.message
+              : "PSP provider blocked";
+          sendError(
+            res,
+            503,
+            "PSP_PROVIDER_BLOCKED_MISSING_CREDENTIALS",
+            msg,
+            correlationId
+          );
           return;
         }
 
         const attempt: PaymentAttemptContract = {
-          id: `pay_${Date.now()}`,
+          id: crypto.randomUUID(),
           orderId: order.id,
           customerId: actor.id,
           providerCode,
@@ -1209,13 +1741,13 @@ export function createApiServer(deps: {
           amountCents: order.totalCents,
           currencyCode: CURRENCY_CODE,
           status: "PENDING",
-          externalPaymentId: `ext_${providerCode}_${Date.now()}`,
+          externalPaymentId: `ext_${providerCode}_${crypto.randomUUID()}`,
           idempotencyKey,
           isSandbox: true,
           errorCode: null,
           createdAtIso: new Date().toISOString(),
         };
-        paymentAttemptsById.set(attempt.id, attempt);
+        await deps.repository.savePaymentAttempt(attempt);
         sendJson(res, 201, correlationId, { data: attempt });
         return;
       }
@@ -1223,10 +1755,18 @@ export function createApiServer(deps: {
       // 15. POST /v1/refunds (M12 — Enforces MFA aal2, ABAC maxRefundApprovalCents, and captured ceiling)
       if (method === "POST" && pathname === "/v1/refunds") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1239,21 +1779,39 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const orderId = String(body.orderId ?? "");
-        const paymentAttemptId = String(body.paymentAttemptId ?? "pay_default");
+        const orderId = String(body.orderId ?? "").trim();
+        const paymentAttemptId = String(body.paymentAttemptId ?? "").trim();
         const amountCents = Number(body.amountCents ?? 0);
-        const reason = String(body.reason ?? "");
+        const reason = String(body.reason ?? "").trim();
 
-        const order = deps.repository.getOrderById
-          ? await deps.repository.getOrderById(orderId)
-          : (ordersById.get(orderId) ?? null);
-        if (!order) {
-          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+        if (!orderId || !paymentAttemptId) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "orderId and paymentAttemptId are required.",
+            correlationId
+          );
           return;
         }
 
-        const priorRefunds = refundsByOrderId.get(order.id) ?? [];
-        const alreadyRefundedCents = priorRefunds.reduce((sum, r) => sum + r.amountCents, 0);
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const priorRefunds = await deps.repository.listRefundsByOrder(order.id);
+        const alreadyRefundedCents = priorRefunds.reduce(
+          (sum, r) => sum + r.amountCents,
+          0
+        );
         const maxCeiling = Math.max(
           0,
           ...actor.staffScopes.map((s) => s.maxRefundApprovalCents)
@@ -1271,7 +1829,7 @@ export function createApiServer(deps: {
           });
 
           const refundRecord: RefundRecordContract = {
-            id: `ref_${Date.now()}`,
+            id: crypto.randomUUID(),
             orderId: order.id,
             paymentAttemptId,
             amountCents,
@@ -1282,21 +1840,24 @@ export function createApiServer(deps: {
             idempotencyKey,
             createdAtIso: new Date().toISOString(),
           };
-          priorRefunds.push(refundRecord);
-          refundsByOrderId.set(order.id, priorRefunds);
 
           const updatedOrder: OrderRecordContract = {
             ...order,
             paymentStatus: evalResult.newPaymentStatus,
             orderStatus:
-              evalResult.newPaymentStatus === "REFUNDED" ? "REFUNDED" : order.orderStatus,
+              evalResult.newPaymentStatus === "REFUNDED"
+                ? "REFUNDED"
+                : order.orderStatus,
             version: order.version + 1,
             updatedAtIso: new Date().toISOString(),
           };
-          ordersById.set(order.id, updatedOrder);
+          await deps.repository.saveRefundAndUpdateOrder(
+            refundRecord,
+            updatedOrder
+          );
 
           await deps.repository.appendAuditLog({
-            id: `aud_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             action: "ORDER_REFUND_APPROVED",
             targetType: "ORDER",
@@ -1314,10 +1875,12 @@ export function createApiServer(deps: {
           sendJson(res, 201, correlationId, { data: refundRecord });
           return;
         } catch (refErr) {
-          const msg = refErr instanceof Error ? refErr.message : "Refund rejected";
+          const msg =
+            refErr instanceof Error ? refErr.message : "Refund rejected";
           const code = msg.split(":")[0] ?? "REFUND_ERROR";
           const status =
-            code === "REFUND_MFA_AAL2_REQUIRED" || code === "REFUND_ABAC_LIMIT_EXCEEDED"
+            code === "REFUND_MFA_AAL2_REQUIRED" ||
+            code === "REFUND_ABAC_LIMIT_EXCEEDED"
               ? 403
               : 409;
           sendError(res, status, code, msg, correlationId);
@@ -1326,14 +1889,24 @@ export function createApiServer(deps: {
       }
 
       // 16. PATCH /v1/stores/:storeId/settings (M07 — Partner store pause/unpause, prep time, minOrderCents)
-      const storeSettingsMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/settings$/);
+      const storeSettingsMatch = pathname.match(
+        /^\/v1\/stores\/([^/]+)\/settings$/
+      );
       if (method === "PATCH" && storeSettingsMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const storeId = storeSettingsMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1346,9 +1919,21 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const organizationId = String(
-          body.organizationId ?? "00000000-0000-4000-8000-000000000101"
-        );
+        const targetStore = await deps.repository.getStoreById(storeId, locale);
+        if (!targetStore) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Store ${storeId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const organizationId = body.organizationId
+          ? String(body.organizationId)
+          : targetStore.organizationId;
         const decision = authorizePartnerScope({
           actor,
           organizationId,
@@ -1357,14 +1942,13 @@ export function createApiServer(deps: {
         });
 
         if (!decision.allowed) {
-          sendError(res, 403, decision.reasonCode, "Not authorized to update store settings.", correlationId);
-          return;
-        }
-
-        const stores = await deps.repository.listPublishedStores(locale);
-        const targetStore = stores.find((s) => s.id === storeId);
-        if (!targetStore) {
-          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to update store settings.",
+            correlationId
+          );
           return;
         }
 
@@ -1372,9 +1956,12 @@ export function createApiServer(deps: {
           const patch: StoreSettingsPatchContract = {};
           if (body.isPaused !== undefined) patch.isPaused = Boolean(body.isPaused);
           if (body.pauseReason !== undefined) {
-            patch.pauseReason = body.pauseReason ? String(body.pauseReason) : null;
+            patch.pauseReason = body.pauseReason
+              ? String(body.pauseReason)
+              : null;
           }
-          if (body.minOrderCents !== undefined) patch.minOrderCents = Number(body.minOrderCents);
+          if (body.minOrderCents !== undefined)
+            patch.minOrderCents = Number(body.minOrderCents);
           if (body.prepTimeMinMinutes !== undefined) {
             patch.prepTimeMinMinutes = Number(body.prepTimeMinMinutes);
           }
@@ -1383,28 +1970,30 @@ export function createApiServer(deps: {
           }
           validateStoreSettingsPatch(patch);
 
-          const mergedPatch: StoreSettingsPatchContract = {
-            ...(storeOverridesById.get(storeId) ?? {}),
-            ...patch,
-          };
-          storeOverridesById.set(storeId, mergedPatch);
-
-          const updatedStore: PublishedStoreContract = {
-            ...targetStore,
-            isPaused: mergedPatch.isPaused ?? targetStore.isPaused,
-            minOrderCents: mergedPatch.minOrderCents ?? targetStore.minOrderCents,
-            prepTimeMinMinutes: mergedPatch.prepTimeMinMinutes ?? targetStore.prepTimeMinMinutes,
-            prepTimeMaxMinutes: mergedPatch.prepTimeMaxMinutes ?? targetStore.prepTimeMaxMinutes,
-          };
+          const updatedStore = await deps.repository.updateStoreSettings(
+            storeId,
+            patch,
+            locale
+          );
+          if (!updatedStore) {
+            sendError(
+              res,
+              404,
+              "STORE_NOT_FOUND",
+              `Store ${storeId} not found.`,
+              correlationId
+            );
+            return;
+          }
 
           await deps.repository.appendAuditLog({
-            id: `aud_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             action: "STORE_SETTINGS_UPDATED",
             targetType: "STORE",
             targetId: storeId,
             correlationId,
-            reason: mergedPatch.pauseReason ?? "Updated store operational settings",
+            reason: patch.pauseReason ?? "Updated store operational settings",
             redactedPayload: {
               isPaused: updatedStore.isPaused,
               minOrderCents: updatedStore.minOrderCents,
@@ -1417,21 +2006,40 @@ export function createApiServer(deps: {
           sendJson(res, 200, correlationId, { data: updatedStore });
           return;
         } catch (patchErr) {
-          const msg = patchErr instanceof Error ? patchErr.message : "Invalid store settings patch";
-          sendError(res, 400, msg.split(":")[0] ?? "STORE_SETTINGS_ERROR", msg, correlationId);
+          const msg =
+            patchErr instanceof Error
+              ? patchErr.message
+              : "Invalid store settings patch";
+          sendError(
+            res,
+            400,
+            msg.split(":")[0] ?? "STORE_SETTINGS_ERROR",
+            msg,
+            correlationId
+          );
           return;
         }
       }
 
       // 17. POST /v1/stores/:storeId/bank-account-change-request (M07 — Requires partner_owner + MFA aal2; PENDING only)
-      const bankChangeMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/bank-account-change-request$/);
+      const bankChangeMatch = pathname.match(
+        /^\/v1\/stores\/([^/]+)\/bank-account-change-request$/
+      );
       if (method === "POST" && bankChangeMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const storeId = bankChangeMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1444,9 +2052,11 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const organizationId = String(
-          body.organizationId ?? "00000000-0000-4000-8000-000000000101"
-        );
+        const storeWithOrg = await deps.repository.getStoreById(storeId, locale);
+        const organizationId = body.organizationId
+          ? String(body.organizationId)
+          : (storeWithOrg?.organizationId ?? "");
+
         const decision = authorizePartnerScope({
           actor,
           organizationId,
@@ -1468,7 +2078,7 @@ export function createApiServer(deps: {
 
         try {
           const bankReq = createBankAccountChangeRequest({
-            id: `bank_req_${Date.now()}`,
+            id: crypto.randomUUID(),
             organizationId,
             storeId,
             requestedBy: actor.id,
@@ -1478,10 +2088,10 @@ export function createApiServer(deps: {
             accountLast4: String(body.accountLast4 ?? ""),
             reason: String(body.reason ?? ""),
           });
-          bankChangeRequestsById.set(bankReq.id, bankReq);
+          await deps.repository.saveBankAccountChangeRequest(bankReq);
 
           await deps.repository.appendAuditLog({
-            id: `aud_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             action: "BANK_ACCOUNT_CHANGE_REQUESTED",
             targetType: "BANK_ACCOUNT",
@@ -1500,50 +2110,90 @@ export function createApiServer(deps: {
           sendJson(res, 201, correlationId, { data: bankReq });
           return;
         } catch (bankErr) {
-          const msg = bankErr instanceof Error ? bankErr.message : "Invalid bank change request";
-          sendError(res, 400, msg.split(":")[0] ?? "BANK_CHANGE_ERROR", msg, correlationId);
+          const msg =
+            bankErr instanceof Error
+              ? bankErr.message
+              : "Invalid bank change request";
+          sendError(
+            res,
+            400,
+            msg.split(":")[0] ?? "BANK_CHANGE_ERROR",
+            msg,
+            correlationId
+          );
           return;
         }
       }
 
       // 18. GET /v1/stores/:storeId/orders-queue (M08 — Kitchen Order Console Queue with SLA & pause resilience)
-      const ordersQueueMatch = pathname.match(/^\/v1\/stores\/([^/]+)\/orders-queue$/);
+      const ordersQueueMatch = pathname.match(
+        /^\/v1\/stores\/([^/]+)\/orders-queue$/
+      );
       if (method === "GET" && ordersQueueMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const storeId = ordersQueueMatch[1] ?? "";
+        const store = await deps.repository.getStoreById(storeId, locale);
+        if (!store) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            `Store ${storeId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
         const organizationId =
-          parsedUrl.searchParams.get("organizationId") ?? "00000000-0000-4000-8000-000000000101";
+          parsedUrl.searchParams.get("organizationId") ?? store.organizationId;
 
         const decision = authorizePartnerScope({
           actor,
           organizationId,
           storeId,
-          allowedRoles: ["partner_owner", "partner_manager", "partner_operator", "partner_support"],
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_support",
+          ],
         });
 
         if (!decision.allowed && actor.staffScopes.length === 0) {
-          sendError(res, 403, decision.reasonCode, "Access to store order queue denied.", correlationId);
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Access to store order queue denied.",
+            correlationId
+          );
           return;
         }
 
-        const stores = await deps.repository.listPublishedStores(locale);
-        const store = stores.find((s) => s.id === storeId);
-        const override = storeOverridesById.get(storeId);
-        const isStorePaused = override?.isPaused ?? store?.isPaused ?? false;
-
-        const storeOrders = Array.from(ordersById.values()).filter((o) => o.storeId === storeId);
-        const allStoreEvents = storeOrders.flatMap((o) => orderEventsByOrderId.get(o.id) ?? []);
+        const storeOrders = await deps.repository.listOrdersByStore(storeId);
+        const eventLists = await Promise.all(
+          storeOrders.map((o) => deps.repository.listOrderEvents(o.id))
+        );
+        const allStoreEvents = eventLists.flat();
         const latestEventCursor =
-          allStoreEvents.length > 0 ? (allStoreEvents[allStoreEvents.length - 1]?.id ?? null) : null;
+          allStoreEvents.length > 0
+            ? (allStoreEvents[allStoreEvents.length - 1]?.id ?? null)
+            : null;
 
         const queue = buildKitchenOrderQueue({
           storeId,
-          isStorePaused,
+          isStorePaused: store.isPaused,
           orders: storeOrders,
-          prepTimeMaxMinutes: override?.prepTimeMaxMinutes ?? store?.prepTimeMaxMinutes ?? 35,
+          prepTimeMaxMinutes: store.prepTimeMaxMinutes ?? 35,
           latestEventCursor,
         });
 
@@ -1554,10 +2204,18 @@ export function createApiServer(deps: {
       // 19. POST /v1/admin/staff-scopes (M16 — Enforces tech_admin + MFA aal2 + blocks self-grant)
       if (method === "POST" && pathname === "/v1/admin/staff-scopes") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1596,8 +2254,13 @@ export function createApiServer(deps: {
           return;
         }
 
+        await deps.repository.grantStaffScope({
+          ...grantRequest,
+          grantedBy: actor.id,
+        });
+
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "STAFF_SCOPE_GRANTED",
           targetType: "STAFF_SCOPE",
@@ -1624,10 +2287,18 @@ export function createApiServer(deps: {
       // 20. POST /v1/admin/governance-actions (M16 — Suspensions, Reactivations & Approvals with MFA aal2)
       if (method === "POST" && pathname === "/v1/admin/governance-actions") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1642,18 +2313,24 @@ export function createApiServer(deps: {
         const { json: body } = await readRawAndJsonBody(req);
         try {
           const actionRecord = evaluateAdminGovernanceDecision({
-            id: `gov_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             actorAal: actor.aal,
             actorRoles: actor.staffScopes.map((s) => s.role),
-            targetType: String(body.targetType ?? "STORE") as AdminGovernanceActionContract["targetType"],
+            targetType: String(
+              body.targetType ?? "STORE"
+            ) as AdminGovernanceActionContract["targetType"],
             targetId: String(body.targetId ?? ""),
-            decision: String(body.decision ?? "APPROVED") as AdminGovernanceActionContract["decision"],
+            decision: String(
+              body.decision ?? "APPROVED"
+            ) as AdminGovernanceActionContract["decision"],
             reason: String(body.reason ?? ""),
           });
 
+          await deps.repository.saveGovernanceApprovalEvent(actionRecord);
+
           await deps.repository.appendAuditLog({
-            id: `aud_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             action: `ADMIN_GOVERNANCE_${actionRecord.decision}`,
             targetType: actionRecord.targetType,
@@ -1670,9 +2347,13 @@ export function createApiServer(deps: {
           sendJson(res, 201, correlationId, { data: actionRecord });
           return;
         } catch (govErr) {
-          const msg = govErr instanceof Error ? govErr.message : "Governance action denied";
+          const msg =
+            govErr instanceof Error
+              ? govErr.message
+              : "Governance action denied";
           const code = msg.split(":")[0] ?? "ADMIN_GOVERNANCE_ERROR";
-          const status = code.includes("FORBIDDEN") || code.includes("MFA") ? 403 : 400;
+          const status =
+            code.includes("FORBIDDEN") || code.includes("MFA") ? 403 : 400;
           sendError(res, status, code, msg, correlationId);
           return;
         }
@@ -1681,12 +2362,23 @@ export function createApiServer(deps: {
       // 21. GET /v1/admin/audit-logs (M16 — Read-Only Audit Trail for Authorized Staff with MFA aal2)
       if (method === "GET" && pathname === "/v1/admin/audit-logs") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const staffDecision = authorizeStaffAction({
           actor,
-          allowedRoles: ["operations", "finance", "risk_compliance", "tech_admin"],
+          allowedRoles: [
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ],
           requireMfaAal2: true,
         });
         if (!staffDecision.allowed) {
@@ -1707,10 +2399,18 @@ export function createApiServer(deps: {
       // 22. POST /v1/finance/reconciliation-runs (M13 — PSP Reconciliation in BRL cents; requires finance/tech_admin + MFA aal2)
       if (method === "POST" && pathname === "/v1/finance/reconciliation-runs") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1740,17 +2440,25 @@ export function createApiServer(deps: {
 
         const { json: body } = await readRawAndJsonBody(req);
         const runResult = evaluatePspReconciliationRun({
-          runId: `recon_${Date.now()}`,
+          runId: crypto.randomUUID(),
           providerCode: String(body.providerCode ?? "stripe"),
           runDate: String(body.runDate ?? new Date().toISOString().slice(0, 10)),
           expectedOrders:
-            (body.expectedOrders as Array<{ orderId: string; totalCents: number }>) ?? [],
+            (body.expectedOrders as Array<{
+              orderId: string;
+              totalCents: number;
+            }>) ?? [],
           pspReportedCaptures:
-            (body.pspReportedCaptures as Array<{ orderId: string; capturedCents: number }>) ?? [],
+            (body.pspReportedCaptures as Array<{
+              orderId: string;
+              capturedCents: number;
+            }>) ?? [],
         });
 
+        await deps.repository.saveReconciliationRun(runResult);
+
         await deps.repository.appendAuditLog({
-          id: `aud_${Date.now()}`,
+          id: crypto.randomUUID(),
           actorId: actor.id,
           action: "PSP_RECONCILIATION_RUN_COMPLETED",
           targetType: "RECONCILIATION_RUN",
@@ -1771,14 +2479,24 @@ export function createApiServer(deps: {
       }
 
       // 23. POST /v1/finance/settlements/:settlementId/execute (M13 — Payout execution with Segregation of Duties & BLOCKED_NO_PSP)
-      const settlementExecMatch = pathname.match(/^\/v1\/finance\/settlements\/([^/]+)\/execute$/);
+      const settlementExecMatch = pathname.match(
+        /^\/v1\/finance\/settlements\/([^/]+)\/execute$/
+      );
       if (method === "POST" && settlementExecMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const settlementId = settlementExecMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1793,21 +2511,48 @@ export function createApiServer(deps: {
         const { json: body } = await readRawAndJsonBody(req);
         const providerCode = String(body.providerCode ?? "stripe");
         const providerStatuses = inspectProviderReadiness(env);
-        const pspProvider = providerStatuses.find((p) => p.providerCode === providerCode);
+        const pspProvider = providerStatuses.find(
+          (p) => p.providerCode === providerCode
+        );
         const pspStatus = pspProvider?.status ?? "BLOCKED_MISSING_CREDENTIALS";
 
-        const existingSettlement: SettlementRecordContract = settlementsById.get(settlementId) ?? {
-          id: settlementId,
-          organizationId: body.organizationId ? String(body.organizationId) : "00000000-0000-4000-8000-000000000101",
-          courierId: body.courierId ? String(body.courierId) : null,
-          periodStart: "2026-11-01",
-          periodEnd: "2026-11-03",
-          amountCents: Number(body.amountCents ?? 42500),
-          status: "SCHEDULED",
-          approvedBy: null,
-          externalPayoutReference: null,
-          createdAtIso: new Date().toISOString(),
-        };
+        const storedSettlement =
+          await deps.repository.getSettlementById(settlementId);
+        if (
+          !storedSettlement &&
+          !body.organizationId &&
+          !body.courierId &&
+          !body.bankAccountApprovedByActorId
+        ) {
+          sendError(
+            res,
+            404,
+            "SETTLEMENT_NOT_FOUND",
+            `Settlement ${settlementId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const existingSettlement: SettlementRecordContract =
+          storedSettlement ?? {
+            id: settlementId,
+            organizationId: body.organizationId
+              ? String(body.organizationId)
+              : null,
+            courierId: body.courierId ? String(body.courierId) : null,
+            periodStart: String(
+              body.periodStart ?? new Date().toISOString().slice(0, 10)
+            ),
+            periodEnd: String(
+              body.periodEnd ?? new Date().toISOString().slice(0, 10)
+            ),
+            amountCents: Number(body.amountCents ?? 0),
+            status: "SCHEDULED",
+            approvedBy: null,
+            externalPayoutReference: null,
+            createdAtIso: new Date().toISOString(),
+          };
 
         try {
           const updatedSettlement = evaluateSettlementPayoutExecution({
@@ -1823,10 +2568,10 @@ export function createApiServer(deps: {
               ? String(body.externalPayoutReference)
               : null,
           });
-          settlementsById.set(settlementId, updatedSettlement);
+          await deps.repository.saveSettlement(updatedSettlement);
 
           await deps.repository.appendAuditLog({
-            id: `aud_${Date.now()}`,
+            id: crypto.randomUUID(),
             actorId: actor.id,
             action: `SETTLEMENT_PAYOUT_${updatedSettlement.status}`,
             targetType: "SETTLEMENT",
@@ -1836,7 +2581,8 @@ export function createApiServer(deps: {
             redactedPayload: {
               amountCents: updatedSettlement.amountCents,
               status: updatedSettlement.status,
-              externalPayoutReference: updatedSettlement.externalPayoutReference,
+              externalPayoutReference:
+                updatedSettlement.externalPayoutReference,
             },
             createdAt: new Date().toISOString(),
           });
@@ -1844,7 +2590,10 @@ export function createApiServer(deps: {
           sendJson(res, 200, correlationId, { data: updatedSettlement });
           return;
         } catch (settleErr) {
-          const msg = settleErr instanceof Error ? settleErr.message : "Settlement execution denied";
+          const msg =
+            settleErr instanceof Error
+              ? settleErr.message
+              : "Settlement execution denied";
           const code = msg.split(":")[0] ?? "SETTLEMENT_ERROR";
           const status =
             code.includes("FORBIDDEN") ||
@@ -1860,7 +2609,13 @@ export function createApiServer(deps: {
       // 24. POST /v1/logistics/offers (M14 — Create delivery task & courier offer with neighborhood-only privacy)
       if (method === "POST" && pathname === "/v1/logistics/offers") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const dispatchDecision = authorizeStaffAction({
@@ -1879,25 +2634,59 @@ export function createApiServer(deps: {
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
-        const taskId = String(body.deliveryTaskId ?? `dtask_${Date.now()}`);
-        const offerId = String(body.offerId ?? `doff_${Date.now()}`);
-        const fullAddress = String(
-          body.dropoffFullAddress ?? "Av. Paulista, 1578 - Apt 42, Bela Vista"
-        );
-        const confirmationCode = String(body.confirmationCode ?? "4829");
+        const taskId = body.deliveryTaskId
+          ? String(body.deliveryTaskId)
+          : crypto.randomUUID();
+        const offerId = body.offerId ? String(body.offerId) : crypto.randomUUID();
+        const fullAddress = String(body.dropoffFullAddress ?? "").trim();
+        const dropoffNeighborhoodOnly = String(
+          body.dropoffNeighborhoodOnly ?? ""
+        ).trim();
+        const confirmationCode = String(body.confirmationCode ?? "").trim();
 
-        const existingTask = deliveryTasksById.get(taskId);
-        const task: DeliveryTaskContract = existingTask ?? {
+        if (!fullAddress || !dropoffNeighborhoodOnly || !confirmationCode) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "dropoffFullAddress, dropoffNeighborhoodOnly, and confirmationCode are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const existingTaskBundle =
+          await deps.repository.getDeliveryTaskById(taskId);
+        const stores = await deps.repository.listPublishedStores(locale);
+        const resolvedStore = body.storeId
+          ? await deps.repository.getStoreById(String(body.storeId), locale)
+          : (stores[0] ?? null);
+        if (!resolvedStore) {
+          sendError(
+            res,
+            404,
+            "STORE_NOT_FOUND",
+            "Target store for delivery task not found.",
+            correlationId
+          );
+          return;
+        }
+
+        const task: DeliveryTaskContract = existingTaskBundle?.task ?? {
           id: taskId,
-          orderId: String(body.orderId ?? "ord_10011"),
-          storeId: String(body.storeId ?? "00000000-0000-4000-8000-000000000201"),
+          orderId: body.orderId ? String(body.orderId) : crypto.randomUUID(),
+          storeId: resolvedStore.id,
           fulfillmentModality: "PLATFORM_DELIVERY",
           status: "OFFERING",
-          pickupLatitude: Number(body.pickupLatitude ?? -23.561414),
-          pickupLongitude: Number(body.pickupLongitude ?? -46.655881),
+          pickupLatitude: Number(
+            body.pickupLatitude ?? resolvedStore.latitude ?? 0
+          ),
+          pickupLongitude: Number(
+            body.pickupLongitude ?? resolvedStore.longitude ?? 0
+          ),
           dropoffLatitude: Number(body.dropoffLatitude ?? -23.56398),
           dropoffLongitude: Number(body.dropoffLongitude ?? -46.66912),
-          dropoffNeighborhoodOnly: String(body.dropoffNeighborhoodOnly ?? "Bela Vista"),
+          dropoffNeighborhoodOnly,
           dropoffFullAddress: null, // Hidden until accepted!
           courierFeeCents: Number(body.offeredFeeCents ?? 850),
           distanceMeters: Number(body.distanceMeters ?? 1420),
@@ -1907,9 +2696,6 @@ export function createApiServer(deps: {
           completedAtIso: null,
           createdAtIso: new Date().toISOString(),
         };
-        deliveryTasksById.set(task.id, task);
-        deliveryTaskFullAddressById.set(task.id, fullAddress);
-        deliveryTaskOtpHashById.set(task.id, hashDeliveryConfirmationCode(confirmationCode));
 
         const offer: DeliveryOfferContract = {
           id: offerId,
@@ -1917,7 +2703,9 @@ export function createApiServer(deps: {
           courierId: String(body.courierId ?? actor.id),
           offeredFeeCents: Number(body.offeredFeeCents ?? 850),
           status: "OFFERED",
-          pickupStoreName: String(body.pickupStoreName ?? "Paulista Artisan Burger"),
+          pickupStoreName: body.pickupStoreName
+            ? String(body.pickupStoreName)
+            : resolvedStore.name,
           distanceMeters: task.distanceMeters,
           dropoffNeighborhoodOnly: task.dropoffNeighborhoodOnly,
           expiresAtIso: String(
@@ -1925,21 +2713,37 @@ export function createApiServer(deps: {
           ),
           respondedAtIso: null,
         };
-        deliveryOffersById.set(offer.id, offer);
+
+        await deps.repository.saveDeliveryTaskAndOffer({
+          task,
+          fullAddress,
+          confirmationCodeHash: hashDeliveryConfirmationCode(confirmationCode),
+          offer,
+        });
 
         sendJson(res, 201, correlationId, { data: { offer, task } });
         return;
       }
 
       // 25. POST /v1/logistics/offers/:offerId/accept (M14/M11 — Transactional single-courier assignment & address reveal)
-      const offerAcceptMatch = pathname.match(/^\/v1\/logistics\/offers\/([^/]+)\/accept$/);
+      const offerAcceptMatch = pathname.match(
+        /^\/v1\/logistics\/offers\/([^/]+)\/accept$/
+      );
       if (method === "POST" && offerAcceptMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const offerId = offerAcceptMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -1951,31 +2755,46 @@ export function createApiServer(deps: {
           return;
         }
 
-        const offer = deliveryOffersById.get(offerId);
+        const offer = await deps.repository.getDeliveryOfferById(offerId);
         if (!offer) {
-          sendError(res, 404, "DELIVERY_OFFER_NOT_FOUND", `Offer ${offerId} not found.`, correlationId);
+          sendError(
+            res,
+            404,
+            "DELIVERY_OFFER_NOT_FOUND",
+            `Offer ${offerId} not found.`,
+            correlationId
+          );
           return;
         }
-        const task = deliveryTasksById.get(offer.deliveryTaskId);
-        if (!task) {
-          sendError(res, 404, "DELIVERY_TASK_NOT_FOUND", `Task ${offer.deliveryTaskId} not found.`, correlationId);
+        const taskBundle = await deps.repository.getDeliveryTaskById(
+          offer.deliveryTaskId
+        );
+        if (!taskBundle || !taskBundle.fullAddress) {
+          sendError(
+            res,
+            404,
+            "DELIVERY_TASK_NOT_FOUND",
+            `Task ${offer.deliveryTaskId} not found.`,
+            correlationId
+          );
           return;
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const fullAddress =
-          deliveryTaskFullAddressById.get(task.id) ?? "Av. Paulista, 1578 - Apt 42, Bela Vista";
 
         try {
           const accepted = acceptDeliveryOfferTransactional({
             offer,
-            task,
+            task: taskBundle.task,
             actorCourierId: actor.id,
             isCourierOnline: body.isCourierOnline !== false,
-            fullCustomerAddress: fullAddress,
+            fullCustomerAddress: taskBundle.fullAddress,
           });
-          deliveryOffersById.set(offer.id, accepted.updatedOffer);
-          deliveryTasksById.set(task.id, accepted.updatedTask);
+          await deps.repository.saveAcceptedDeliveryOffer({
+            offer: accepted.updatedOffer,
+            task: accepted.updatedTask,
+            fullAddress: taskBundle.fullAddress,
+          });
 
           sendJson(res, 200, correlationId, {
             data: {
@@ -1985,7 +2804,10 @@ export function createApiServer(deps: {
           });
           return;
         } catch (acceptErr) {
-          const msg = acceptErr instanceof Error ? acceptErr.message : "Offer acceptance failed";
+          const msg =
+            acceptErr instanceof Error
+              ? acceptErr.message
+              : "Offer acceptance failed";
           const code = msg.split(":")[0] ?? "DELIVERY_OFFER_ERROR";
           const status = code === "DELIVERY_OFFER_FORBIDDEN" ? 403 : 409;
           sendError(res, status, code, msg, correlationId);
@@ -1996,10 +2818,18 @@ export function createApiServer(deps: {
       // 26. POST /v1/logistics/location-samples (M14/M11 — GPS telemetry validation with staleness & accuracy flags)
       if (method === "POST" && pathname === "/v1/logistics/location-samples") {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -2012,9 +2842,13 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const deliveryTaskId = body.deliveryTaskId ? String(body.deliveryTaskId) : null;
-        const task = deliveryTaskId ? (deliveryTasksById.get(deliveryTaskId) ?? null) : null;
-        if (deliveryTaskId && !task) {
+        const deliveryTaskId = body.deliveryTaskId
+          ? String(body.deliveryTaskId)
+          : null;
+        const taskBundle = deliveryTaskId
+          ? await deps.repository.getDeliveryTaskById(deliveryTaskId)
+          : null;
+        if (deliveryTaskId && !taskBundle) {
           sendError(
             res,
             404,
@@ -2027,19 +2861,27 @@ export function createApiServer(deps: {
 
         try {
           const sample = evaluateCourierLocationSample({
-            sampleId: `loc_${Date.now()}`,
+            sampleId: crypto.randomUUID(),
             courierId: actor.id,
             deliveryTaskId,
-            activeCourierIdForTask: task ? task.activeCourierId : null,
+            activeCourierIdForTask: taskBundle
+              ? taskBundle.task.activeCourierId
+              : null,
             latitude: Number(body.latitude ?? 0),
             longitude: Number(body.longitude ?? 0),
             accuracyMeters: Number(body.accuracyMeters ?? 10),
-            recordedAtIso: String(body.recordedAtIso ?? new Date().toISOString()),
+            recordedAtIso: String(
+              body.recordedAtIso ?? new Date().toISOString()
+            ),
           });
+          await deps.repository.saveCourierLocationSample(sample);
           sendJson(res, 201, correlationId, { data: sample });
           return;
         } catch (locErr) {
-          const msg = locErr instanceof Error ? locErr.message : "Invalid location sample";
+          const msg =
+            locErr instanceof Error
+              ? locErr.message
+              : "Invalid location sample";
           const code = msg.split(":")[0] ?? "LOCATION_SAMPLE_ERROR";
           const status = code.includes("FORBIDDEN") ? 403 : 400;
           sendError(res, status, code, msg, correlationId);
@@ -2048,14 +2890,24 @@ export function createApiServer(deps: {
       }
 
       // 27. POST /v1/logistics/tasks/:taskId/complete (M14/M11 — Proof-of-Delivery 4-digit OTP Verification)
-      const taskCompleteMatch = pathname.match(/^\/v1\/logistics\/tasks\/([^/]+)\/complete$/);
+      const taskCompleteMatch = pathname.match(
+        /^\/v1\/logistics\/tasks\/([^/]+)\/complete$/
+      );
       if (method === "POST" && taskCompleteMatch) {
         if (!actor) {
-          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
           return;
         }
         const taskId = taskCompleteMatch[1] ?? "";
-        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        const idempotencyKey = req.headers["x-idempotency-key"] as
+          | string
+          | undefined;
         if (!idempotencyKey || idempotencyKey.trim().length < 8) {
           sendError(
             res,
@@ -2067,11 +2919,19 @@ export function createApiServer(deps: {
           return;
         }
 
-        const task = deliveryTasksById.get(taskId);
-        if (!task) {
-          sendError(res, 404, "DELIVERY_TASK_NOT_FOUND", `Task ${taskId} not found.`, correlationId);
+        const taskBundle = await deps.repository.getDeliveryTaskById(taskId);
+        if (!taskBundle) {
+          sendError(
+            res,
+            404,
+            "DELIVERY_TASK_NOT_FOUND",
+            `Task ${taskId} not found.`,
+            correlationId
+          );
           return;
         }
+        const { task, confirmationCodeHash } = taskBundle;
+
         const isLogisticsStaff = authorizeStaffAction({
           actor,
           allowedRoles: ["operations", "tech_admin"],
@@ -2099,56 +2959,65 @@ export function createApiServer(deps: {
         }
 
         const { json: body } = await readRawAndJsonBody(req);
-        const providedCode = String(body.confirmationCode ?? "");
-        const expectedHash = deliveryTaskOtpHashById.get(taskId);
-        if (!expectedHash) {
+        const candidateOtp = String(body.confirmationCode ?? "");
+        if (!confirmationCodeHash) {
           sendError(
             res,
             409,
-            "DELIVERY_OTP_NOT_PROVISIONED",
-            "No proof-of-delivery code was provisioned for this task.",
+            "DELIVERY_OTP_NOT_SET",
+            "Delivery task does not have an OTP hash configured.",
             correlationId
           );
           return;
         }
 
-        if (
-          !verifyDeliveryConfirmationCode({
-            providedCode,
-            expectedCodeHash: expectedHash,
-          })
-        ) {
+        const otpValid = verifyDeliveryConfirmationCode({
+          providedCode: candidateOtp,
+          expectedCodeHash: confirmationCodeHash,
+        });
+        if (!otpValid) {
           sendError(
             res,
             409,
-            "DELIVERY_INVALID_OTP_CODE",
-            "Invalid 4-digit proof-of-delivery confirmation code.",
+            "DELIVERY_OTP_MISMATCH",
+            "Invalid 4-digit delivery confirmation code.",
             correlationId
           );
           return;
         }
 
-        const completedTask: DeliveryTaskContract = {
+        const updatedTask: DeliveryTaskContract = {
           ...task,
           status: "DELIVERED",
           completedAtIso: new Date().toISOString(),
         };
-        deliveryTasksById.set(taskId, completedTask);
+        await deps.repository.completeDeliveryTask(updatedTask);
 
-        sendJson(res, 200, correlationId, { data: completedTask });
+        sendJson(res, 200, correlationId, { data: updatedTask });
         return;
       }
 
-      sendError(res, 404, "ROUTE_NOT_FOUND", `Route ${method} ${pathname} not found.`, correlationId);
+      sendError(
+        res,
+        404,
+        "ROUTE_NOT_FOUND",
+        `Route ${method} ${pathname} not found.`,
+        correlationId
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unexpected internal server error";
       createStructuredLogEntry({
         level: "ERROR",
         service: "@ideliveryfood/api",
         correlationId,
-        message,
+        message: err instanceof Error ? err.message : "Unhandled API error",
       });
-      sendError(res, 500, "INTERNAL_SERVER_ERROR", message, correlationId);
+      sendError(
+        res,
+        500,
+        "INTERNAL_SERVER_ERROR",
+        "An unexpected server error occurred.",
+        correlationId
+      );
     }
   });
 }

@@ -7,12 +7,29 @@
  * 2. Zero private keys, service_role JWTs, or live PSP secrets in source files.
  */
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT_DIR = process.cwd();
 const IGNORED_DIRS = new Set([".git", "node_modules", "dist", ".next", "build", "coverage"]);
+
+function isGitIgnoredAndUntracked(dirPath, relPath) {
+  if (!fs.existsSync(path.join(dirPath, ".git"))) {
+    return false;
+  }
+  const safeDir = dirPath.replace(/\\/g, "/");
+  try {
+    execFileSync("git", ["-c", `safe.directory=${safeDir}`, "check-ignore", "-q", relPath], {
+      cwd: dirPath,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const FORBIDDEN_PATTERNS = [
   { name: "PEM Private Key", regex: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
@@ -37,10 +54,13 @@ export function scanDirectoryForSecrets(dirPath = ROOT_DIR) {
       }
 
       if (entry.name.startsWith(".env") && entry.name !== ".env.example") {
+        if (isGitIgnoredAndUntracked(dirPath, relPath)) {
+          continue;
+        }
         findings.push({
           file: relPath,
           rule: "Forbidden .env file",
-          detail: "Only .env.example templates may exist in the repository.",
+          detail: "Only .env.example templates may be tracked in the repository.",
         });
         continue;
       }
