@@ -26,6 +26,15 @@
                 <data
                     android:scheme="ideliveryfood-courier"
                     android:host="auth-callback" />
+                <data
+                    android:scheme="ideliveryfood-courier"
+                    android:host="offers" />
+                <data
+                    android:scheme="ideliveryfood-courier"
+                    android:host="tasks" />
+                <data
+                    android:scheme="ideliveryfood"
+                    android:host="courier" />
             </intent-filter>
         </activity>
     </application>

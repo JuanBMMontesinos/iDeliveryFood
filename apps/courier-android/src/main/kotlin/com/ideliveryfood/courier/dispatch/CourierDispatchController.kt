@@ -1,5 +1,9 @@
 package com.ideliveryfood.courier.dispatch
 
+import java.text.NumberFormat
+import java.util.Currency
+import java.util.Locale
+
 data class CourierOfferCardModel(
     val offerId: String,
     val deliveryTaskId: String,
@@ -67,6 +71,15 @@ class CourierDispatchController(
         return selectedLocale
     }
 
+    fun formatBrlCents(cents: Int): String {
+        require(cents >= 0) { "Monetary cents must be non-negative." }
+        val localeObj = if (selectedLocale == "pt-BR") Locale("pt", "BR") else Locale.US
+        val formatter = NumberFormat.getCurrencyInstance(localeObj).apply {
+            currency = Currency.getInstance("BRL")
+        }
+        return formatter.format(cents / 100.0)
+    }
+
     fun setOnlineAvailability(online: Boolean, gpsGranted: Boolean) {
         isGpsPermissionGranted = gpsGranted
         isOnline = online && gpsGranted
@@ -101,6 +114,33 @@ class CourierDispatchController(
         return accepted
     }
 
+    fun markArrivedAtStore(): CourierDeliveryStage {
+        require(stage == CourierDeliveryStage.ASSIGNED_EN_ROUTE_TO_STORE) {
+            "INVALID_DELIVERY_TRANSITION: Must be en route to store."
+        }
+        stage = CourierDeliveryStage.ARRIVED_AT_STORE
+        return stage
+    }
+
+    fun markPickedUpOrder(): CourierDeliveryStage {
+        require(
+            stage == CourierDeliveryStage.ARRIVED_AT_STORE ||
+                stage == CourierDeliveryStage.ASSIGNED_EN_ROUTE_TO_STORE
+        ) {
+            "INVALID_DELIVERY_TRANSITION: Must arrive at store before pickup."
+        }
+        stage = CourierDeliveryStage.PICKED_UP_EN_ROUTE_TO_CUSTOMER
+        return stage
+    }
+
+    fun markArrivedAtCustomer(): CourierDeliveryStage {
+        require(stage == CourierDeliveryStage.PICKED_UP_EN_ROUTE_TO_CUSTOMER) {
+            "INVALID_DELIVERY_TRANSITION: Must pick up order before arriving at customer."
+        }
+        stage = CourierDeliveryStage.ARRIVED_AT_CUSTOMER
+        return stage
+    }
+
     fun recordLocationSample(sample: CourierLocationQueueSample): Boolean {
         if (!isGpsPermissionGranted) {
             return false
@@ -113,6 +153,12 @@ class CourierDispatchController(
     }
 
     fun queuedOfflineSamplesCount(): Int = offlineLocationQueue.size
+
+    fun drainOfflineLocationQueue(): List<CourierLocationQueueSample> {
+        val snapshot = offlineLocationQueue.toList()
+        offlineLocationQueue.clear()
+        return snapshot
+    }
 
     fun attemptDeliveryCompletionWithOtp(
         providedOtp: String,

@@ -14,4 +14,22 @@
     <string name="courier_gps_permission_denied_notice">Location permission is denied. Live route tracking is paused; please enable GPS or contact support.</string>
     <string name="courier_pod_otp_label">Enter 4-digit customer confirmation code</string>
     <string name="courier_offline_completion_blocked_notice">Cannot finalize delivery while offline. Event queued for server verification.</string>
+    <string name="courier_onboarding_title">Courier Onboarding &amp; KYC Documents</string>
+    <string name="courier_onboarding_vehicle_label">Vehicle Modality (Motorcycle / Bicycle / Car)</string>
+    <string name="courier_onboarding_cnh_label">Driver License (CNH) / Document Number</string>
+    <string name="courier_onboarding_submit_cta">Submit KYC for Review</string>
+    <string name="courier_availability_title">Shift Availability &amp; GPS Telemetry</string>
+    <string name="courier_availability_toggle_online">Go Online for Dispatch</string>
+    <string name="courier_availability_toggle_offline">Go Offline</string>
+    <string name="courier_offer_ring_title">Incoming Delivery Offer</string>
+    <string name="courier_offer_accept_cta">Accept Offer</string>
+    <string name="courier_offer_reject_cta">Decline Offer</string>
+    <string name="courier_active_delivery_title">Active Delivery Progression</string>
+    <string name="courier_stage_arrived_store_cta">Confirm Arrived at Store</string>
+    <string name="courier_stage_picked_up_cta">Confirm Order Picked Up</string>
+    <string name="courier_stage_arrived_customer_cta">Confirm Arrived at Customer</string>
+    <string name="courier_stage_complete_otp_cta">Confirm Delivery with 4-Digit OTP</string>
+    <string name="courier_incident_title">Report Delivery / Route Incident</string>
+    <string name="courier_incident_submit_cta">Submit Incident Report</string>
+    <string name="courier_earnings_title">Earnings Statement &amp; Settlements</string>
 </resources>
