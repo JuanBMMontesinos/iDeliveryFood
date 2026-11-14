@@ -23,10 +23,14 @@ import {
   type CommercialProposalContract,
   type CommissionRuleVersionContract,
   type MarketingBackofficeOverviewContract,
+  type AnalyticalKpiSummaryContract,
+  type GovernanceBackofficeOverviewContract,
   type MerchantContractRecordContract,
   type OrderReviewContract,
+  type PrivacyRequestRecordContract,
   type PromotionCampaignContract,
   type PromotionRedemptionContract,
+  type RiskAlertContract,
 } from "@ideliveryfood/contracts";
 import {
   buildBalancedOrderCaptureJournal,
@@ -169,7 +173,11 @@ export function buildAdminRoleNavigationModules(
   ) {
     modules.push("GROWTH_PROMOTIONS");
   }
-  if (roles.has("risk_compliance") || roles.has("tech_admin")) {
+  if (
+    roles.has("risk_compliance") ||
+    roles.has("auditor_privacy") ||
+    roles.has("tech_admin")
+  ) {
     modules.push("RISK_COMPLIANCE_AND_LGPD");
   }
   if (roles.has("tech_admin")) {
@@ -744,6 +752,247 @@ export function buildMarketingBackofficeConsoleModel(params: {
   };
 }
 
+// ============================================================================
+// M21: Reproducible Analytical KPIs, Explainable Risk & LGPD Governance Models
+// ============================================================================
+
+export interface GovernanceAnalyticsConsoleModel {
+  authorized: boolean;
+  reconciliationBadge:
+    | "RECONCILED_WITH_LEDGER"
+    | "LEDGER_DIVERGENCE_DETECTED"
+    | "UNAUTHORIZED";
+  kpis: AnalyticalKpiSummaryContract | null;
+  formattedGmvBrl: string;
+  formattedNetRevenueBrl: string;
+  formattedPendingNetRevenueBrl: string;
+  formattedLedgerReconciledNetRevenueBrl: string;
+  formattedOperationalMarginBrl: string;
+  formattedCommissionBrl: string;
+  formattedServiceFeeBrl: string;
+  formattedPlatformSubsidyBrl: string;
+}
+
+export function buildGovernanceAnalyticsConsoleModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  kpis: AnalyticalKpiSummaryContract;
+  locale?: SupportedLocale;
+}): GovernanceAnalyticsConsoleModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const authz = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: [
+      "risk_compliance",
+      "auditor_privacy",
+      "finance",
+      "operations",
+      "tech_admin",
+    ],
+    requireMfaAal2: true,
+  });
+
+  if (!authz.allowed) {
+    return {
+      authorized: false,
+      reconciliationBadge: "UNAUTHORIZED",
+      kpis: null,
+      formattedGmvBrl: formatBrlCents(0, locale),
+      formattedNetRevenueBrl: formatBrlCents(0, locale),
+      formattedPendingNetRevenueBrl: formatBrlCents(0, locale),
+      formattedLedgerReconciledNetRevenueBrl: formatBrlCents(0, locale),
+      formattedOperationalMarginBrl: formatBrlCents(0, locale),
+      formattedCommissionBrl: formatBrlCents(0, locale),
+      formattedServiceFeeBrl: formatBrlCents(0, locale),
+      formattedPlatformSubsidyBrl: formatBrlCents(0, locale),
+    };
+  }
+
+  return {
+    authorized: true,
+    reconciliationBadge: params.kpis.isReconciledWithLedger
+      ? "RECONCILED_WITH_LEDGER"
+      : "LEDGER_DIVERGENCE_DETECTED",
+    kpis: params.kpis,
+    formattedGmvBrl: formatBrlCents(params.kpis.gmvCents, locale),
+    formattedNetRevenueBrl: formatBrlCents(params.kpis.netPlatformRevenueCents, locale),
+    formattedPendingNetRevenueBrl: formatBrlCents(
+      params.kpis.pendingPaymentNetRevenueCents,
+      locale
+    ),
+    formattedLedgerReconciledNetRevenueBrl: formatBrlCents(
+      params.kpis.ledgerReconciledNetRevenueCents,
+      locale
+    ),
+    formattedOperationalMarginBrl: formatBrlCents(
+      params.kpis.operationalMarginCents,
+      locale
+    ),
+    formattedCommissionBrl: formatBrlCents(
+      params.kpis.totalPlatformCommissionCents,
+      locale
+    ),
+    formattedServiceFeeBrl: formatBrlCents(
+      params.kpis.totalServiceFeeCents,
+      locale
+    ),
+    formattedPlatformSubsidyBrl: formatBrlCents(
+      params.kpis.totalPlatformCouponSubsidyCents,
+      locale
+    ),
+  };
+}
+
+export interface GovernanceRiskQueueModel {
+  authorized: boolean;
+  canExecuteHumanReview: boolean;
+  noAutoBanGuaranteeNotice: string;
+  alerts: readonly RiskAlertContract[];
+  openAlertsCount: number;
+  confirmedBlocksCount: number;
+  approvedOverridesCount: number;
+  dismissedCount: number;
+}
+
+export function buildGovernanceRiskQueueModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  alerts: readonly RiskAlertContract[];
+  locale?: SupportedLocale;
+}): GovernanceRiskQueueModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const viewAuthz = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["risk_compliance", "auditor_privacy", "operations", "tech_admin"],
+    requireMfaAal2: true,
+  });
+  const reviewAuthz = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["risk_compliance", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  const noAutoBanGuaranteeNotice =
+    locale === "pt-BR"
+      ? "Política anti-ban opaco ativa: toda regra explicável abre alerta com evidências determinísticas e exige revisão humana autenticada (MFA aal2) + justificativa auditável antes de qualquer suspensão."
+      : "No-opaque-auto-ban policy active: every explainable risk rule opens an evidence-backed alert requiring MFA aal2 human review and an auditable reason before account suspension.";
+
+  if (!viewAuthz.allowed) {
+    return {
+      authorized: false,
+      canExecuteHumanReview: false,
+      noAutoBanGuaranteeNotice,
+      alerts: [],
+      openAlertsCount: 0,
+      confirmedBlocksCount: 0,
+      approvedOverridesCount: 0,
+      dismissedCount: 0,
+    };
+  }
+
+  return {
+    authorized: true,
+    canExecuteHumanReview: reviewAuthz.allowed,
+    noAutoBanGuaranteeNotice,
+    alerts: params.alerts,
+    openAlertsCount: params.alerts.filter(
+      (a) => a.status === "OPEN_AWAITING_HUMAN_REVIEW"
+    ).length,
+    confirmedBlocksCount: params.alerts.filter(
+      (a) => a.status === "CONFIRMED_BLOCK"
+    ).length,
+    approvedOverridesCount: params.alerts.filter(
+      (a) => a.status === "APPROVED_OVERRIDE"
+    ).length,
+    dismissedCount: params.alerts.filter(
+      (a) => a.status === "DISMISSED_FALSE_POSITIVE"
+    ).length,
+  };
+}
+
+export interface GovernancePrivacyQueueModel {
+  authorized: boolean;
+  canExecuteAnonymizationOrExport: boolean;
+  lgpdRetentionNotice: string;
+  requests: readonly PrivacyRequestRecordContract[];
+  blockedRetentionCount: number;
+  completedCount: number;
+  pendingCount: number;
+}
+
+export function buildGovernancePrivacyQueueModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  requests: readonly PrivacyRequestRecordContract[];
+  locale?: SupportedLocale;
+}): GovernancePrivacyQueueModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const authz = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["auditor_privacy", "risk_compliance", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  const lgpdRetentionNotice =
+    locale === "pt-BR"
+      ? "LGPD (Arts. 7, 16 e 18): exportação JSON imediata permitida ao titular; anonimização de PII bloqueada por retenção legal (5 anos fiscais, pedido ativo ou disputa financeira aberta) quando aplicável."
+      : "LGPD (Arts. 7, 16 & 18): immediate JSON portability export supported; PII anonymization enforces statutory legal retention holds (5-year fiscal ledger, active orders, or open financial disputes).";
+
+  if (!authz.allowed) {
+    return {
+      authorized: false,
+      canExecuteAnonymizationOrExport: false,
+      lgpdRetentionNotice,
+      requests: [],
+      blockedRetentionCount: 0,
+      completedCount: 0,
+      pendingCount: 0,
+    };
+  }
+
+  return {
+    authorized: true,
+    canExecuteAnonymizationOrExport: true,
+    lgpdRetentionNotice,
+    requests: params.requests,
+    blockedRetentionCount: params.requests.filter(
+      (r) => r.status === "BLOCKED_LEGAL_RETENTION"
+    ).length,
+    completedCount: params.requests.filter((r) => r.status === "COMPLETED").length,
+    pendingCount: params.requests.filter(
+      (r) => r.status === "REQUESTED" || r.status === "PROCESSING"
+    ).length,
+  };
+}
+
+export interface GovernanceConsoleSnapshot {
+  analytics: GovernanceAnalyticsConsoleModel;
+  risk: GovernanceRiskQueueModel;
+  privacy: GovernancePrivacyQueueModel;
+}
+
+export function buildGovernanceConsoleSnapshot(params: {
+  actor: AuthenticatedActorProfileContract;
+  overview: GovernanceBackofficeOverviewContract;
+  locale?: SupportedLocale;
+}): GovernanceConsoleSnapshot {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  return {
+    analytics: buildGovernanceAnalyticsConsoleModel({
+      actor: params.actor,
+      kpis: params.overview.kpis,
+      locale,
+    }),
+    risk: buildGovernanceRiskQueueModel({
+      actor: params.actor,
+      alerts: params.overview.riskAlerts,
+      locale,
+    }),
+    privacy: buildGovernancePrivacyQueueModel({
+      actor: params.actor,
+      requests: params.overview.privacyRequests,
+      locale,
+    }),
+  };
+}
+
 export * from "./app/layout.js";
 export * from "./app/admin/page.js";
 export * from "./app/finance/page.js";
@@ -752,5 +1001,6 @@ export * from "./app/fleets/page.js";
 export * from "./app/support/page.js";
 export * from "./app/commercial/page.js";
 export * from "./app/marketing/page.js";
+export * from "./app/governance/page.js";
 export * from "./server.js";
 

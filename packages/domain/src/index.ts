@@ -48,6 +48,15 @@ import {
   type NotificationDeliveryStatus,
   type NotificationTemplateVersionContract,
   type OutboundWebhookEnvelopeContract,
+  type AnalyticalKpiSummaryContract,
+  type AnalyticalOrderKpiRowContract,
+  type ExplainableRiskRuleCode,
+  type PrivacyRequestRecordContract,
+  type RiskAlertContract,
+  type RiskAlertSeverity,
+  type RiskAlertStatus,
+  type RiskHumanReviewDecision,
+  type RiskRuleExplanationContract,
   type SupportedLocale,
   formatBrlCents,
   resolveSupportedLocale,
@@ -3529,6 +3538,491 @@ export function reconcileNotificationsSinceCursor(params: {
     newlyRecoveredCount,
   };
 }
+
+// ============================================================================
+// Fase R (M21): Reproducible Analytical KPIs, Explainable Risk & LGPD Privacy
+// ============================================================================
+
+/**
+ * Computes reproducible analytical KPIs (GMV, Net Platform Revenue, Operational Margin,
+ * Quote-to-Order Conversion, Cancellation Breakdown, Prep/Delivery SLAs, and Regional Breakdown)
+ * and reconciles Net Platform Revenue cent-for-cent against the M13 double-entry ledger (M21).
+ */
+export function computeReproducibleAnalyticalKpis(params: {
+  orderRows: readonly AnalyticalOrderKpiRowContract[];
+  totalQuotesCount: number;
+  consumedQuotesCount: number;
+  ledgerRevenueNetCents?: number;
+  excludeTestData?: boolean;
+}): AnalyticalKpiSummaryContract {
+  const excludeTestData = Boolean(params.excludeTestData);
+  const filteredRows = excludeTestData
+    ? params.orderRows.filter((row) => !row.isTestData)
+    : [...params.orderRows];
+
+  let gmvCents = 0;
+  let netPlatformRevenueCents = 0;
+  let pendingPaymentNetRevenueCents = 0;
+  let totalPlatformCommissionCents = 0;
+  let totalServiceFeeCents = 0;
+  let totalPlatformCouponSubsidyCents = 0;
+  let operationalMarginCents = 0;
+  let nonCancelledOrdersCount = 0;
+  let cancelledOrdersCount = 0;
+
+  let prepSlaSum = 0;
+  let prepSlaCount = 0;
+  let deliverySlaSum = 0;
+  let deliverySlaCount = 0;
+
+  const cancellationMap = new Map<
+    string,
+    { cancelledByRole: string; cancellationReason: string; count: number }
+  >();
+  const regionalMap = new Map<
+    string,
+    {
+      city: string;
+      stateCode: string;
+      ordersCount: number;
+      gmvCents: number;
+      netPlatformRevenueCents: number;
+      operationalMarginCents: number;
+    }
+  >();
+
+  for (const row of filteredRows) {
+    const isCancelledOrExpired =
+      row.orderStatus === "CANCELLED" || row.orderStatus === "EXPIRED";
+
+    if (isCancelledOrExpired) {
+      cancelledOrdersCount += 1;
+      const role = row.cancelledByRole ?? "UNKNOWN";
+      const reason = row.cancellationReason ?? "UNSPECIFIED";
+      const key = `${role}::${reason}`;
+      const existing = cancellationMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        cancellationMap.set(key, {
+          cancelledByRole: role,
+          cancellationReason: reason,
+          count: 1,
+        });
+      }
+      continue;
+    }
+
+    nonCancelledOrdersCount += 1;
+    const orderGmv =
+      row.subtotalCents + row.addonsCents + row.deliveryFeeCents + row.serviceFeeCents;
+    const orderNetRevenue =
+      row.platformCommissionCents + row.serviceFeeCents - row.platformCouponSubsidyCents;
+    const isPaymentCapturedForLedger =
+      row.paymentStatus === "CAPTURED" || row.paymentStatus === "PARTIALLY_REFUNDED";
+    const recognizedOrderNetRevenue = isPaymentCapturedForLedger ? orderNetRevenue : 0;
+    const logisticsSubsidyCents = Math.max(0, row.courierEarningsCents - row.deliveryFeeCents);
+    const orderOperationalMargin = recognizedOrderNetRevenue - logisticsSubsidyCents;
+
+    gmvCents += orderGmv;
+    if (isPaymentCapturedForLedger) {
+      netPlatformRevenueCents += orderNetRevenue;
+      totalPlatformCommissionCents += row.platformCommissionCents;
+      totalServiceFeeCents += row.serviceFeeCents;
+      totalPlatformCouponSubsidyCents += row.platformCouponSubsidyCents;
+      operationalMarginCents += orderOperationalMargin;
+    } else {
+      pendingPaymentNetRevenueCents += orderNetRevenue;
+    }
+
+    if (row.prepSlaMinutes !== null && Number.isFinite(row.prepSlaMinutes)) {
+      prepSlaSum += row.prepSlaMinutes;
+      prepSlaCount += 1;
+    }
+    if (row.deliverySlaMinutes !== null && Number.isFinite(row.deliverySlaMinutes)) {
+      deliverySlaSum += row.deliverySlaMinutes;
+      deliverySlaCount += 1;
+    }
+
+    const regionKey = `${row.city}::${row.stateCode}`;
+    const reg = regionalMap.get(regionKey);
+    if (reg) {
+      reg.ordersCount += 1;
+      reg.gmvCents += orderGmv;
+      reg.netPlatformRevenueCents += recognizedOrderNetRevenue;
+      reg.operationalMarginCents += orderOperationalMargin;
+    } else {
+      regionalMap.set(regionKey, {
+        city: row.city,
+        stateCode: row.stateCode,
+        ordersCount: 1,
+        gmvCents: orderGmv,
+        netPlatformRevenueCents: recognizedOrderNetRevenue,
+        operationalMarginCents: orderOperationalMargin,
+      });
+    }
+  }
+
+  const totalOrdersCount = filteredRows.length;
+  const quoteConversionRateBps =
+    params.totalQuotesCount > 0
+      ? Math.round((params.consumedQuotesCount * 10000) / params.totalQuotesCount)
+      : 0;
+  const cancellationRateBps =
+    totalOrdersCount > 0
+      ? Math.round((cancelledOrdersCount * 10000) / totalOrdersCount)
+      : 0;
+
+  const ledgerReconciledNetRevenueCents =
+    params.ledgerRevenueNetCents !== undefined
+      ? params.ledgerRevenueNetCents
+      : netPlatformRevenueCents;
+  const isReconciledWithLedger =
+    ledgerReconciledNetRevenueCents === netPlatformRevenueCents;
+
+  const cancellationBreakdown = Array.from(cancellationMap.values()).map((item) => ({
+    ...item,
+    shareBps:
+      cancelledOrdersCount > 0 ? Math.round((item.count * 10000) / cancelledOrdersCount) : 0,
+  }));
+
+  return {
+    excludeTestData,
+    gmvCents,
+    netPlatformRevenueCents,
+    pendingPaymentNetRevenueCents,
+    ledgerReconciledNetRevenueCents,
+    isReconciledWithLedger,
+    totalPlatformCommissionCents,
+    totalServiceFeeCents,
+    totalPlatformCouponSubsidyCents,
+    operationalMarginCents,
+    totalQuotesCount: params.totalQuotesCount,
+    consumedQuotesCount: params.consumedQuotesCount,
+    quoteConversionRateBps,
+    totalOrdersCount,
+    nonCancelledOrdersCount,
+    cancelledOrdersCount,
+    cancellationRateBps,
+    averagePrepSlaMinutes:
+      prepSlaCount > 0 ? Math.round((prepSlaSum / prepSlaCount) * 100) / 100 : null,
+    averageDeliverySlaMinutes:
+      deliverySlaCount > 0
+        ? Math.round((deliverySlaSum / deliverySlaCount) * 100)
+        / 100
+        : null,
+    cancellationBreakdown,
+    regionalBreakdown: Array.from(regionalMap.values()),
+    orderRows: filteredRows,
+  };
+}
+
+/**
+ * Formats analytical order KPI rows into a deterministic CSV string for audited export (M21).
+ */
+export function formatAnalyticalKpisCsv(
+  rows: readonly AnalyticalOrderKpiRowContract[]
+): string {
+  const header = [
+    "order_id",
+    "order_number",
+    "store_id",
+    "store_name",
+    "city",
+    "state_code",
+    "order_status",
+    "gmv_cents",
+    "platform_net_revenue_cents",
+    "operational_margin_cents",
+    "prep_sla_minutes",
+    "delivery_sla_minutes",
+    "is_test_data",
+    "created_at",
+  ].join(",");
+
+  const escapeCsv = (val: string | number | boolean | null): string => {
+    if (val === null || val === undefined) return "";
+    const str = String(val);
+    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const lines = rows.map((r) =>
+    [
+      escapeCsv(r.orderId),
+      escapeCsv(r.orderNumber),
+      escapeCsv(r.storeId),
+      escapeCsv(r.storeName),
+      escapeCsv(r.city),
+      escapeCsv(r.stateCode),
+      escapeCsv(r.orderStatus),
+      escapeCsv(r.gmvCents),
+      escapeCsv(r.platformNetRevenueCents),
+      escapeCsv(r.operationalMarginCents),
+      escapeCsv(r.prepSlaMinutes),
+      escapeCsv(r.deliverySlaMinutes),
+      escapeCsv(r.isTestData),
+      escapeCsv(r.createdAt),
+    ].join(",")
+  );
+
+  return [header, ...lines].join("\n");
+}
+
+/**
+ * Evaluates a deterministic, explainable risk rule (M21).
+ * NEVER applies an opaque automated permanent ban; any triggered alert requires mandatory human review.
+ */
+export function evaluateExplainableRiskRule(params: {
+  ruleCode: ExplainableRiskRuleCode;
+  subjectType: RiskAlertContract["subjectType"];
+  subjectId: string;
+  observedValue: number;
+  thresholdValue?: number;
+  evidenceRefs?: readonly string[];
+}): {
+  triggered: boolean;
+  severity: RiskAlertSeverity;
+  status: RiskAlertStatus;
+  recommendedAction: "HUMAN_REVIEW_REQUIRED" | "ALLOW";
+  ruleExplanation: RiskRuleExplanationContract;
+} {
+  const evidenceRefs = params.evidenceRefs ? [...params.evidenceRefs] : [];
+  let defaultThreshold = 0;
+  let severity: RiskAlertSeverity = "MEDIUM";
+  let windowDescription = "";
+  let explanationEn = "";
+  let explanationPtBr = "";
+
+  switch (params.ruleCode) {
+    case "VELOCITY_HIGH_REFUND_RATE": {
+      defaultThreshold = params.thresholdValue ?? 3000; // 30.00% refund rate in bps over 30d
+      severity = "HIGH";
+      windowDescription = "Last 30 days refund ratio in bps";
+      const obsPct = (params.observedValue / 100).toFixed(2);
+      const thrPct = (defaultThreshold / 100).toFixed(2);
+      explanationEn = `Refund ratio (${obsPct}%) exceeded deterministic threshold (${thrPct}%) over the last 30 days. Mandatory human review required.`;
+      explanationPtBr = `Taxa de reembolso (${obsPct}%) excedeu o limiar determinístico (${thrPct}%) nos últimos 30 dias. Revisão humana obrigatória.`;
+      break;
+    }
+    case "COURIER_REPEATED_OTP_FAILURES": {
+      defaultThreshold = params.thresholdValue ?? 3; // 3 failed OTP handoffs in 24h
+      severity = "HIGH";
+      windowDescription = "Last 24 hours failed OTP handoff attempts";
+      explanationEn = `Courier recorded ${params.observedValue} failed OTP handoff attempts in 24h (threshold: ${defaultThreshold}). Mandatory human review required.`;
+      explanationPtBr = `Entregador registrou ${params.observedValue} falhas de código OTP em 24h (limiar: ${defaultThreshold}). Revisão humana obrigatória.`;
+      break;
+    }
+    case "COUPON_ABUSE_MULTI_ACCOUNT": {
+      defaultThreshold = params.thresholdValue ?? 2; // >2 accounts redeeming same device/fingerprint
+      severity = "CRITICAL";
+      windowDescription = "Distinct accounts redeeming first-order coupon on same device";
+      explanationEn = `Detected ${params.observedValue} accounts redeeming promotional coupons on the same device identifier (threshold: ${defaultThreshold}). Mandatory human review required.`;
+      explanationPtBr = `Detectadas ${params.observedValue} contas resgatando cupons promocionais no mesmo identificador de dispositivo (limiar: ${defaultThreshold}). Revisão humana obrigatória.`;
+      break;
+    }
+    case "HIGH_VALUE_ORDER_NEW_ACCOUNT": {
+      defaultThreshold = params.thresholdValue ?? 15000; // R$ 150.00 on account < 7 days old
+      severity = "MEDIUM";
+      windowDescription = "First 7 days order total in cents";
+      explanationEn = `Order total (${formatBrlCents(Math.max(0, Math.round(params.observedValue)), "en")}) on newly registered account exceeded threshold (${formatBrlCents(defaultThreshold, "en")}). Mandatory human review required.`;
+      explanationPtBr = `Valor do pedido (${formatBrlCents(Math.max(0, Math.round(params.observedValue)), "pt-BR")}) em conta recém-cadastrada excedeu o limiar (${formatBrlCents(defaultThreshold, "pt-BR")}). Revisão humana obrigatória.`;
+      break;
+    }
+    case "BANK_ACCOUNT_FREQUENT_CHANGES": {
+      defaultThreshold = params.thresholdValue ?? 2; // >2 bank account changes in 30 days
+      severity = "HIGH";
+      windowDescription = "Last 30 days bank account change requests";
+      explanationEn = `Organization submitted ${params.observedValue} bank account change requests in 30 days (threshold: ${defaultThreshold}). Mandatory human review required.`;
+      explanationPtBr = `Organização enviou ${params.observedValue} solicitações de troca de conta bancária em 30 dias (limiar: ${defaultThreshold}). Revisão humana obrigatória.`;
+      break;
+    }
+  }
+
+  const triggered = params.observedValue > defaultThreshold;
+  return {
+    triggered,
+    severity,
+    status: "OPEN_AWAITING_HUMAN_REVIEW",
+    recommendedAction: triggered ? "HUMAN_REVIEW_REQUIRED" : "ALLOW",
+    ruleExplanation: {
+      ruleCode: params.ruleCode,
+      observedValue: params.observedValue,
+      thresholdValue: defaultThreshold,
+      windowDescription,
+      explanationEn,
+      explanationPtBr,
+      evidenceRefs,
+    },
+  };
+}
+
+/**
+ * Validates a human review decision on an explainable risk alert (M21).
+ * Requires `risk_compliance` or `tech_admin` role, MFA `aal2`, and a non-empty justification.
+ */
+export function validateHumanRiskReview(params: {
+  actorId: string;
+  actorRoles: readonly StaffRole[];
+  actorAal: "aal1" | "aal2";
+  alert: RiskAlertContract;
+  decision: RiskHumanReviewDecision;
+  reason: string;
+  now?: Date;
+}): {
+  updatedStatus: RiskAlertStatus;
+  decision: RiskHumanReviewDecision;
+  reason: string;
+  reviewedAtIso: string;
+} {
+  const canReview =
+    params.actorRoles.includes("risk_compliance") ||
+    params.actorRoles.includes("tech_admin");
+  if (!canReview) {
+    throw new Error(
+      "RISK_REVIEW_FORBIDDEN: Only risk_compliance or tech_admin staff can review risk alerts."
+    );
+  }
+  if (params.actorAal !== "aal2") {
+    throw new Error(
+      "RISK_REVIEW_MFA_AAL2_REQUIRED: Multi-factor authentication (aal2) is required to review risk alerts."
+    );
+  }
+  if (params.actorId === params.alert.subjectId) {
+    throw new Error(
+      "RISK_REVIEW_SELF_FORBIDDEN: Reviewer cannot adjudicate a risk alert targeting their own account."
+    );
+  }
+  const trimmedReason = (params.reason ?? "").trim();
+  if (trimmedReason.length < 5) {
+    throw new Error(
+      "RISK_REVIEW_REASON_REQUIRED: Human review requires a justification of at least 5 characters."
+    );
+  }
+
+  const statusMap: Record<RiskHumanReviewDecision, RiskAlertStatus> = {
+    APPROVE_OVERRIDE: "APPROVED_OVERRIDE",
+    CONFIRM_BLOCK: "CONFIRMED_BLOCK",
+    DISMISS_FALSE_POSITIVE: "DISMISSED_FALSE_POSITIVE",
+  };
+
+  return {
+    updatedStatus: statusMap[params.decision],
+    decision: params.decision,
+    reason: trimmedReason,
+    reviewedAtIso: (params.now ?? new Date()).toISOString(),
+  };
+}
+
+/**
+ * Builds a structured LGPD Art. 18, V data portability JSON package for a data subject (M21).
+ */
+export function buildLgpdDataPortabilityPackage(params: {
+  profile: {
+    id: string;
+    email: string;
+    fullName: string;
+    phone: string | null;
+    preferredLocale: SupportedLocale;
+    status: string;
+  };
+  addresses: ReadonlyArray<Record<string, unknown>>;
+  orders: ReadonlyArray<{
+    id: string;
+    orderNumber: number;
+    storeId: string;
+    totalCents: number;
+    orderStatus: string;
+    createdAt: string;
+  }>;
+  supportCases: ReadonlyArray<{
+    id: string;
+    caseNumber: number;
+    category: string;
+    status: string;
+    createdAt: string;
+  }>;
+  generatedAt?: Date;
+}): Record<string, unknown> {
+  return {
+    schemaVersion: "lgpd-portability-v1",
+    legalBasis: "LGPD_ART_18_V_PORTABILITY",
+    generatedAt: (params.generatedAt ?? new Date()).toISOString(),
+    subjectProfile: {
+      id: params.profile.id,
+      email: params.profile.email,
+      fullName: params.profile.fullName,
+      phone: params.profile.phone,
+      preferredLocale: params.profile.preferredLocale,
+      status: params.profile.status,
+    },
+    savedAddressesCount: params.addresses.length,
+    savedAddresses: params.addresses,
+    ordersHistoryCount: params.orders.length,
+    ordersHistory: params.orders,
+    supportCasesCount: params.supportCases.length,
+    supportCases: params.supportCases,
+  };
+}
+
+/**
+ * Deterministically anonymizes a user profile's PII for LGPD erasure/anonymization requests
+ * while preserving the primary key UUID for immutable financial/audit referential integrity (M21).
+ */
+export function anonymizeProfilePii(params: {
+  userId: string;
+  hasActiveOrders: boolean;
+  hasOpenFinancialDisputes: boolean;
+  hasCompletedFiscalTransactions: boolean;
+  now?: Date;
+}): {
+  allowed: boolean;
+  reasonCode: string;
+  holdUntilIso: string | null;
+  anonymizedEmail: string | null;
+  anonymizedFullName: string | null;
+  anonymizedPhone: null;
+  anonymizedAtIso: string | null;
+} {
+  const evaluation = evaluateAccountDeletionRequest({
+    userId: params.userId,
+    hasActiveOrders: params.hasActiveOrders,
+    hasOpenFinancialDisputes: params.hasOpenFinancialDisputes,
+    hasCompletedFiscalTransactions: params.hasCompletedFiscalTransactions,
+    requestedAt: params.now ?? new Date(),
+  });
+
+  if (evaluation.outcome !== "IMMEDIATE_ANONYMIZATION") {
+    return {
+      allowed: false,
+      reasonCode: evaluation.reasonCode,
+      holdUntilIso: evaluation.holdUntilIso,
+      anonymizedEmail: null,
+      anonymizedFullName: null,
+      anonymizedPhone: null,
+      anonymizedAtIso: null,
+    };
+  }
+
+  const hashPrefix = crypto
+    .createHash("sha256")
+    .update(params.userId, "utf8")
+    .digest("hex")
+    .slice(0, 12);
+
+  return {
+    allowed: true,
+    reasonCode: "PII_ANONYMIZED_LGPD_COMPLIANT",
+    holdUntilIso: null,
+    anonymizedEmail: `anon+${hashPrefix}@anonymized.ideliveryfood.invalid`,
+    anonymizedFullName: `Anonymized User #${hashPrefix.slice(0, 6)}`,
+    anonymizedPhone: null,
+    anonymizedAtIso: (params.now ?? new Date()).toISOString(),
+  };
+}
+
 
 
 

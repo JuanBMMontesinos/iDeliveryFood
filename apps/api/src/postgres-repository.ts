@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import pg from "pg";
 import type { StoredInvitationRecord } from "@ideliveryfood/authz";
 import {
+  anonymizeProfilePii,
+  buildLgpdDataPortabilityPackage,
+  computeReproducibleAnalyticalKpis,
   evaluatePromotionEligibilityAndSubsidy,
   type DeliveryStatus,
   type OrderStatus,
@@ -74,6 +77,17 @@ import {
   type OutboxEventContract,
   type OutboxEventStatus,
   type UserNotificationsResponseContract,
+  type AnalyticalKpiSummaryContract,
+  type AnalyticalOrderKpiRowContract,
+  type GovernanceBackofficeOverviewContract,
+  type PrivacyRequestRecordContract,
+  type PrivacyRequestStatus,
+  type PrivacyRequestType,
+  type RiskAlertContract,
+  type RiskAlertSeverity,
+  type RiskAlertStatus,
+  type RiskHumanReviewDecision,
+  type RiskRuleExplanationContract,
 } from "@ideliveryfood/contracts";
 import type { ApiDataRepository, AuditLogWriteRecord } from "./index.js";
 
@@ -651,17 +665,30 @@ export function createSupabasePostgresRepository(params: {
     async savePrivacyRequest(params: {
       id: string;
       userId: string;
-      requestType: "EXPORT_DATA" | "DELETE_ACCOUNT" | "CORRECTION";
-      status: "REQUESTED" | "PROCESSING" | "COMPLETED" | "BLOCKED_LEGAL_RETENTION" | "REJECTED";
+      requestType: PrivacyRequestType;
+      status: PrivacyRequestStatus;
       reason: string | null;
       retentionBlockReason: string | null;
+      holdUntilIso?: string | null;
+      exportPayload?: Record<string, unknown> | null;
+      legalBasisNote?: string | null;
     }): Promise<void> {
       const reqUuid = rememberLogicalId(params.id);
       const userUuid = toDeterministicUuid(params.userId);
+      const completedAtIso = params.status === "COMPLETED" ? new Date().toISOString() : null;
       await pool.query(
-        `INSERT INTO public.privacy_requests (id, user_id, request_type, status, reason, retention_block_reason, is_test_data)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, retention_block_reason = EXCLUDED.retention_block_reason`,
+        `INSERT INTO public.privacy_requests (
+           id, user_id, request_type, status, reason, retention_block_reason,
+           hold_until, export_payload, legal_basis_note, completed_at, is_test_data
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+         ON CONFLICT (id) DO UPDATE SET
+           status = EXCLUDED.status,
+           retention_block_reason = EXCLUDED.retention_block_reason,
+           hold_until = COALESCE(EXCLUDED.hold_until, public.privacy_requests.hold_until),
+           export_payload = COALESCE(EXCLUDED.export_payload, public.privacy_requests.export_payload),
+           legal_basis_note = COALESCE(EXCLUDED.legal_basis_note, public.privacy_requests.legal_basis_note),
+           completed_at = COALESCE(EXCLUDED.completed_at, public.privacy_requests.completed_at)`,
         [
           reqUuid,
           userUuid,
@@ -669,6 +696,10 @@ export function createSupabasePostgresRepository(params: {
           params.status,
           params.reason,
           params.retentionBlockReason,
+          params.holdUntilIso ?? null,
+          params.exportPayload ? JSON.stringify(params.exportPayload) : null,
+          params.legalBasisNote ?? null,
+          completedAtIso,
           isTestData,
         ]
       );
@@ -1250,6 +1281,156 @@ export function createSupabasePostgresRepository(params: {
             isTestData,
           ]
         );
+
+        // M13 / M21: Automatically post balanced double-entry ORDER_CAPTURE journal on real capture
+        if (
+          order.paymentStatus === "CAPTURED" &&
+          order.orderStatus !== "CANCELLED" &&
+          order.orderStatus !== "EXPIRED" &&
+          order.orderStatus !== "DISPUTED"
+        ) {
+          const existingJournal = await client.query(
+            `SELECT id FROM public.ledger_journals
+             WHERE reference_type = 'ORDER_CAPTURE' AND reference_id = $1
+             LIMIT 1`,
+            [orderUuid]
+          );
+          if (existingJournal.rowCount === 0) {
+            const promoRedemptionRes = await client.query(
+              `SELECT COALESCE(platform_subsidy_cents, 0)::int AS platform_subsidy_cents
+               FROM public.promotion_redemptions
+               WHERE order_id = $1 AND status IN ('RESERVED', 'REDEEMED')
+               LIMIT 1`,
+              [orderUuid]
+            );
+            const platformSubsidyCents = Number(
+              (promoRedemptionRes.rows[0] as { platform_subsidy_cents?: number } | undefined)
+                ?.platform_subsidy_cents ?? 0
+            );
+            const expectedDebits = order.totalCents + platformSubsidyCents;
+            const expectedCredits =
+              order.merchantNetCents +
+              order.courierEarningsCents +
+              order.platformCommissionCents +
+              order.serviceFeeCents;
+
+            if (expectedDebits > 0 && expectedDebits === expectedCredits) {
+              const ensureLedgerAccount = async (
+                code: string,
+                name: string,
+                accountType: "ASSET" | "LIABILITY" | "REVENUE" | "EXPENSE",
+                organizationId: string | null = null
+              ): Promise<string> => {
+                const resAcc = await client.query(
+                  `INSERT INTO public.ledger_accounts (id, code, name, account_type, organization_id, currency_code, is_test_data)
+                   VALUES ($1, $2, $3, $4, $5, 'BRL', $6)
+                   ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                   RETURNING id`,
+                  [crypto.randomUUID(), code, name, accountType, organizationId, isTestData]
+                );
+                return String((resAcc.rows[0] as { id: string }).id);
+              };
+
+              const journalId = crypto.randomUUID();
+              const orgUuid = toDeterministicUuid(order.organizationId);
+              await client.query(
+                `INSERT INTO public.ledger_journals (
+                   id, reference_type, reference_id, description, idempotency_key, is_test_data
+                 ) VALUES ($1, 'ORDER_CAPTURE', $2, $3, $4, $5)`,
+                [
+                  journalId,
+                  orderUuid,
+                  `Double-entry capture split for Order #${order.orderNumber}`,
+                  `jnl_capture_${orderUuid}`,
+                  isTestData,
+                ]
+              );
+
+              if (order.totalCents > 0) {
+                const assetAccId = await ensureLedgerAccount(
+                  "ASSET_PSP_CLEARING",
+                  "PSP Clearing Receivable (BRL)",
+                  "ASSET"
+                );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'DEBIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, assetAccId, order.totalCents, isTestData]
+                );
+              }
+              if (platformSubsidyCents > 0) {
+                const expenseAccId = await ensureLedgerAccount(
+                  "EXPENSE_PROMO_SUBSIDY",
+                  "Platform Marketing Coupon Subsidy",
+                  "EXPENSE"
+                );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'DEBIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, expenseAccId, platformSubsidyCents, isTestData]
+                );
+              }
+              if (order.merchantNetCents > 0) {
+                const merchantExistingRes = await client.query(
+                  `SELECT id FROM public.ledger_accounts
+                   WHERE account_type = 'LIABILITY' AND organization_id = $1
+                   ORDER BY created_at ASC LIMIT 1`,
+                  [orgUuid]
+                );
+                const merchantAccId =
+                  merchantExistingRes.rowCount && merchantExistingRes.rowCount > 0
+                    ? String((merchantExistingRes.rows[0] as { id: string }).id)
+                    : await ensureLedgerAccount(
+                        `LIABILITY_MERCHANT_ORG_${orgUuid.slice(0, 8)}`,
+                        `Merchant Payable - ${order.organizationId.slice(0, 8)}`,
+                        "LIABILITY",
+                        orgUuid
+                      );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'CREDIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, merchantAccId, order.merchantNetCents, isTestData]
+                );
+              }
+              if (order.courierEarningsCents > 0) {
+                const courierAccId = await ensureLedgerAccount(
+                  "LIABILITY_COURIER_POOL",
+                  "Courier Payable Pool (BRL)",
+                  "LIABILITY"
+                );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'CREDIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, courierAccId, order.courierEarningsCents, isTestData]
+                );
+              }
+              if (order.platformCommissionCents > 0) {
+                const commAccId = await ensureLedgerAccount(
+                  "REVENUE_PLATFORM_COMMISSION",
+                  "Platform Marketplace Commission Revenue",
+                  "REVENUE"
+                );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'CREDIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, commAccId, order.platformCommissionCents, isTestData]
+                );
+              }
+              if (order.serviceFeeCents > 0) {
+                const sfAccId = await ensureLedgerAccount(
+                  "REVENUE_SERVICE_FEE",
+                  "Platform Consumer Service Fee Revenue",
+                  "REVENUE"
+                );
+                await client.query(
+                  `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+                   VALUES ($1, $2, $3, 'CREDIT', $4, $5)`,
+                  [crypto.randomUUID(), journalId, sfAccId, order.serviceFeeCents, isTestData]
+                );
+              }
+            }
+          }
+        }
 
         await client.query("COMMIT");
       } catch (err) {
@@ -5475,5 +5656,839 @@ export function createSupabasePostgresRepository(params: {
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
+
+    // =========================================================================
+    // Fase R (M21): Reproducible Analytical KPIs, Explainable Risk & LGPD
+    // =========================================================================
+    ...(() => {
+      function mapRiskAlertRow(r: Record<string, unknown>): RiskAlertContract {
+        return {
+          id: restoreLogicalId(String(r.id)),
+          subjectType: String(r.subject_type) as RiskAlertContract["subjectType"],
+          subjectId: restoreLogicalId(String(r.subject_id)),
+          ruleCode: String(r.rule_code) as RiskAlertContract["ruleCode"],
+          severity: String(r.severity) as RiskAlertSeverity,
+          status: String(r.status) as RiskAlertStatus,
+          ruleExplanation: (r.rule_explanation_json ??
+            {}) as RiskRuleExplanationContract,
+          recommendedAction: String(
+            r.recommended_action ?? "HUMAN_REVIEW_REQUIRED"
+          ),
+          reviewedBy: r.reviewed_by
+            ? restoreLogicalId(String(r.reviewed_by))
+            : null,
+          reviewDecision: r.review_decision
+            ? (String(r.review_decision) as RiskHumanReviewDecision)
+            : null,
+          reviewReason: r.review_reason ? String(r.review_reason) : null,
+          reviewedAt: r.reviewed_at
+            ? new Date(String(r.reviewed_at)).toISOString()
+            : null,
+          isTestData: Boolean(r.is_test_data),
+          createdAt: new Date(String(r.created_at)).toISOString(),
+          updatedAt: new Date(String(r.updated_at)).toISOString(),
+        };
+      }
+
+      function mapPrivacyRequestRow(
+        r: Record<string, unknown>
+      ): PrivacyRequestRecordContract {
+        return {
+          id: restoreLogicalId(String(r.id)),
+          userId: restoreLogicalId(String(r.user_id)),
+          requestType: String(r.request_type) as PrivacyRequestType,
+          status: String(r.status) as PrivacyRequestStatus,
+          reason: r.reason ? String(r.reason) : null,
+          retentionBlockReason: r.retention_block_reason
+            ? String(r.retention_block_reason)
+            : null,
+          holdUntil: r.hold_until
+            ? new Date(String(r.hold_until)).toISOString()
+            : null,
+          exportPayload:
+            (r.export_payload as Record<string, unknown> | null) ?? null,
+          anonymizedAt: r.anonymized_at
+            ? new Date(String(r.anonymized_at)).toISOString()
+            : null,
+          legalBasisNote: r.legal_basis_note ? String(r.legal_basis_note) : null,
+          processedBy: r.processed_by
+            ? restoreLogicalId(String(r.processed_by))
+            : null,
+          completedAt: r.completed_at
+            ? new Date(String(r.completed_at)).toISOString()
+            : null,
+          isTestData: Boolean(r.is_test_data),
+          createdAt: new Date(String(r.created_at)).toISOString(),
+        };
+      }
+
+      async function fetchPrivacyRetentionSignals(
+        executor: Pick<pg.Pool, "query">,
+        userUuid: string
+      ): Promise<{
+        hasActiveOrders: boolean;
+        hasOpenFinancialDisputes: boolean;
+        hasCompletedFiscalTransactions: boolean;
+      }> {
+        const res = await executor.query(
+          `SELECT
+             EXISTS (
+               SELECT 1 FROM public.orders
+               WHERE customer_id = $1
+                 AND order_status NOT IN ('DELIVERED', 'CANCELLED', 'EXPIRED')
+             ) AS has_active_orders,
+             (
+               EXISTS (
+                 SELECT 1 FROM public.support_cases
+                 WHERE requester_id = $1
+                   AND status IN ('OPEN', 'IN_PROGRESS', 'AWAITING_ACTION_APPROVAL')
+                   AND category IN ('BILLING', 'REFUND', 'FINANCIAL_DISPUTE', 'PAYMENT_DISPUTE', 'CHARGEBACK')
+               )
+               OR EXISTS (
+                 SELECT 1 FROM public.refunds
+                 WHERE requested_by = $1
+                   AND status IN ('PENDING_APPROVAL', 'APPROVED')
+               )
+             ) AS has_open_financial_disputes,
+             EXISTS (
+               SELECT 1 FROM public.orders
+               WHERE customer_id = $1
+                 AND payment_status IN ('CAPTURED', 'PARTIALLY_REFUNDED', 'REFUNDED')
+             ) AS has_completed_fiscal_transactions`,
+          [userUuid]
+        );
+        const row = res.rows[0] ?? {};
+        return {
+          hasActiveOrders: Boolean(row.has_active_orders),
+          hasOpenFinancialDisputes: Boolean(row.has_open_financial_disputes),
+          hasCompletedFiscalTransactions: Boolean(
+            row.has_completed_fiscal_transactions
+          ),
+        };
+      }
+
+      async function getAnalyticalKpiSummary(params?: {
+        excludeTestData?: boolean;
+        storeId?: string;
+        fromIso?: string;
+        toIso?: string;
+      }): Promise<AnalyticalKpiSummaryContract> {
+        const excludeTestData = Boolean(params?.excludeTestData);
+        const conditions: string[] = [];
+        const values: unknown[] = [];
+
+        if (excludeTestData) {
+          conditions.push("is_test_data = false");
+        }
+        if (params?.storeId) {
+          values.push(toDeterministicUuid(params.storeId));
+          conditions.push(`store_id = $${values.length}::uuid`);
+        }
+        if (params?.fromIso) {
+          values.push(params.fromIso);
+          conditions.push(`created_at >= $${values.length}::timestamptz`);
+        }
+        if (params?.toIso) {
+          values.push(params.toIso);
+          conditions.push(`created_at <= $${values.length}::timestamptz`);
+        }
+
+        const whereClause =
+          conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+        const [ordersRes, quotesRes] = await Promise.all([
+          pool.query(
+            `SELECT *
+             FROM public.analytics_order_kpis_v
+             ${whereClause}
+             ORDER BY created_at DESC`,
+            values
+          ),
+          pool.query(
+            `SELECT
+               COUNT(*)::int AS total_quotes,
+               COUNT(*) FILTER (WHERE consumed_at IS NOT NULL)::int AS consumed_quotes
+             FROM public.quotes
+             ${whereClause}`,
+            values
+          ),
+        ]);
+
+        const orderRows: AnalyticalOrderKpiRowContract[] = ordersRes.rows.map(
+          (r: Record<string, unknown>) => ({
+            orderId: restoreLogicalId(String(r.order_id)),
+            orderNumber: Number(r.order_number),
+            organizationId: restoreLogicalId(String(r.organization_id)),
+            storeId: restoreLogicalId(String(r.store_id)),
+            storeName: String(r.store_name ?? ""),
+            city: String(r.city ?? ""),
+            stateCode: String(r.state_code ?? ""),
+            orderStatus: String(r.order_status),
+            paymentStatus: String(r.payment_status),
+            subtotalCents: Number(r.subtotal_cents ?? 0),
+            addonsCents: Number(r.addons_cents ?? 0),
+            deliveryFeeCents: Number(r.delivery_fee_cents ?? 0),
+            serviceFeeCents: Number(r.service_fee_cents ?? 0),
+            discountCents: Number(r.discount_cents ?? 0),
+            totalCents: Number(r.total_cents ?? 0),
+            platformCommissionCents: Number(r.platform_commission_cents ?? 0),
+            merchantNetCents: Number(r.merchant_net_cents ?? 0),
+            courierEarningsCents: Number(r.courier_earnings_cents ?? 0),
+            platformCouponSubsidyCents: Number(
+              r.platform_coupon_subsidy_cents ?? 0
+            ),
+            merchantCouponSubsidyCents: Number(
+              r.merchant_coupon_subsidy_cents ?? 0
+            ),
+            gmvCents: Number(r.gmv_cents ?? 0),
+            platformNetRevenueCents: Number(r.platform_net_revenue_cents ?? 0),
+            operationalMarginCents: Number(r.operational_margin_cents ?? 0),
+            prepSlaMinutes:
+              r.prep_sla_minutes !== null && r.prep_sla_minutes !== undefined
+                ? Number(r.prep_sla_minutes)
+                : null,
+            deliverySlaMinutes:
+              r.delivery_sla_minutes !== null &&
+              r.delivery_sla_minutes !== undefined
+                ? Number(r.delivery_sla_minutes)
+                : null,
+            cancellationReason: r.cancellation_reason
+              ? String(r.cancellation_reason)
+              : null,
+            cancelledByRole: r.cancelled_by_role
+              ? String(r.cancelled_by_role)
+              : null,
+            isTestData: Boolean(r.is_test_data),
+            createdAt: new Date(String(r.created_at)).toISOString(),
+          })
+        );
+
+        const hasOrderScopeFilter = Boolean(
+          params?.storeId || params?.fromIso || params?.toIso
+        );
+        let ledgerRevenueNetCents = 0;
+
+        if (!hasOrderScopeFilter || orderRows.length > 0) {
+          const ledgerConditions: string[] = [
+            "lj.reference_type IN ('ORDER_CAPTURE', 'PROMO_SUBSIDY', 'REVERSAL')",
+          ];
+          const ledgerValues: unknown[] = [];
+
+          if (excludeTestData) {
+            ledgerConditions.push("lj.is_test_data = false");
+            ledgerConditions.push("le.is_test_data = false");
+          }
+          if (hasOrderScopeFilter) {
+            ledgerValues.push(
+              orderRows.map((row) => toDeterministicUuid(row.orderId))
+            );
+            ledgerConditions.push(
+              `lj.reference_id = ANY($${ledgerValues.length}::uuid[])`
+            );
+          }
+
+          const ledgerRes = await pool.query(
+            `SELECT COALESCE(
+               SUM(
+                 CASE
+                   WHEN la.account_type = 'REVENUE' THEN
+                     (CASE WHEN le.direction = 'CREDIT' THEN le.amount_cents ELSE -le.amount_cents END)
+                   WHEN la.account_type = 'EXPENSE' THEN
+                     (CASE WHEN le.direction = 'DEBIT' THEN -le.amount_cents ELSE le.amount_cents END)
+                   ELSE 0
+                 END
+               ),
+               0
+             )::bigint AS net_revenue_cents
+             FROM public.ledger_entries le
+             JOIN public.ledger_journals lj ON lj.id = le.journal_id
+             JOIN public.ledger_accounts la ON la.id = le.account_id
+             WHERE ${ledgerConditions.join(" AND ")}`,
+            ledgerValues
+          );
+
+          ledgerRevenueNetCents = Number(
+            ledgerRes.rows[0]?.net_revenue_cents ?? 0
+          );
+        }
+
+        const quoteStats = quotesRes.rows[0] ?? {
+          total_quotes: 0,
+          consumed_quotes: 0,
+        };
+
+        return computeReproducibleAnalyticalKpis({
+          orderRows,
+          totalQuotesCount: Number(quoteStats.total_quotes ?? 0),
+          consumedQuotesCount: Number(quoteStats.consumed_quotes ?? 0),
+          ledgerRevenueNetCents,
+          excludeTestData,
+        });
+      }
+
+      async function listRiskAlerts(
+        statusFilter?: RiskAlertStatus
+      ): Promise<RiskAlertContract[]> {
+        const conditions: string[] = [];
+        const values: unknown[] = [];
+        if (statusFilter) {
+          values.push(statusFilter);
+          conditions.push(`status = $${values.length}`);
+        }
+        const whereClause =
+          conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+        const res = await pool.query(
+          `SELECT *
+           FROM public.risk_alerts
+           ${whereClause}
+           ORDER BY
+             CASE WHEN status = 'OPEN_AWAITING_HUMAN_REVIEW' THEN 0 ELSE 1 END ASC,
+             created_at DESC`,
+          values
+        );
+
+        return res.rows.map((r: Record<string, unknown>) => mapRiskAlertRow(r));
+      }
+
+      async function getRiskAlertById(
+        alertId: string
+      ): Promise<RiskAlertContract | null> {
+        const alertUuid = toDeterministicUuid(alertId);
+        const res = await pool.query(
+          `SELECT * FROM public.risk_alerts WHERE id = $1 LIMIT 1`,
+          [alertUuid]
+        );
+        if ((res.rowCount ?? 0) === 0) return null;
+        return mapRiskAlertRow(res.rows[0] as Record<string, unknown>);
+      }
+
+      async function createRiskAlert(
+        alert: Omit<RiskAlertContract, "createdAt" | "updatedAt">
+      ): Promise<RiskAlertContract> {
+        const alertUuid = rememberLogicalId(alert.id);
+        const subjectUuid = rememberLogicalId(alert.subjectId);
+        const reviewerUuid = alert.reviewedBy
+          ? toDeterministicUuid(alert.reviewedBy)
+          : null;
+        if (reviewerUuid) {
+          await ensureProfileExists(reviewerUuid);
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const res = await client.query(
+            `INSERT INTO public.risk_alerts (
+               id, subject_type, subject_id, rule_code, severity, status,
+               rule_explanation_json, recommended_action, reviewed_by,
+               review_decision, review_reason, reviewed_at, is_test_data
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6,
+               $7::jsonb, $8, $9,
+               $10, $11, $12::timestamptz, $13
+             )
+             RETURNING *`,
+            [
+              alertUuid,
+              alert.subjectType,
+              subjectUuid,
+              alert.ruleCode,
+              alert.severity,
+              alert.status,
+              JSON.stringify(alert.ruleExplanation ?? {}),
+              alert.recommendedAction,
+              reviewerUuid,
+              alert.reviewDecision,
+              alert.reviewReason,
+              alert.reviewedAt,
+              alert.isTestData ?? isTestData,
+            ]
+          );
+          const r = res.rows[0] as Record<string, unknown>;
+
+          await client.query(
+            `INSERT INTO public.risk_decisions (
+               id, subject_type, subject_id, rule_code, decision,
+               human_reviewer_id, justification, is_test_data, alert_id, rule_explanation_json
+             ) VALUES (
+               gen_random_uuid(), $1, $2, $3, $4,
+               $5, $6, $7, $8, $9::jsonb
+             )`,
+            [
+              alert.subjectType,
+              subjectUuid,
+              alert.ruleCode,
+              alert.status === "OPEN_AWAITING_HUMAN_REVIEW"
+                ? "FLAG_FOR_HUMAN_REVIEW"
+                : "ALLOW",
+              reviewerUuid,
+              alert.ruleExplanation?.explanationEn ??
+                `Rule evaluation ${alert.ruleCode}`,
+              alert.isTestData ?? isTestData,
+              alertUuid,
+              JSON.stringify(alert.ruleExplanation ?? {}),
+            ]
+          );
+
+          await client.query("COMMIT");
+          return mapRiskAlertRow(r);
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw err;
+        } finally {
+          client.release();
+        }
+      }
+
+      async function reviewRiskAlert(params: {
+      alertId: string;
+      status: RiskAlertStatus;
+      reviewedBy: string;
+      reviewDecision: RiskHumanReviewDecision;
+      reviewReason: string;
+      reviewedAtIso: string;
+      suspendSubjectIfConfirmed?: boolean;
+    }): Promise<RiskAlertContract | null> {
+      const alertUuid = toDeterministicUuid(params.alertId);
+      const reviewerUuid = toDeterministicUuid(params.reviewedBy);
+      await ensureProfileExists(reviewerUuid);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const res = await client.query(
+          `UPDATE public.risk_alerts
+           SET status = $2,
+               reviewed_by = $3,
+               review_decision = $4,
+               review_reason = $5,
+               reviewed_at = $6::timestamptz,
+               updated_at = timezone('utc', now())
+           WHERE id = $1
+           RETURNING *`,
+          [
+            alertUuid,
+            params.status,
+            reviewerUuid,
+            params.reviewDecision,
+            params.reviewReason,
+            params.reviewedAtIso,
+          ]
+        );
+        if ((res.rowCount ?? 0) === 0) {
+          await client.query("ROLLBACK");
+          return null;
+        }
+
+        const r = res.rows[0] as Record<string, unknown>;
+        await client.query(
+          `INSERT INTO public.risk_decisions (
+             id, subject_type, subject_id, rule_code, decision,
+             human_reviewer_id, justification, is_test_data, alert_id, rule_explanation_json
+           ) VALUES (
+             gen_random_uuid(), $1, $2, $3, $4,
+             $5, $6, $7, $8, $9::jsonb
+           )`,
+          [
+            String(r.subject_type),
+            String(r.subject_id),
+            String(r.rule_code),
+            params.reviewDecision,
+            reviewerUuid,
+            params.reviewReason,
+            Boolean(r.is_test_data),
+            String(r.id),
+            JSON.stringify(r.rule_explanation_json ?? {}),
+          ]
+        );
+
+        if (
+          params.reviewDecision === "CONFIRM_BLOCK" &&
+          params.suspendSubjectIfConfirmed
+        ) {
+          if (String(r.subject_type) === "USER") {
+            await client.query(
+              `UPDATE public.profiles
+               SET status = 'SUSPENDED',
+                   last_session_revoked_at = $2::timestamptz,
+                   updated_at = timezone('utc', now())
+               WHERE id = $1`,
+              [String(r.subject_id), params.reviewedAtIso]
+            );
+            await client.query(
+              `UPDATE public.user_devices
+               SET is_revoked = true,
+                   revoked_at = $2::timestamptz,
+                   updated_at = timezone('utc', now())
+               WHERE user_id = $1 AND is_revoked = false`,
+              [String(r.subject_id), params.reviewedAtIso]
+            );
+          } else if (String(r.subject_type) === "ORGANIZATION") {
+            await client.query(
+              `UPDATE public.organizations
+               SET status = 'SUSPENDED',
+                   updated_at = timezone('utc', now())
+               WHERE id = $1`,
+              [String(r.subject_id)]
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+        return mapRiskAlertRow(r);
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function listPrivacyRequests(params?: {
+      statusFilter?: PrivacyRequestStatus;
+      userId?: string;
+    }): Promise<PrivacyRequestRecordContract[]> {
+      const conditions: string[] = [];
+      const values: unknown[] = [];
+
+      if (params?.statusFilter) {
+        values.push(params.statusFilter);
+        conditions.push(`status = $${values.length}`);
+      }
+      if (params?.userId) {
+        values.push(toDeterministicUuid(params.userId));
+        conditions.push(`user_id = $${values.length}::uuid`);
+      }
+
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      const res = await pool.query(
+        `SELECT *
+         FROM public.privacy_requests
+         ${whereClause}
+         ORDER BY created_at DESC`,
+        values
+      );
+
+      return res.rows.map((r: Record<string, unknown>) =>
+        mapPrivacyRequestRow(r)
+      );
+    }
+
+    async function getPrivacyRequestById(
+      requestId: string
+    ): Promise<PrivacyRequestRecordContract | null> {
+      const reqUuid = toDeterministicUuid(requestId);
+      const res = await pool.query(
+        `SELECT * FROM public.privacy_requests WHERE id = $1 LIMIT 1`,
+        [reqUuid]
+      );
+      if ((res.rowCount ?? 0) === 0) return null;
+      return mapPrivacyRequestRow(res.rows[0] as Record<string, unknown>);
+    }
+
+    async function checkUserPrivacyRetentionSignals(userId: string): Promise<{
+      hasActiveOrders: boolean;
+      hasOpenFinancialDisputes: boolean;
+      hasCompletedFiscalTransactions: boolean;
+    }> {
+      return fetchPrivacyRetentionSignals(pool, toDeterministicUuid(userId));
+    }
+
+    async function generateLgpdPortabilityForUser(
+      userId: string
+    ): Promise<Record<string, unknown> | null> {
+      const userUuid = toDeterministicUuid(userId);
+      const profileRes = await pool.query(
+        `SELECT id, email, full_name, phone, preferred_locale, status
+         FROM public.profiles
+         WHERE id = $1
+         LIMIT 1`,
+        [userUuid]
+      );
+      if ((profileRes.rowCount ?? 0) === 0) return null;
+      const p = profileRes.rows[0] as Record<string, unknown>;
+
+      const [addrRes, ordersRes, casesRes] = await Promise.all([
+        pool.query(
+          `SELECT id, label, recipient_name, street_line, number, complement,
+                  neighborhood, city, state_code, postal_code, is_default, created_at
+           FROM public.customer_addresses
+           WHERE user_id = $1
+           ORDER BY is_default DESC, created_at DESC`,
+          [userUuid]
+        ),
+        pool.query(
+          `SELECT id, order_number, store_id, total_cents, order_status, created_at
+           FROM public.orders
+           WHERE customer_id = $1
+           ORDER BY created_at DESC
+           LIMIT 200`,
+          [userUuid]
+        ),
+        pool.query(
+          `SELECT id, case_number, category, status, created_at
+           FROM public.support_cases
+           WHERE requester_id = $1
+           ORDER BY created_at DESC
+           LIMIT 200`,
+          [userUuid]
+        ),
+      ]);
+
+      return buildLgpdDataPortabilityPackage({
+        profile: {
+          id: restoreLogicalId(String(p.id)),
+          email: String(p.email),
+          fullName: String(p.full_name),
+          phone: p.phone ? String(p.phone) : null,
+          preferredLocale: (String(p.preferred_locale ?? "en") === "pt-BR"
+            ? "pt-BR"
+            : "en") as SupportedLocale,
+          status: String(p.status),
+        },
+        addresses: addrRes.rows.map((a: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(a.id)),
+          label: String(a.label),
+          recipientName: String(a.recipient_name),
+          streetLine: String(a.street_line),
+          number: String(a.number),
+          complement: a.complement ? String(a.complement) : null,
+          neighborhood: String(a.neighborhood),
+          city: String(a.city),
+          stateCode: String(a.state_code),
+          postalCode: String(a.postal_code),
+          isDefault: Boolean(a.is_default),
+          createdAt: new Date(String(a.created_at)).toISOString(),
+        })),
+        orders: ordersRes.rows.map((o: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(o.id)),
+          orderNumber: Number(o.order_number),
+          storeId: restoreLogicalId(String(o.store_id)),
+          totalCents: Number(o.total_cents),
+          orderStatus: String(o.order_status),
+          createdAt: new Date(String(o.created_at)).toISOString(),
+        })),
+        supportCases: casesRes.rows.map((c: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(c.id)),
+          caseNumber: Number(c.case_number),
+          category: String(c.category),
+          status: String(c.status),
+          createdAt: new Date(String(c.created_at)).toISOString(),
+        })),
+      });
+    }
+
+    async function completePrivacyExportRequest(params: {
+      requestId: string;
+      processedBy: string;
+      exportPayload: Record<string, unknown>;
+    }): Promise<PrivacyRequestRecordContract | null> {
+      const reqUuid = toDeterministicUuid(params.requestId);
+      const processorUuid = toDeterministicUuid(params.processedBy);
+      await ensureProfileExists(processorUuid);
+
+      const res = await pool.query(
+        `UPDATE public.privacy_requests
+         SET status = 'COMPLETED',
+             processed_by = $2,
+             export_payload = $3::jsonb,
+             legal_basis_note = COALESCE(
+               legal_basis_note,
+               'LGPD Art. 18, V — Data portability export'
+             ),
+             completed_at = COALESCE(completed_at, timezone('utc', now())),
+             updated_at = timezone('utc', now())
+         WHERE id = $1
+         RETURNING *`,
+        [reqUuid, processorUuid, JSON.stringify(params.exportPayload)]
+      );
+      if ((res.rowCount ?? 0) === 0) return null;
+      return mapPrivacyRequestRow(res.rows[0] as Record<string, unknown>);
+    }
+
+    async function anonymizeUserAccountAndCompleteRequest(params: {
+      requestId: string;
+      processedBy: string;
+      legalBasisNote?: string;
+      now?: Date;
+    }): Promise<{
+      request: PrivacyRequestRecordContract;
+      outcome: "ANONYMIZED" | "BLOCKED_LEGAL_RETENTION";
+      reasonCode: string;
+      holdUntilIso: string | null;
+      anonymizedEmail: string | null;
+    } | null> {
+      const reqUuid = toDeterministicUuid(params.requestId);
+      const processorUuid = toDeterministicUuid(params.processedBy);
+      await ensureProfileExists(processorUuid);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const existingRes = await client.query(
+          `SELECT * FROM public.privacy_requests WHERE id = $1 LIMIT 1`,
+          [reqUuid]
+        );
+        if ((existingRes.rowCount ?? 0) === 0) {
+          await client.query("ROLLBACK");
+          return null;
+        }
+        const existingRow = existingRes.rows[0] as Record<string, unknown>;
+        const targetUserUuid = String(existingRow.user_id);
+
+        const signals = await fetchPrivacyRetentionSignals(client, targetUserUuid);
+        const anon = anonymizeProfilePii({
+          userId: restoreLogicalId(targetUserUuid),
+          ...signals,
+          ...(params.now ? { now: params.now } : {}),
+        });
+
+        if (!anon.allowed) {
+          const basisNote =
+            params.legalBasisNote ??
+            `LGPD Art. 16 — Retained until ${anon.holdUntilIso ?? "resolution"} (${anon.reasonCode})`;
+          const blockedRes = await client.query(
+            `UPDATE public.privacy_requests
+             SET status = 'BLOCKED_LEGAL_RETENTION',
+                 retention_block_reason = $2,
+                 hold_until = $3::timestamptz,
+                 legal_basis_note = $4,
+                 processed_by = $5,
+                 updated_at = timezone('utc', now())
+             WHERE id = $1
+             RETURNING *`,
+            [reqUuid, anon.reasonCode, anon.holdUntilIso, basisNote, processorUuid]
+          );
+          await client.query("COMMIT");
+          return {
+            request: mapPrivacyRequestRow(
+              blockedRes.rows[0] as Record<string, unknown>
+            ),
+            outcome: "BLOCKED_LEGAL_RETENTION",
+            reasonCode: anon.reasonCode,
+            holdUntilIso: anon.holdUntilIso,
+            anonymizedEmail: null,
+          };
+        }
+
+        const anonymizedAtIso =
+          anon.anonymizedAtIso ?? (params.now ?? new Date()).toISOString();
+        const anonymizedEmail =
+          anon.anonymizedEmail ?? `anon+${targetUserUuid}@anonymized.invalid`;
+        const anonymizedFullName = anon.anonymizedFullName ?? "Anonymized User";
+
+        await client.query(
+          `UPDATE public.profiles
+           SET email = $2,
+               full_name = $3,
+               phone = NULL,
+               status = 'DEACTIVATED',
+               last_session_revoked_at = $4::timestamptz,
+               updated_at = timezone('utc', now())
+           WHERE id = $1`,
+          [
+            targetUserUuid,
+            anonymizedEmail,
+            anonymizedFullName,
+            anonymizedAtIso,
+          ]
+        );
+
+        await client.query(
+          `UPDATE public.user_devices
+           SET is_revoked = true,
+               revoked_at = $2::timestamptz,
+               updated_at = timezone('utc', now())
+           WHERE user_id = $1 AND is_revoked = false`,
+          [targetUserUuid, anonymizedAtIso]
+        );
+
+        await client.query(
+          `UPDATE public.customer_addresses
+           SET recipient_name = 'Anonymized Recipient',
+               street_line = 'REDACTED',
+               number = '0',
+               complement = NULL,
+               delivery_instructions = NULL,
+               updated_at = timezone('utc', now())
+           WHERE user_id = $1`,
+          [targetUserUuid]
+        );
+
+        const completedRes = await client.query(
+          `UPDATE public.privacy_requests
+           SET status = 'COMPLETED',
+               retention_block_reason = NULL,
+               hold_until = NULL,
+               anonymized_at = $2::timestamptz,
+               legal_basis_note = $3,
+               processed_by = $4,
+               completed_at = $2::timestamptz,
+               updated_at = timezone('utc', now())
+           WHERE id = $1
+           RETURNING *`,
+          [
+            reqUuid,
+            anonymizedAtIso,
+            params.legalBasisNote ??
+              "LGPD Art. 18, VI — Personal data anonymized and active devices revoked",
+            processorUuid,
+          ]
+        );
+
+        await client.query("COMMIT");
+        return {
+          request: mapPrivacyRequestRow(
+            completedRes.rows[0] as Record<string, unknown>
+          ),
+          outcome: "ANONYMIZED",
+          reasonCode: anon.reasonCode,
+          holdUntilIso: null,
+          anonymizedEmail,
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function getGovernanceBackofficeOverview(params?: {
+      excludeTestData?: boolean;
+    }): Promise<GovernanceBackofficeOverviewContract> {
+      const [kpis, riskAlerts, privacyRequests] = await Promise.all([
+        getAnalyticalKpiSummary({
+          excludeTestData: Boolean(params?.excludeTestData),
+        }),
+        listRiskAlerts(),
+        listPrivacyRequests(),
+      ]);
+
+      return {
+        kpis,
+        riskAlerts,
+        privacyRequests,
+      };
+    }
+
+    return {
+      getAnalyticalKpiSummary,
+      listRiskAlerts,
+      getRiskAlertById,
+      createRiskAlert,
+      reviewRiskAlert,
+      listPrivacyRequests,
+      getPrivacyRequestById,
+      checkUserPrivacyRetentionSignals,
+      generateLgpdPortabilityForUser,
+      completePrivacyExportRequest,
+      anonymizeUserAccountAndCompleteRequest,
+      getGovernanceBackofficeOverview,
+    };
+  })(),
   };
 }

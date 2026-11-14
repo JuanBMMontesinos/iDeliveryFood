@@ -67,7 +67,7 @@ const MODULE_LINKS: Record<
     labelPtBr: "Marketing e Promoções (M19)",
   },
   RISK_COMPLIANCE_AND_LGPD: {
-    href: "/admin/audit",
+    href: "/governance/analytics",
     labelEn: "Risk, Compliance & LGPD",
     labelPtBr: "Risco, Compliance e LGPD",
   },

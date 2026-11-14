@@ -9,13 +9,21 @@ import {
   signSupabaseHs256Jwt,
   type SupabasePostgresRepositoryInstance,
 } from "@ideliveryfood/api";
-import type { AuthenticatedActorProfileContract } from "@ideliveryfood/contracts";
+import type {
+  AnalyticalKpiSummaryContract,
+  AuthenticatedActorProfileContract,
+  PrivacyRequestRecordContract,
+  RiskAlertContract,
+} from "@ideliveryfood/contracts";
 import {
   buildAdminAuditTrailExplorerModel,
   buildAdminGovernanceScreenModel,
   buildAdminRoleNavigationModules,
   buildFinancialBackofficeModel,
   buildFleetOperatorPortalModel,
+  buildGovernanceAnalyticsConsoleModel,
+  buildGovernancePrivacyQueueModel,
+  buildGovernanceRiskQueueModel,
   buildLogisticsDispatchConsoleModel,
   createAdminWebServer,
   executeAdminCadastreGovernanceAction,
@@ -328,6 +336,131 @@ describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider 
     assert.equal(fleetModel.visibleCouriers.length, 1);
     assert.equal(fleetModel.visibleCouriers[0]?.courierId, "c1");
   });
+
+  it("exposes RISK_COMPLIANCE_AND_LGPD to auditor_privacy and enforces M21 analytics, explainable risk & LGPD RBAC", () => {
+    const privacyAuditor: AuthenticatedActorProfileContract = {
+      ...staffAdminAal1,
+      id: "00000000-0000-4000-8000-000000000094",
+      aal: "aal2",
+      staffScopes: [
+        {
+          role: "auditor_privacy",
+          regionCode: null,
+          maxRefundApprovalCents: 0,
+          requiresMfa: true,
+        },
+      ],
+    };
+
+    const auditorModules = buildAdminRoleNavigationModules(privacyAuditor);
+    assert.deepEqual(auditorModules, ["RISK_COMPLIANCE_AND_LGPD"]);
+
+    const sampleKpis: AnalyticalKpiSummaryContract = {
+      excludeTestData: true,
+      gmvCents: 12000,
+      netPlatformRevenueCents: 2100,
+      pendingPaymentNetRevenueCents: 0,
+      ledgerReconciledNetRevenueCents: 2100,
+      isReconciledWithLedger: true,
+      totalPlatformCommissionCents: 1800,
+      totalServiceFeeCents: 300,
+      totalPlatformCouponSubsidyCents: 0,
+      operationalMarginCents: 2100,
+      totalQuotesCount: 5,
+      consumedQuotesCount: 3,
+      quoteConversionRateBps: 6000,
+      totalOrdersCount: 3,
+      nonCancelledOrdersCount: 3,
+      cancelledOrdersCount: 0,
+      cancellationRateBps: 0,
+      averagePrepSlaMinutes: 14,
+      averageDeliverySlaMinutes: 26,
+      cancellationBreakdown: [],
+      regionalBreakdown: [],
+      orderRows: [],
+    };
+
+    const analyticsDeniedAal1 = buildGovernanceAnalyticsConsoleModel({
+      actor: staffAdminAal1,
+      kpis: sampleKpis,
+      locale: "en",
+    });
+    assert.equal(analyticsDeniedAal1.authorized, false);
+    assert.equal(analyticsDeniedAal1.reconciliationBadge, "UNAUTHORIZED");
+
+    const analyticsModel = buildGovernanceAnalyticsConsoleModel({
+      actor: privacyAuditor,
+      kpis: sampleKpis,
+      locale: "pt-BR",
+    });
+    assert.equal(analyticsModel.authorized, true);
+    assert.equal(analyticsModel.reconciliationBadge, "RECONCILED_WITH_LEDGER");
+    assert.match(analyticsModel.formattedGmvBrl, /120,00/);
+
+    const sampleAlerts: RiskAlertContract[] = [
+      {
+        id: "alert-1",
+        subjectType: "USER",
+        subjectId: "user-1",
+        ruleCode: "VELOCITY_HIGH_REFUND_RATE",
+        severity: "HIGH",
+        status: "OPEN_AWAITING_HUMAN_REVIEW",
+        ruleExplanation: {
+          ruleCode: "VELOCITY_HIGH_REFUND_RATE",
+          observedValue: 4,
+          thresholdValue: 3,
+          windowDescription: "30d",
+          explanationEn: "High refund velocity observed",
+          explanationPtBr: "Alta velocidade de reembolsos observada",
+          evidenceRefs: ["order:1"],
+        },
+        recommendedAction: "MANUAL_REVIEW_REQUIRED",
+        reviewedBy: null,
+        reviewDecision: null,
+        reviewReason: null,
+        reviewedAt: null,
+        isTestData: false,
+        createdAt: "2026-11-10T10:00:00Z",
+        updatedAt: "2026-11-10T10:00:00Z",
+      },
+    ];
+
+    const auditorRiskModel = buildGovernanceRiskQueueModel({
+      actor: privacyAuditor,
+      alerts: sampleAlerts,
+      locale: "en",
+    });
+    assert.equal(auditorRiskModel.authorized, true);
+    assert.equal(auditorRiskModel.canExecuteHumanReview, false);
+    assert.equal(auditorRiskModel.openAlertsCount, 1);
+
+    const samplePrivacy: PrivacyRequestRecordContract[] = [
+      {
+        id: "req-1",
+        userId: "user-1",
+        requestType: "ANONYMIZATION",
+        status: "BLOCKED_LEGAL_RETENTION",
+        reason: "Account delete",
+        retentionBlockReason: "STATUTORY_FISCAL_LEDGER_RETENTION",
+        holdUntil: "2031-11-10T10:00:00Z",
+        exportPayload: null,
+        anonymizedAt: null,
+        legalBasisNote: "LGPD Art. 16",
+        processedBy: null,
+        completedAt: null,
+        isTestData: false,
+        createdAt: "2026-11-10T10:00:00Z",
+      },
+    ];
+
+    const privacyModel = buildGovernancePrivacyQueueModel({
+      actor: privacyAuditor,
+      requests: samplePrivacy,
+      locale: "en",
+    });
+    assert.equal(privacyModel.authorized, true);
+    assert.equal(privacyModel.blockedRetentionCount, 1);
+  });
 });
 
 describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16, M13, M14, M15)", () => {
@@ -555,6 +688,80 @@ describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16,
       headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
     });
     assert.equal(deniedFinance.status, 403);
+  });
+
+  it("renders M21 Governance Console (/governance/analytics, /governance/risk, /governance/privacy) with MFA aal2, RBAC & live Supabase data", async () => {
+    // 1. aal1 staff is blocked on all M21 governance routes (HTTP 403)
+    for (const route of [
+      "/governance/analytics",
+      "/governance/risk",
+      "/governance/privacy",
+    ]) {
+      const res = await fetch(`${adminBaseUrl}${route}`, {
+        headers: { Authorization: `Bearer ${techAdminTokenAal1}` },
+      });
+      assert.equal(res.status, 403, `Expected 403 on ${route} for aal1`);
+      const html = await res.text();
+      assert.match(html, /MFA aal2/);
+    }
+
+    // 2. Finance staff Roberto (aal2) can view /governance/analytics but is blocked from /governance/risk & /governance/privacy
+    const finAnalyticsRes = await fetch(
+      `${adminBaseUrl}/governance/analytics?locale=en`,
+      {
+        headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+      }
+    );
+    assert.equal(finAnalyticsRes.status, 200);
+    const finAnalyticsHtml = await finAnalyticsRes.text();
+    assert.match(finAnalyticsHtml, /RECONCILED_WITH_LEDGER/);
+    assert.match(finAnalyticsHtml, /Reproducible Analytical KPIs &amp; M13 Ledger Reconciliation/);
+
+    for (const forbiddenRoute of ["/governance/risk", "/governance/privacy"]) {
+      const res = await fetch(`${adminBaseUrl}${forbiddenRoute}`, {
+        headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+      });
+      assert.equal(
+        res.status,
+        403,
+        `Expected finance-only staff to be blocked on ${forbiddenRoute}`
+      );
+    }
+
+    // 3. Tech Admin (aal2) renders live Analytics KPIs + ?excludeTestData=true toggle
+    const analyticsProdOnlyRes = await fetch(
+      `${adminBaseUrl}/governance/analytics?locale=en&excludeTestData=true`,
+      {
+        headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+      }
+    );
+    assert.equal(analyticsProdOnlyRes.status, 200);
+    const analyticsProdHtml = await analyticsProdOnlyRes.text();
+    assert.match(analyticsProdHtml, /RECONCILED_WITH_LEDGER/);
+    assert.match(analyticsProdHtml, /Showing Production Only/);
+
+    // 4. Tech Admin (aal2) renders live Explainable Risk Queue (/governance/risk)
+    const riskRes = await fetch(`${adminBaseUrl}/governance/risk?locale=en`, {
+      headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+    });
+    assert.equal(riskRes.status, 200);
+    const riskHtml = await riskRes.text();
+    assert.match(riskHtml, /No-opaque-auto-ban policy active/);
+    assert.match(riskHtml, /VELOCITY_HIGH_REFUND_RATE/);
+    assert.match(riskHtml, /OPEN_AWAITING_HUMAN_REVIEW/);
+
+    // 5. Tech Admin (aal2) renders live LGPD Privacy Queue (/governance/privacy)
+    const privacyRes = await fetch(
+      `${adminBaseUrl}/governance/privacy?locale=en`,
+      {
+        headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+      }
+    );
+    assert.equal(privacyRes.status, 200);
+    const privacyHtml = await privacyRes.text();
+    assert.match(privacyHtml, /LGPD \(Arts\. 7, 16 &amp; 18\)/);
+    assert.match(privacyHtml, /EXPORT_DATA/);
+    assert.match(privacyHtml, /LGPD Art\. 18, V/);
   });
 });
 

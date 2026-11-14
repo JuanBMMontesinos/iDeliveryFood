@@ -27,6 +27,7 @@ import {
   renderCommercialBackofficePageHtml,
 } from "./app/commercial/page.js";
 import { renderMarketingBackofficePage } from "./app/marketing/page.js";
+import { renderGovernanceBackofficePage } from "./app/governance/page.js";
 
 export interface AdminWebServerOptions {
   apiBaseUrl: string;
@@ -204,6 +205,36 @@ export function createAdminWebServer(
         const html = await renderMarketingBackofficePage({
           apiBaseUrl: options.apiBaseUrl,
           locale,
+          getAccessToken: () => accessToken,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        });
+        res.statusCode = html.includes('role="alert"') && html.includes("banner-err") ? 403 : 200;
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(html);
+        return;
+      }
+
+      if (
+        pathname === "/governance" ||
+        pathname === "/governance/analytics" ||
+        pathname === "/governance/risk" ||
+        pathname === "/governance/privacy"
+      ) {
+        const currentPath =
+          pathname === "/governance/risk"
+            ? "/governance/risk"
+            : pathname === "/governance/privacy"
+              ? "/governance/privacy"
+              : pathname === "/governance/analytics"
+                ? "/governance/analytics"
+                : "/governance";
+        const excludeTestData =
+          parsedUrl.searchParams.get("excludeTestData") === "true";
+        const html = await renderGovernanceBackofficePage({
+          apiBaseUrl: options.apiBaseUrl,
+          locale,
+          currentPath,
+          excludeTestData,
           getAccessToken: () => accessToken,
           ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         });

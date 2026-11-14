@@ -429,6 +429,14 @@ describe("Fase P (M19) — Live Supabase Atomic Coupon Budget Concurrency, Subsi
     assert.equal(shortModRes.status, 400);
 
     // 8. Admin moderation with valid justification succeeds and writes audit_logs
+    const beforeAuditRes = await repo.pool.query(
+      `SELECT COUNT(*)::int AS c
+       FROM public.audit_logs
+       WHERE target_id = $1 AND action = 'ORDER_REVIEW_MODERATED_HIDDEN_BY_MODERATION'`,
+      [TEST_REVIEW_ID]
+    );
+    const beforeAuditCount = Number(beforeAuditRes.rows[0]?.c ?? 0);
+
     const modRes = await fetch(
       `${baseUrl}/v1/admin/reviews/${TEST_REVIEW_ID}/moderate`,
       {
@@ -459,9 +467,10 @@ describe("Fase P (M19) — Live Supabase Atomic Coupon Budget Concurrency, Subsi
     const auditRes = await repo.pool.query(
       `SELECT action, target_type, target_id, reason
        FROM public.audit_logs
-       WHERE target_id = $1 AND action = 'ORDER_REVIEW_MODERATED_HIDDEN_BY_MODERATION'`,
+       WHERE target_id = $1 AND action = 'ORDER_REVIEW_MODERATED_HIDDEN_BY_MODERATION'
+       ORDER BY created_at DESC`,
       [TEST_REVIEW_ID]
     );
-    assert.equal(auditRes.rowCount, 1);
+    assert.equal(auditRes.rowCount, beforeAuditCount + 1);
   });
 });

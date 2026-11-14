@@ -1422,4 +1422,62 @@ ON CONFLICT (id) DO UPDATE SET
   last_error = EXCLUDED.last_error,
   is_test_data = true;
 
+-- Fase R (M21): Explainable Risk Alerts, Human Review Decisions, Enriched Order SLA Timestamps & LGPD Portability Seed
+UPDATE public.orders
+SET accepted_at = COALESCE(accepted_at, '2026-11-03T15:01:30Z'),
+    ready_at = COALESCE(ready_at, '2026-11-03T15:23:30Z'),
+    delivered_at = COALESCE(delivered_at, '2026-11-03T15:41:30Z')
+WHERE id = '00000000-0000-4000-8000-000000001001';
+
+INSERT INTO public.risk_alerts (
+  id, subject_type, subject_id, rule_code, severity, status,
+  rule_explanation_json, recommended_action, reviewed_by, review_decision, review_reason, reviewed_at, is_test_data
+) VALUES
+(
+  '00000000-0000-4000-8000-000000001733',
+  'USER',
+  '00000000-0000-4000-8000-000000000002',
+  'VELOCITY_HIGH_REFUND_RATE',
+  'HIGH',
+  'OPEN_AWAITING_HUMAN_REVIEW',
+  '{"ruleCode":"VELOCITY_HIGH_REFUND_RATE","observedValue":4200,"thresholdValue":3000,"windowDescription":"Last 30 days refund ratio in bps (42.00% vs 30.00% max)","explanationEn":"Customer refund ratio (42.00% across 5 orders in 30d) exceeded deterministic threshold (30.00%). Human review required before any restriction.","explanationPtBr":"Taxa de reembolso do cliente (42,00% em 5 pedidos em 30d) excedeu o limiar determinístico (30,00%). Revisão humana obrigatória antes de qualquer restrição.","evidenceRefs":["order:00000000-0000-4000-8000-000000001001"]}'::jsonb,
+  'HUMAN_REVIEW_REQUIRED',
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  true
+),
+(
+  '00000000-0000-4000-8000-000000001734',
+  'ORDER',
+  '00000000-0000-4000-8000-000000001001',
+  'HIGH_VALUE_ORDER_NEW_ACCOUNT',
+  'MEDIUM',
+  'APPROVED_OVERRIDE',
+  '{"ruleCode":"HIGH_VALUE_ORDER_NEW_ACCOUNT","observedValue":6232,"thresholdValue":5000,"windowDescription":"First 7 days order total in cents","explanationEn":"Order total (R$ 62.32) on recently verified account exceeded advisory threshold (R$ 50.00).","explanationPtBr":"Valor total do pedido (R$ 62,32) em conta recente excedeu o limiar consultivo (R$ 50,00).","evidenceRefs":["order:00000000-0000-4000-8000-000000001001"]}'::jsonb,
+  'HUMAN_REVIEW_REQUIRED',
+  '00000000-0000-4000-8000-000000000090',
+  'APPROVE_OVERRIDE',
+  'Verified PIX settlement and consistent delivery address history.',
+  '2026-11-03T15:02:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  rule_explanation_json = EXCLUDED.rule_explanation_json,
+  review_decision = EXCLUDED.review_decision,
+  review_reason = EXCLUDED.review_reason,
+  is_test_data = true;
+
+UPDATE public.risk_decisions
+SET alert_id = '00000000-0000-4000-8000-000000001734',
+    rule_explanation_json = '{"ruleCode":"VELOCITY_CHECK_NORMAL","observedValue":1,"thresholdValue":5,"windowDescription":"Orders in last 24h"}'::jsonb
+WHERE id = '00000000-0000-4000-8000-000000001724';
+
+UPDATE public.privacy_requests
+SET export_payload = '{"subjectUserId":"00000000-0000-4000-8000-000000000002","legalBasis":"LGPD_ART_18_V_PORTABILITY","generatedAt":"2026-11-02T12:00:00Z"}'::jsonb,
+    legal_basis_note = 'LGPD Art. 18, V — Data portability package generated in structured JSON.'
+WHERE id = '00000000-0000-4000-8000-000000001705';
+
 COMMIT;

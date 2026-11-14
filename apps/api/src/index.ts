@@ -89,6 +89,15 @@ import {
   type NotificationDeliveryContract,
   type OutboxEventContract,
   type UserNotificationsResponseContract,
+  type AnalyticalKpiSummaryContract,
+  type ExplainableRiskRuleCode,
+  type GovernanceBackofficeOverviewContract,
+  type PrivacyRequestRecordContract,
+  type PrivacyRequestStatus,
+  type PrivacyRequestType,
+  type RiskAlertContract,
+  type RiskAlertStatus,
+  type RiskHumanReviewDecision,
 } from "@ideliveryfood/contracts";
 import {
   DEFAULT_BR_PLATFORM_POLICY,
@@ -127,6 +136,9 @@ import {
   validateStoreSettingsPatch,
   verifyAndProcessPspWebhook,
   verifyDeliveryConfirmationCode,
+  evaluateExplainableRiskRule,
+  formatAnalyticalKpisCsv,
+  validateHumanRiskReview,
   type OrderCommandType,
   type QuoteItemInput,
   type SupportActionType,
@@ -203,15 +215,13 @@ export interface ApiDataRepository {
   savePrivacyRequest(params: {
     id: string;
     userId: string;
-    requestType: "EXPORT_DATA" | "DELETE_ACCOUNT" | "CORRECTION";
-    status:
-      | "REQUESTED"
-      | "PROCESSING"
-      | "COMPLETED"
-      | "BLOCKED_LEGAL_RETENTION"
-      | "REJECTED";
+    requestType: PrivacyRequestType;
+    status: PrivacyRequestStatus;
     reason: string | null;
     retentionBlockReason: string | null;
+    holdUntilIso?: string | null;
+    exportPayload?: Record<string, unknown> | null;
+    legalBasisNote?: string | null;
   }): Promise<void>;
 
   listOrganizationMembers(organizationId: string): Promise<
@@ -524,6 +534,61 @@ export interface ApiDataRepository {
     notificationId: string;
     now?: Date;
   }): Promise<NotificationDeliveryContract | null>;
+  getAnalyticalKpiSummary?(params?: {
+    excludeTestData?: boolean;
+    storeId?: string;
+    fromIso?: string;
+    toIso?: string;
+  }): Promise<AnalyticalKpiSummaryContract>;
+  listRiskAlerts?(statusFilter?: RiskAlertStatus): Promise<RiskAlertContract[]>;
+  getRiskAlertById?(alertId: string): Promise<RiskAlertContract | null>;
+  createRiskAlert?(
+    alert: Omit<RiskAlertContract, "createdAt" | "updatedAt">
+  ): Promise<RiskAlertContract>;
+  reviewRiskAlert?(params: {
+    alertId: string;
+    status: RiskAlertStatus;
+    reviewedBy: string;
+    reviewDecision: RiskHumanReviewDecision;
+    reviewReason: string;
+    reviewedAtIso: string;
+    suspendSubjectIfConfirmed?: boolean;
+  }): Promise<RiskAlertContract | null>;
+  listPrivacyRequests?(params?: {
+    statusFilter?: PrivacyRequestStatus;
+    userId?: string;
+  }): Promise<PrivacyRequestRecordContract[]>;
+  getPrivacyRequestById?(
+    requestId: string
+  ): Promise<PrivacyRequestRecordContract | null>;
+  checkUserPrivacyRetentionSignals?(userId: string): Promise<{
+    hasActiveOrders: boolean;
+    hasOpenFinancialDisputes: boolean;
+    hasCompletedFiscalTransactions: boolean;
+  }>;
+  generateLgpdPortabilityForUser?(
+    userId: string
+  ): Promise<Record<string, unknown> | null>;
+  completePrivacyExportRequest?(params: {
+    requestId: string;
+    processedBy: string;
+    exportPayload: Record<string, unknown>;
+  }): Promise<PrivacyRequestRecordContract | null>;
+  anonymizeUserAccountAndCompleteRequest?(params: {
+    requestId: string;
+    processedBy: string;
+    legalBasisNote?: string;
+    now?: Date;
+  }): Promise<{
+    request: PrivacyRequestRecordContract;
+    outcome: "ANONYMIZED" | "BLOCKED_LEGAL_RETENTION";
+    reasonCode: string;
+    holdUntilIso: string | null;
+    anonymizedEmail: string | null;
+  } | null>;
+  getGovernanceBackofficeOverview?(params?: {
+    excludeTestData?: boolean;
+  }): Promise<GovernanceBackofficeOverviewContract>;
 }
 
 /**
@@ -1143,7 +1208,7 @@ export function createApiServer(deps: {
         return;
       }
 
-      // 8. POST /v1/me/privacy-requests (LGPD Deletion & Legal Hold Check)
+      // 8. POST /v1/me/privacy-requests (LGPD Export, Deletion, Anonymization & Legal Retention Check)
       if (method === "POST" && pathname === "/v1/me/privacy-requests") {
         if (!actor) {
           sendError(
@@ -1156,27 +1221,95 @@ export function createApiServer(deps: {
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
+        const rawReqType = String(body.requestType ?? "DELETE_ACCOUNT").toUpperCase();
+        const requestType: PrivacyRequestType = (
+          [
+            "EXPORT_DATA",
+            "DATA_EXPORT",
+            "DELETE_ACCOUNT",
+            "ACCOUNT_DELETION",
+            "ANONYMIZATION",
+            "CORRECTION",
+          ].includes(rawReqType)
+            ? rawReqType
+            : "DELETE_ACCOUNT"
+        ) as PrivacyRequestType;
+
+        const requestId = body.id ? String(body.id) : crypto.randomUUID();
+        const now = new Date();
+
+        if (requestType === "EXPORT_DATA" || requestType === "DATA_EXPORT") {
+          const exportPayload = deps.repository.generateLgpdPortabilityForUser
+            ? await deps.repository.generateLgpdPortabilityForUser(actor.id)
+            : null;
+          await deps.repository.savePrivacyRequest({
+            id: requestId,
+            userId: actor.id,
+            requestType,
+            status: exportPayload ? "COMPLETED" : "REQUESTED",
+            reason: body.reason ? String(body.reason) : "LGPD data portability request",
+            retentionBlockReason: null,
+            exportPayload,
+            legalBasisNote: "LGPD Art. 18, V — Data portability export",
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "PRIVACY_EXPORT_REQUESTED",
+            targetType: "PROFILE",
+            targetId: actor.id,
+            correlationId,
+            reason: body.reason ? String(body.reason) : "LGPD Art. 18, V portability",
+            redactedPayload: { requestId, requestType },
+            createdAt: now.toISOString(),
+          });
+          sendJson(res, 201, correlationId, {
+            data: {
+              requestId,
+              requestType,
+              status: exportPayload ? "COMPLETED" : "REQUESTED",
+              exportPayload,
+            },
+          });
+          return;
+        }
+
+        const dbSignals = deps.repository.checkUserPrivacyRetentionSignals
+          ? await deps.repository.checkUserPrivacyRetentionSignals(actor.id)
+          : {
+              hasActiveOrders: false,
+              hasOpenFinancialDisputes: false,
+              hasCompletedFiscalTransactions: false,
+            };
+
         const evaluation = evaluateAccountDeletionRequest({
           userId: actor.id,
-          hasActiveOrders: Boolean(body.hasActiveOrders),
-          hasOpenFinancialDisputes: Boolean(body.hasOpenFinancialDisputes),
-          hasCompletedFiscalTransactions: Boolean(
-            body.hasCompletedFiscalTransactions
-          ),
-          requestedAt: new Date(),
+          hasActiveOrders: Boolean(body.hasActiveOrders) || dbSignals.hasActiveOrders,
+          hasOpenFinancialDisputes:
+            Boolean(body.hasOpenFinancialDisputes) || dbSignals.hasOpenFinancialDisputes,
+          hasCompletedFiscalTransactions:
+            Boolean(body.hasCompletedFiscalTransactions) ||
+            dbSignals.hasCompletedFiscalTransactions,
+          requestedAt: now,
         });
 
-        const requestId = crypto.randomUUID();
+        const status: PrivacyRequestStatus =
+          evaluation.outcome === "IMMEDIATE_ANONYMIZATION"
+            ? "PROCESSING"
+            : "BLOCKED_LEGAL_RETENTION";
+
         await deps.repository.savePrivacyRequest({
           id: requestId,
           userId: actor.id,
-          requestType: "DELETE_ACCOUNT",
-          status:
-            evaluation.outcome === "IMMEDIATE_ANONYMIZATION"
-              ? "PROCESSING"
-              : "BLOCKED_LEGAL_RETENTION",
+          requestType,
+          status,
           reason: body.reason ? String(body.reason) : null,
           retentionBlockReason: evaluation.reasonCode,
+          holdUntilIso: evaluation.holdUntilIso,
+          legalBasisNote:
+            status === "BLOCKED_LEGAL_RETENTION"
+              ? `LGPD Art. 16, I / Art. 7, II — Statutory retention (${evaluation.reasonCode})`
+              : "LGPD Art. 18, VI — Eligible for anonymization",
         });
 
         await deps.repository.appendAuditLog({
@@ -1188,13 +1321,90 @@ export function createApiServer(deps: {
           correlationId,
           reason: evaluation.reasonCode,
           redactedPayload: {
+            requestId,
+            requestType,
             outcome: evaluation.outcome,
             holdUntilIso: evaluation.holdUntilIso,
           },
-          createdAt: new Date().toISOString(),
+          createdAt: now.toISOString(),
         });
 
-        sendJson(res, 201, correlationId, { data: evaluation });
+        sendJson(res, 201, correlationId, {
+          data: {
+            ...evaluation,
+            requestId,
+            requestType,
+            status,
+          },
+        });
+        return;
+      }
+
+      // 8b. GET /v1/me/privacy-export (M21 — Immediate LGPD Art. 18, V JSON Data Portability Export)
+      if (method === "GET" && pathname === "/v1/me/privacy-export") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        if (!deps.repository.generateLgpdPortabilityForUser) {
+          sendError(
+            res,
+            501,
+            "NOT_IMPLEMENTED",
+            "LGPD portability exporter is not configured on this repository.",
+            correlationId
+          );
+          return;
+        }
+        const exportPackage = await deps.repository.generateLgpdPortabilityForUser(actor.id);
+        if (!exportPackage) {
+          sendError(res, 404, "PROFILE_NOT_FOUND", "User profile not found.", correlationId);
+          return;
+        }
+        const requestId = crypto.randomUUID();
+        const nowIso = new Date().toISOString();
+        await deps.repository.savePrivacyRequest({
+          id: requestId,
+          userId: actor.id,
+          requestType: "DATA_EXPORT",
+          status: "COMPLETED",
+          reason: "Self-service LGPD portability export",
+          retentionBlockReason: null,
+          exportPayload: exportPackage,
+          legalBasisNote: "LGPD Art. 18, V — Data portability export completed",
+        });
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "PRIVACY_PORTABILITY_EXPORTED",
+          targetType: "PROFILE",
+          targetId: actor.id,
+          correlationId,
+          reason: "Self-service LGPD Art. 18, V export",
+          redactedPayload: { requestId },
+          createdAt: nowIso,
+        });
+        sendJson(res, 200, correlationId, {
+          data: {
+            request: {
+              id: requestId,
+              userId: actor.id,
+              requestType: "DATA_EXPORT",
+              status: "COMPLETED",
+              reason: "Self-service LGPD portability export",
+              retentionBlockReason: null,
+              holdUntil: null,
+              exportPayload: exportPackage,
+              anonymizedAt: null,
+              legalBasisNote: "LGPD Art. 18, V — Data portability export completed",
+              processedBy: actor.id,
+              completedAt: nowIso,
+              isTestData: false,
+              createdAt: nowIso,
+            },
+            exportPackage,
+          },
+        });
         return;
       }
 
@@ -6959,6 +7169,596 @@ export function createApiServer(deps: {
           return;
         }
         sendJson(res, 200, correlationId, { data: updated });
+        return;
+      }
+
+      // ======================================================================
+      // Fase R (M21): Reproducible Analytical KPIs, Explainable Risk & LGPD Governance
+      // ======================================================================
+
+      // 23a. GET /v1/analytics/overview (M21 — GMV, Net Revenue, Ledger Reconciliation, Conversion, SLA)
+      if (method === "GET" && pathname === "/v1/analytics/overview") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "operations",
+            "finance",
+            "commercial",
+            "marketing",
+            "risk_compliance",
+            "auditor_privacy",
+            "tech_admin",
+          ],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            authz.reasonCode === "DENIED_MFA_STEP_UP_REQUIRED" ? 403 : 403,
+            authz.reasonCode,
+            "Authorized staff scope with MFA aal2 required for analytics.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getAnalyticalKpiSummary) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Analytics repository not configured.", correlationId);
+          return;
+        }
+
+        const excludeTestData = parsedUrl.searchParams.get("excludeTestData") === "true";
+        const storeIdParam = parsedUrl.searchParams.get("storeId") ?? undefined;
+        const fromIsoParam = parsedUrl.searchParams.get("fromIso") ?? undefined;
+        const toIsoParam = parsedUrl.searchParams.get("toIso") ?? undefined;
+
+        const summary = await deps.repository.getAnalyticalKpiSummary({
+          excludeTestData,
+          ...(storeIdParam ? { storeId: storeIdParam } : {}),
+          ...(fromIsoParam ? { fromIso: fromIsoParam } : {}),
+          ...(toIsoParam ? { toIso: toIsoParam } : {}),
+        });
+        sendJson(res, 200, correlationId, { data: summary });
+        return;
+      }
+
+      // 23b. GET /v1/analytics/export (M21 — Paginated, Rate-Limited, Audited CSV/JSON Export)
+      if (method === "GET" && pathname === "/v1/analytics/export") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "operations",
+            "finance",
+            "commercial",
+            "marketing",
+            "risk_compliance",
+            "auditor_privacy",
+            "tech_admin",
+          ],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized staff scope with MFA aal2 required for analytics export.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getAnalyticalKpiSummary) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Analytics repository not configured.", correlationId);
+          return;
+        }
+
+        const format = (parsedUrl.searchParams.get("format") ?? "json").toLowerCase();
+        const excludeTestData = parsedUrl.searchParams.get("excludeTestData") === "true";
+        const storeIdParam = parsedUrl.searchParams.get("storeId") ?? undefined;
+        const rawLimit = Number(parsedUrl.searchParams.get("limit") ?? 100);
+        const rawOffset = Number(parsedUrl.searchParams.get("offset") ?? 0);
+
+        if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 500) {
+          sendError(
+            res,
+            400,
+            "ANALYTICS_EXPORT_LIMIT_EXCEEDED",
+            "Export pagination limit must be an integer between 1 and 500 rows.",
+            correlationId
+          );
+          return;
+        }
+        if (!Number.isInteger(rawOffset) || rawOffset < 0) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "offset must be a non-negative integer.",
+            correlationId
+          );
+          return;
+        }
+
+        const summary = await deps.repository.getAnalyticalKpiSummary({
+          excludeTestData,
+          ...(storeIdParam ? { storeId: storeIdParam } : {}),
+        });
+        const slicedRows = summary.orderRows.slice(rawOffset, rawOffset + rawLimit);
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "ANALYTICS_REPORT_EXPORTED",
+          targetType: "ANALYTICS_EXPORT",
+          targetId: format,
+          correlationId,
+          reason: `Audited M21 ${format.toUpperCase()} analytics export (${slicedRows.length} rows)`,
+          redactedPayload: {
+            format,
+            excludeTestData,
+            storeId: storeIdParam ?? null,
+            limit: rawLimit,
+            offset: rawOffset,
+            exportedRows: slicedRows.length,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        if (format === "csv") {
+          const csvBody = formatAnalyticalKpisCsv(slicedRows);
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "text/csv; charset=utf-8");
+          res.setHeader("X-Correlation-Id", correlationId);
+          res.setHeader(
+            "Content-Disposition",
+            'attachment; filename="ideliveryfood-analytics-export.csv"'
+          );
+          res.end(csvBody);
+          return;
+        }
+
+        sendJson(res, 200, correlationId, {
+          data: {
+            format: "json",
+            excludeTestData,
+            limit: rawLimit,
+            offset: rawOffset,
+            totalRows: summary.orderRows.length,
+            rows: slicedRows,
+          },
+        });
+        return;
+      }
+
+      // 23c. GET /v1/governance/overview (M21 — Consolidated BI + Risk Alerts + LGPD Requests for admin-web)
+      if (method === "GET" && pathname === "/v1/governance/overview") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["risk_compliance", "auditor_privacy", "tech_admin", "finance", "operations"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized governance role with MFA aal2 required.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getGovernanceBackofficeOverview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Governance repository not configured.", correlationId);
+          return;
+        }
+        const excludeTestData = parsedUrl.searchParams.get("excludeTestData") === "true";
+        const overview = await deps.repository.getGovernanceBackofficeOverview({
+          excludeTestData,
+        });
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 23d. GET /v1/governance/risk/alerts (M21 — List explainable risk alerts)
+      if (method === "GET" && pathname === "/v1/governance/risk/alerts") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["risk_compliance", "auditor_privacy", "tech_admin", "operations"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized risk/governance role with MFA aal2 required.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.listRiskAlerts) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Risk repository not configured.", correlationId);
+          return;
+        }
+        const statusFilter = parsedUrl.searchParams.get("status") as RiskAlertStatus | null;
+        const alerts = await deps.repository.listRiskAlerts(statusFilter ?? undefined);
+        sendJson(res, 200, correlationId, { data: alerts });
+        return;
+      }
+
+      // 23e. POST /v1/governance/risk/evaluate (M21 — Run deterministic explainable rule; never auto-ban without human review)
+      if (method === "POST" && pathname === "/v1/governance/risk/evaluate") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["risk_compliance", "tech_admin", "operations"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized staff role with MFA aal2 required to evaluate risk rules.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.createRiskAlert) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Risk repository not configured.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const ruleCode = String(body.ruleCode ?? "") as ExplainableRiskRuleCode;
+        const subjectType = String(body.subjectType ?? "USER") as RiskAlertContract["subjectType"];
+        const subjectId = String(body.subjectId ?? "").trim();
+        const observedValue = Number(body.observedValue);
+        const thresholdValue =
+          body.thresholdValue !== undefined ? Number(body.thresholdValue) : undefined;
+        const evidenceRefs = Array.isArray(body.evidenceRefs)
+          ? (body.evidenceRefs as string[]).map(String)
+          : [];
+
+        const validRules: ExplainableRiskRuleCode[] = [
+          "VELOCITY_HIGH_REFUND_RATE",
+          "COURIER_REPEATED_OTP_FAILURES",
+          "COUPON_ABUSE_MULTI_ACCOUNT",
+          "HIGH_VALUE_ORDER_NEW_ACCOUNT",
+          "BANK_ACCOUNT_FREQUENT_CHANGES",
+        ];
+        if (!validRules.includes(ruleCode) || !subjectId || !Number.isFinite(observedValue)) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "Valid ruleCode, subjectId, and numeric observedValue are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const evalResult = evaluateExplainableRiskRule({
+          ruleCode,
+          subjectType,
+          subjectId,
+          observedValue,
+          ...(thresholdValue !== undefined && Number.isFinite(thresholdValue)
+            ? { thresholdValue }
+            : {}),
+          evidenceRefs,
+        });
+
+        let createdAlert: RiskAlertContract | null = null;
+        if (evalResult.triggered) {
+          createdAlert = await deps.repository.createRiskAlert({
+            id: body.id ? String(body.id) : crypto.randomUUID(),
+            subjectType,
+            subjectId,
+            ruleCode,
+            severity: evalResult.severity,
+            status: "OPEN_AWAITING_HUMAN_REVIEW",
+            ruleExplanation: evalResult.ruleExplanation,
+            recommendedAction: "HUMAN_REVIEW_REQUIRED",
+            reviewedBy: null,
+            reviewDecision: null,
+            reviewReason: null,
+            reviewedAt: null,
+            isTestData: false,
+          });
+        }
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: evalResult.triggered ? "RISK_ALERT_TRIGGERED" : "RISK_RULE_EVALUATED_CLEAN",
+          targetType: subjectType,
+          targetId: subjectId,
+          correlationId,
+          reason: evalResult.ruleExplanation.explanationEn,
+          redactedPayload: {
+            ruleCode,
+            triggered: evalResult.triggered,
+            observedValue,
+            thresholdValue: evalResult.ruleExplanation.thresholdValue,
+            alertId: createdAlert?.id ?? null,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, evalResult.triggered ? 201 : 200, correlationId, {
+          data: {
+            triggered: evalResult.triggered,
+            alert: createdAlert,
+            recommendedAction: evalResult.recommendedAction,
+            ruleExplanation: evalResult.ruleExplanation,
+          },
+        });
+        return;
+      }
+
+      // 23f. POST /v1/governance/risk/alerts/:id/review (M21 — Mandatory human review by risk_compliance + aal2)
+      const riskReviewMatch = pathname.match(/^\/v1\/governance\/risk\/alerts\/([^/]+)\/review$/);
+      if (method === "POST" && riskReviewMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        if (!deps.repository.getRiskAlertById || !deps.repository.reviewRiskAlert) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Risk repository not configured.", correlationId);
+          return;
+        }
+        const alertId = riskReviewMatch[1] ?? "";
+        const existingAlert = await deps.repository.getRiskAlertById(alertId);
+        if (!existingAlert) {
+          sendError(res, 404, "RISK_ALERT_NOT_FOUND", `Risk alert ${alertId} not found.`, correlationId);
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const decision = String(body.decision ?? "").toUpperCase() as RiskHumanReviewDecision;
+        const reason = String(body.reason ?? "");
+
+        if (
+          !["APPROVE_OVERRIDE", "CONFIRM_BLOCK", "DISMISS_FALSE_POSITIVE"].includes(decision)
+        ) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "decision must be APPROVE_OVERRIDE, CONFIRM_BLOCK, or DISMISS_FALSE_POSITIVE.",
+            correlationId
+          );
+          return;
+        }
+
+        try {
+          const validated = validateHumanRiskReview({
+            actorId: actor.id,
+            actorRoles: actor.staffScopes.map((s) => s.role),
+            actorAal: actor.aal,
+            alert: existingAlert,
+            decision,
+            reason,
+          });
+
+          const updated = await deps.repository.reviewRiskAlert({
+            alertId: existingAlert.id,
+            status: validated.updatedStatus,
+            reviewedBy: actor.id,
+            reviewDecision: validated.decision,
+            reviewReason: validated.reason,
+            reviewedAtIso: validated.reviewedAtIso,
+            suspendSubjectIfConfirmed: Boolean(
+            body.suspendSubject ?? body.suspendSubjectIfConfirmed ?? false
+          ),
+          });
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: `RISK_ALERT_HUMAN_REVIEWED_${validated.decision}`,
+            targetType: "RISK_ALERT",
+            targetId: existingAlert.id,
+            correlationId,
+            reason: validated.reason,
+            redactedPayload: {
+              ruleCode: existingAlert.ruleCode,
+              subjectType: existingAlert.subjectType,
+              subjectId: existingAlert.subjectId,
+              decision: validated.decision,
+              updatedStatus: validated.updatedStatus,
+            },
+            createdAt: validated.reviewedAtIso,
+          });
+
+          sendJson(res, 200, correlationId, { data: updated });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Risk review failed";
+          const code = msg.split(":")[0] ?? "RISK_REVIEW_ERROR";
+          const status =
+            code === "RISK_REVIEW_FORBIDDEN" ||
+            code === "RISK_REVIEW_MFA_AAL2_REQUIRED" ||
+            code === "RISK_REVIEW_SELF_FORBIDDEN"
+              ? 403
+              : 400;
+          sendError(res, status, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 23g. GET /v1/governance/privacy/requests (M21 — List LGPD privacy requests)
+      if (method === "GET" && pathname === "/v1/governance/privacy/requests") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["auditor_privacy", "risk_compliance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized auditor_privacy or risk_compliance scope with MFA aal2 required.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.listPrivacyRequests) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Privacy repository not configured.", correlationId);
+          return;
+        }
+        const statusFilter = parsedUrl.searchParams.get("status") as PrivacyRequestStatus | null;
+        const rows = await deps.repository.listPrivacyRequests({
+          ...(statusFilter ? { statusFilter } : {}),
+        });
+        sendJson(res, 200, correlationId, { data: rows });
+        return;
+      }
+
+      // 23h. POST /v1/governance/privacy/requests/:id/export (M21 — Generate audited LGPD portability package)
+      const privExportMatch = pathname.match(
+        /^\/v1\/governance\/privacy\/requests\/([^/]+)\/export$/
+      );
+      if (method === "POST" && privExportMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["auditor_privacy", "risk_compliance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized auditor_privacy / risk_compliance with MFA aal2 required.",
+            correlationId
+          );
+          return;
+        }
+        if (
+          !deps.repository.getPrivacyRequestById ||
+          !deps.repository.generateLgpdPortabilityForUser ||
+          !deps.repository.completePrivacyExportRequest
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Privacy export repository not configured.", correlationId);
+          return;
+        }
+        const requestId = privExportMatch[1] ?? "";
+        const existingReq = await deps.repository.getPrivacyRequestById(requestId);
+        if (!existingReq) {
+          sendError(res, 404, "PRIVACY_REQUEST_NOT_FOUND", `Privacy request ${requestId} not found.`, correlationId);
+          return;
+        }
+        const pkg = await deps.repository.generateLgpdPortabilityForUser(existingReq.userId);
+        if (!pkg) {
+          sendError(res, 404, "PROFILE_NOT_FOUND", "Subject profile not found.", correlationId);
+          return;
+        }
+        const updated = await deps.repository.completePrivacyExportRequest({
+          requestId: existingReq.id,
+          processedBy: actor.id,
+          exportPayload: pkg,
+        });
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "LGPD_DATA_EXPORT_COMPLETED",
+          targetType: "PRIVACY_REQUEST",
+          targetId: existingReq.id,
+          correlationId,
+          reason: "Processed LGPD Art. 18, V data portability export",
+          redactedPayload: { subjectUserId: existingReq.userId },
+          createdAt: new Date().toISOString(),
+        });
+        sendJson(res, 200, correlationId, { data: updated });
+        return;
+      }
+
+      // 23i. POST /v1/governance/privacy/requests/:id/anonymize (M21 — Anonymize eligible PII or enforce statutory hold)
+      const privAnonMatch = pathname.match(
+        /^\/v1\/governance\/privacy\/requests\/([^/]+)\/anonymize$/
+      );
+      if (method === "POST" && privAnonMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["auditor_privacy", "risk_compliance", "tech_admin"],
+          requireMfaAal2: true,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Authorized auditor_privacy / risk_compliance with MFA aal2 required.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.anonymizeUserAccountAndCompleteRequest) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "LGPD anonymization repository not configured.", correlationId);
+          return;
+        }
+        const requestId = privAnonMatch[1] ?? "";
+        const result = await deps.repository.anonymizeUserAccountAndCompleteRequest({
+          requestId,
+          processedBy: actor.id,
+        });
+        if (!result) {
+          sendError(res, 404, "PRIVACY_REQUEST_NOT_FOUND", `Privacy request ${requestId} not found.`, correlationId);
+          return;
+        }
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action:
+            result.outcome === "ANONYMIZED"
+              ? "LGPD_PII_ANONYMIZED"
+              : "LGPD_LEGAL_RETENTION_HOLD_ENFORCED",
+          targetType: "PRIVACY_REQUEST",
+          targetId: result.request.id,
+          correlationId,
+          reason: result.reasonCode,
+          redactedPayload: {
+            subjectUserId: result.request.userId,
+            outcome: result.outcome,
+            holdUntilIso: result.holdUntilIso,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        sendJson(res, 200, correlationId, { data: result.request, meta: { outcome: result.outcome, reasonCode: result.reasonCode, holdUntilIso: result.holdUntilIso } });
         return;
       }
 

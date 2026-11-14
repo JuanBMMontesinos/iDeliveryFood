@@ -46,6 +46,12 @@ import {
   renderVersionedNotificationTemplate,
   signOutboundWebhookPayload,
   verifyOutboundWebhookSignature,
+  anonymizeProfilePii,
+  buildLgpdDataPortabilityPackage,
+  computeReproducibleAnalyticalKpis,
+  evaluateExplainableRiskRule,
+  formatAnalyticalKpisCsv,
+  validateHumanRiskReview,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -1438,5 +1444,212 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     assert.equal(reconciled.merged.length, 2);
     assert.equal(reconciled.newlyRecoveredCount, 1);
     assert.equal(reconciled.latestCursorSeq, 11);
+  });
+
+  it("enforces M21 reproducible analytical KPIs, exact M13 ledger reconciliation, explainable risk alerts with mandatory human review, and LGPD portability/anonymization", () => {
+    // 1. Reproducible GMV vs Net Platform Revenue reconciled cent-for-cent with M13 ledger
+    const kpisAll = computeReproducibleAnalyticalKpis({
+      orderRows: [
+        {
+          orderId: "00000000-0000-4000-8000-000000001001",
+          orderNumber: 10001,
+          organizationId: "00000000-0000-4000-8000-000000000101",
+          storeId: "00000000-0000-4000-8000-000000000201",
+          storeName: "Paulista Artisan Burgers - Jardins",
+          city: "São Paulo",
+          stateCode: "SP",
+          orderStatus: "DELIVERED",
+          paymentStatus: "CAPTURED",
+          subtotalCents: 5580,
+          addonsCents: 650,
+          deliveryFeeCents: 690,
+          serviceFeeCents: 312,
+          discountCents: 1000,
+          totalCents: 6232,
+          platformCommissionCents: 1433,
+          merchantNetCents: 4797,
+          courierEarningsCents: 690,
+          platformCouponSubsidyCents: 1000,
+          merchantCouponSubsidyCents: 0,
+          gmvCents: 7232,
+          platformNetRevenueCents: 745,
+          operationalMarginCents: 745,
+          prepSlaMinutes: 22,
+          deliverySlaMinutes: 18,
+          cancellationReason: null,
+          cancelledByRole: null,
+          isTestData: true,
+          createdAt: "2026-11-03T15:00:00.000Z",
+        },
+        {
+          orderId: "00000000-0000-4000-8000-000000001002",
+          orderNumber: 10002,
+          organizationId: "00000000-0000-4000-8000-000000000101",
+          storeId: "00000000-0000-4000-8000-000000000201",
+          storeName: "Paulista Artisan Burgers - Jardins",
+          city: "São Paulo",
+          stateCode: "SP",
+          orderStatus: "CANCELLED",
+          paymentStatus: "CANCELLED",
+          subtotalCents: 4000,
+          addonsCents: 0,
+          deliveryFeeCents: 690,
+          serviceFeeCents: 200,
+          discountCents: 0,
+          totalCents: 4890,
+          platformCommissionCents: 920,
+          merchantNetCents: 3080,
+          courierEarningsCents: 690,
+          platformCouponSubsidyCents: 0,
+          merchantCouponSubsidyCents: 0,
+          gmvCents: 0,
+          platformNetRevenueCents: 0,
+          operationalMarginCents: 0,
+          prepSlaMinutes: null,
+          deliverySlaMinutes: null,
+          cancellationReason: "CUSTOMER_CHANGED_MIND",
+          cancelledByRole: "CUSTOMER",
+          isTestData: false,
+          createdAt: "2026-11-04T15:00:00.000Z",
+        },
+      ],
+      totalQuotesCount: 4,
+      consumedQuotesCount: 2,
+      // Ledger Net Revenue = PLATFORM_COMMISSION_REVENUE (1433) + PLATFORM_SERVICE_FEE_REVENUE (312) - PLATFORM_PROMO_SUBSIDY_EXPENSE (1000) = 745
+      ledgerRevenueNetCents: 745,
+      excludeTestData: false,
+    });
+
+    assert.equal(kpisAll.gmvCents, 7232);
+    assert.equal(kpisAll.netPlatformRevenueCents, 745);
+    assert.equal(kpisAll.isReconciledWithLedger, true);
+    assert.equal(kpisAll.quoteConversionRateBps, 5000);
+    assert.equal(kpisAll.cancellationRateBps, 5000);
+    assert.equal(kpisAll.averagePrepSlaMinutes, 22);
+    assert.equal(kpisAll.averageDeliverySlaMinutes, 18);
+    assert.equal(kpisAll.cancellationBreakdown.length, 1);
+    assert.equal(kpisAll.cancellationBreakdown[0]?.cancelledByRole, "CUSTOMER");
+
+    // Exclude test data filter
+    const kpisProdOnly = computeReproducibleAnalyticalKpis({
+      orderRows: kpisAll.orderRows,
+      totalQuotesCount: 2,
+      consumedQuotesCount: 1,
+      ledgerRevenueNetCents: 0,
+      excludeTestData: true,
+    });
+    assert.equal(kpisProdOnly.gmvCents, 0);
+    assert.equal(kpisProdOnly.totalOrdersCount, 1);
+
+    const csvOutput = formatAnalyticalKpisCsv(kpisAll.orderRows);
+    assert.ok(csvOutput.includes("order_id,order_number,store_id,store_name"));
+    assert.ok(csvOutput.includes("00000000-0000-4000-8000-000000001001,10001"));
+
+    // 2. Explainable risk rules & mandatory human review
+    const riskEval = evaluateExplainableRiskRule({
+      ruleCode: "COUPON_ABUSE_MULTI_ACCOUNT",
+      subjectType: "USER",
+      subjectId: "user_suspect_1",
+      observedValue: 4,
+      thresholdValue: 2,
+      evidenceRefs: ["device:dev_shared_99", "promo:WELCOME10"],
+    });
+    assert.equal(riskEval.triggered, true);
+    assert.equal(riskEval.severity, "CRITICAL");
+    assert.equal(riskEval.status, "OPEN_AWAITING_HUMAN_REVIEW");
+    assert.equal(riskEval.recommendedAction, "HUMAN_REVIEW_REQUIRED");
+    assert.ok(riskEval.ruleExplanation.explanationEn.includes("Mandatory human review required"));
+    assert.ok(riskEval.ruleExplanation.explanationPtBr.includes("Revisão humana obrigatória"));
+
+    const sampleAlert = {
+      id: "alert_01",
+      subjectType: "USER" as const,
+      subjectId: "user_suspect_1",
+      ruleCode: "COUPON_ABUSE_MULTI_ACCOUNT" as const,
+      severity: riskEval.severity,
+      status: riskEval.status,
+      ruleExplanation: riskEval.ruleExplanation,
+      recommendedAction: riskEval.recommendedAction,
+      reviewedBy: null,
+      reviewDecision: null,
+      reviewReason: null,
+      reviewedAt: null,
+      isTestData: true,
+      createdAt: "2026-11-14T06:00:00.000Z",
+      updatedAt: "2026-11-14T06:00:00.000Z",
+    };
+
+    // Rejects review without MFA aal2
+    assert.throws(
+      () =>
+        validateHumanRiskReview({
+          actorId: "staff_risk_1",
+          actorRoles: ["risk_compliance"],
+          actorAal: "aal1",
+          alert: sampleAlert,
+          decision: "CONFIRM_BLOCK",
+          reason: "Confirmed multi-account abuse across 4 accounts.",
+        }),
+      /RISK_REVIEW_MFA_AAL2_REQUIRED/
+    );
+
+    const humanReview = validateHumanRiskReview({
+      actorId: "staff_risk_1",
+      actorRoles: ["risk_compliance"],
+      actorAal: "aal2",
+      alert: sampleAlert,
+      decision: "CONFIRM_BLOCK",
+      reason: "Confirmed multi-account abuse across 4 accounts.",
+    });
+    assert.equal(humanReview.updatedStatus, "CONFIRMED_BLOCK");
+    assert.equal(humanReview.decision, "CONFIRM_BLOCK");
+
+    // 3. LGPD portability & PII anonymization with statutory fiscal retention hold
+    const portabilityPkg = buildLgpdDataPortabilityPackage({
+      profile: {
+        id: "user_lgpd_1",
+        email: "alice@test.ideliveryfood.invalid",
+        fullName: "Alice Silva",
+        phone: "+5511999990001",
+        preferredLocale: "pt-BR",
+        status: "ACTIVE",
+      },
+      addresses: [{ label: "Home", city: "São Paulo" }],
+      orders: [
+        {
+          id: "ord_1",
+          orderNumber: 10001,
+          storeId: "store_1",
+          totalCents: 6232,
+          orderStatus: "DELIVERED",
+          createdAt: "2026-11-03T15:00:00.000Z",
+        },
+      ],
+      supportCases: [],
+    });
+    assert.equal(portabilityPkg.legalBasis, "LGPD_ART_18_V_PORTABILITY");
+    assert.equal(portabilityPkg.ordersHistoryCount, 1);
+
+    const blockedByFiscalHold = anonymizeProfilePii({
+      userId: "user_lgpd_1",
+      hasActiveOrders: false,
+      hasOpenFinancialDisputes: false,
+      hasCompletedFiscalTransactions: true,
+      now: new Date("2026-11-14T06:00:00.000Z"),
+    });
+    assert.equal(blockedByFiscalHold.allowed, false);
+    assert.equal(blockedByFiscalHold.reasonCode, "STATUTORY_FISCAL_LEDGER_RETENTION");
+    assert.ok(blockedByFiscalHold.holdUntilIso?.startsWith("2031-11-1"));
+
+    const eligibleAnonymization = anonymizeProfilePii({
+      userId: "user_lgpd_clean",
+      hasActiveOrders: false,
+      hasOpenFinancialDisputes: false,
+      hasCompletedFiscalTransactions: false,
+      now: new Date("2026-11-14T06:00:00.000Z"),
+    });
+    assert.equal(eligibleAnonymization.allowed, true);
+    assert.equal(eligibleAnonymization.reasonCode, "PII_ANONYMIZED_LGPD_COMPLIANT");
+    assert.ok(eligibleAnonymization.anonymizedEmail?.endsWith("@anonymized.ideliveryfood.invalid"));
   });
 });

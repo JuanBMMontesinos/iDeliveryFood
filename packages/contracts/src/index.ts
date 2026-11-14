@@ -1173,6 +1173,165 @@ export interface FleetsBackofficeOverviewContract {
   }>;
 }
 
+// ============================================================================
+// Fase R (M21): Reproducible Analytical KPIs, Explainable Risk & LGPD Privacy
+// ============================================================================
+
+export type ExplainableRiskRuleCode =
+  | "VELOCITY_HIGH_REFUND_RATE"
+  | "COURIER_REPEATED_OTP_FAILURES"
+  | "COUPON_ABUSE_MULTI_ACCOUNT"
+  | "HIGH_VALUE_ORDER_NEW_ACCOUNT"
+  | "BANK_ACCOUNT_FREQUENT_CHANGES";
+
+export type RiskAlertSeverity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export type RiskAlertStatus =
+  | "OPEN_AWAITING_HUMAN_REVIEW"
+  | "APPROVED_OVERRIDE"
+  | "CONFIRMED_BLOCK"
+  | "DISMISSED_FALSE_POSITIVE";
+
+export type RiskHumanReviewDecision =
+  | "APPROVE_OVERRIDE"
+  | "CONFIRM_BLOCK"
+  | "DISMISS_FALSE_POSITIVE";
+
+export interface RiskRuleExplanationContract {
+  ruleCode: ExplainableRiskRuleCode | "VELOCITY_CHECK_NORMAL";
+  observedValue: number;
+  thresholdValue: number;
+  windowDescription: string;
+  explanationEn: string;
+  explanationPtBr: string;
+  evidenceRefs: string[];
+}
+
+export interface RiskAlertContract {
+  id: string;
+  subjectType: "USER" | "ORGANIZATION" | "STORE" | "COURIER" | "ORDER";
+  subjectId: string;
+  ruleCode: ExplainableRiskRuleCode | "VELOCITY_CHECK_NORMAL";
+  severity: RiskAlertSeverity;
+  status: RiskAlertStatus;
+  ruleExplanation: RiskRuleExplanationContract;
+  recommendedAction: string;
+  reviewedBy: string | null;
+  reviewDecision: RiskHumanReviewDecision | null;
+  reviewReason: string | null;
+  reviewedAt: string | null;
+  isTestData: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PrivacyRequestType =
+  | "EXPORT_DATA"
+  | "DELETE_ACCOUNT"
+  | "CORRECTION"
+  | "DATA_EXPORT"
+  | "ACCOUNT_DELETION"
+  | "ANONYMIZATION";
+
+export type PrivacyRequestStatus =
+  | "REQUESTED"
+  | "PROCESSING"
+  | "COMPLETED"
+  | "BLOCKED_LEGAL_RETENTION"
+  | "REJECTED";
+
+export interface PrivacyRequestRecordContract {
+  id: string;
+  userId: string;
+  requestType: PrivacyRequestType;
+  status: PrivacyRequestStatus;
+  reason: string | null;
+  retentionBlockReason: string | null;
+  holdUntil: string | null;
+  exportPayload: Record<string, unknown> | null;
+  anonymizedAt: string | null;
+  legalBasisNote: string | null;
+  processedBy: string | null;
+  completedAt: string | null;
+  isTestData: boolean;
+  createdAt: string;
+}
+
+export interface AnalyticalOrderKpiRowContract {
+  orderId: string;
+  orderNumber: number;
+  organizationId: string;
+  storeId: string;
+  storeName: string;
+  city: string;
+  stateCode: string;
+  orderStatus: string;
+  paymentStatus: string;
+  subtotalCents: number;
+  addonsCents: number;
+  deliveryFeeCents: number;
+  serviceFeeCents: number;
+  discountCents: number;
+  totalCents: number;
+  platformCommissionCents: number;
+  merchantNetCents: number;
+  courierEarningsCents: number;
+  platformCouponSubsidyCents: number;
+  merchantCouponSubsidyCents: number;
+  gmvCents: number;
+  platformNetRevenueCents: number;
+  operationalMarginCents: number;
+  prepSlaMinutes: number | null;
+  deliverySlaMinutes: number | null;
+  cancellationReason: string | null;
+  cancelledByRole: string | null;
+  isTestData: boolean;
+  createdAt: string;
+}
+
+export interface AnalyticalKpiSummaryContract {
+  excludeTestData: boolean;
+  gmvCents: number;
+  netPlatformRevenueCents: number;
+  pendingPaymentNetRevenueCents: number;
+  ledgerReconciledNetRevenueCents: number;
+  isReconciledWithLedger: boolean;
+  totalPlatformCommissionCents: number;
+  totalServiceFeeCents: number;
+  totalPlatformCouponSubsidyCents: number;
+  operationalMarginCents: number;
+  totalQuotesCount: number;
+  consumedQuotesCount: number;
+  quoteConversionRateBps: number;
+  totalOrdersCount: number;
+  nonCancelledOrdersCount: number;
+  cancelledOrdersCount: number;
+  cancellationRateBps: number;
+  averagePrepSlaMinutes: number | null;
+  averageDeliverySlaMinutes: number | null;
+  cancellationBreakdown: Array<{
+    cancelledByRole: string;
+    cancellationReason: string;
+    count: number;
+    shareBps: number;
+  }>;
+  regionalBreakdown: Array<{
+    city: string;
+    stateCode: string;
+    ordersCount: number;
+    gmvCents: number;
+    netPlatformRevenueCents: number;
+    operationalMarginCents: number;
+  }>;
+  orderRows: AnalyticalOrderKpiRowContract[];
+}
+
+export interface GovernanceBackofficeOverviewContract {
+  kpis: AnalyticalKpiSummaryContract;
+  riskAlerts: RiskAlertContract[];
+  privacyRequests: PrivacyRequestRecordContract[];
+}
+
 /**
  * Validates that a monetary value is a safe non-negative integer in BRL centavos.
  */
@@ -1318,7 +1477,11 @@ export const I18N_MESSAGES = {
     "marketing.budget.atomic_guard_notice": "Atomic PostgreSQL Budget Guard: Concurrent coupon redemptions never exceed budget_limit_cents.",
     "notifications.inbox.title": "Notifications & Realtime Event Stream (M20)",
     "notifications.external.blocked_notice": "External notification provider ({providerCode}) is in BLOCKED_MISSING_CREDENTIALS status. In-app notification was persisted without simulating external dispatch.",
-    "notifications.realtime.cursor_recovered": "Realtime cursor synchronized from sequence #{cursorSeq} ({count} events recovered)."
+    "notifications.realtime.cursor_recovered": "Realtime cursor synchronized from sequence #{cursorSeq} ({count} events recovered).",
+    "governance.analytics.title": "Analytical BI, Reproducible KPIs & Ledger Reconciliation (M21)",
+    "governance.risk.title": "Explainable Risk Engine & Mandatory Human Review Queue (M21)",
+    "governance.risk.human_review_required": "No automated permanent ban is allowed. Every risk alert requires human review by risk_compliance with mandatory justification.",
+    "governance.privacy.title": "LGPD Privacy Governance, Data Portability & Statutory Retention Hold (M21)"
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1405,7 +1568,11 @@ export const I18N_MESSAGES = {
     "marketing.budget.atomic_guard_notice": "Guarda Atômica de Orçamento PostgreSQL: Resgates concorrentes de cupons nunca ultrapassam budget_limit_cents.",
     "notifications.inbox.title": "Central de Notificações e Eventos em Tempo Real (M20)",
     "notifications.external.blocked_notice": "Provedor externo de notificação ({providerCode}) em status BLOCKED_MISSING_CREDENTIALS. A notificação in-app foi persistida sem simular envio externo.",
-    "notifications.realtime.cursor_recovered": "Cursor Realtime ressincronizado a partir da sequência #{cursorSeq} ({count} eventos recuperados)."
+    "notifications.realtime.cursor_recovered": "Cursor Realtime ressincronizado a partir da sequência #{cursorSeq} ({count} eventos recuperados).",
+    "governance.analytics.title": "BI Analítico, KPIs Reproduzíveis e Reconciliação com o Ledger (M21)",
+    "governance.risk.title": "Motor de Risco Explicável e Fila de Revisão Humana Obrigatória (M21)",
+    "governance.risk.human_review_required": "Nenhum banimento definitivo automático é permitido. Todo alerta de risco exige revisão humana por risk_compliance com justificativa obrigatória.",
+    "governance.privacy.title": "Governança de Privacidade LGPD, Portabilidade de Dados e Retenção Legal (M21)"
   }
 } as const;
 

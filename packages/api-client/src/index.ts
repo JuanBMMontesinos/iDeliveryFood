@@ -74,6 +74,15 @@ import {
   type NotificationChannel,
   type NotificationDeliveryContract,
   type UserNotificationsResponseContract,
+  type AnalyticalKpiSummaryContract,
+  type ExplainableRiskRuleCode,
+  type GovernanceBackofficeOverviewContract,
+  type PrivacyRequestRecordContract,
+  type PrivacyRequestStatus,
+  type PrivacyRequestType,
+  type RiskAlertContract,
+  type RiskAlertStatus,
+  type RiskHumanReviewDecision,
 } from "@ideliveryfood/contracts";
 
 export interface ApiClientOptions {
@@ -1273,6 +1282,171 @@ export class IDeliveryApiClient {
   ): Promise<{ data: NotificationDeliveryContract }> {
     return this.request({
       path: `/me/notifications/${encodeURIComponent(notificationId)}/read`,
+      method: "POST",
+    });
+  }
+
+  // ==========================================================================
+  // M21: Analytical KPIs, Explainable Risk & LGPD Governance (Fase R)
+  // ==========================================================================
+
+  public async getAnalyticsOverview(params?: {
+    excludeTestData?: boolean;
+    storeId?: string;
+    fromIso?: string;
+    toIso?: string;
+  }): Promise<{ data: AnalyticalKpiSummaryContract }> {
+    const query = new URLSearchParams();
+    if (params?.excludeTestData) query.set("excludeTestData", "true");
+    if (params?.storeId) query.set("storeId", params.storeId);
+    if (params?.fromIso) query.set("fromIso", params.fromIso);
+    if (params?.toIso) query.set("toIso", params.toIso);
+    const qs = query.toString();
+    return this.request({
+      path: `/analytics/overview${qs ? `?${qs}` : ""}`,
+      method: "GET",
+    });
+  }
+
+  public async exportAnalyticsJson(params?: {
+    excludeTestData?: boolean;
+    storeId?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    data: {
+      format: "json";
+      excludeTestData: boolean;
+      limit: number;
+      offset: number;
+      totalRows: number;
+      rows: AnalyticalKpiSummaryContract["orderRows"];
+    };
+  }> {
+    const query = new URLSearchParams({ format: "json" });
+    if (params?.excludeTestData) query.set("excludeTestData", "true");
+    if (params?.storeId) query.set("storeId", params.storeId);
+    if (params?.limit !== undefined) query.set("limit", String(params.limit));
+    if (params?.offset !== undefined) query.set("offset", String(params.offset));
+    return this.request({
+      path: `/analytics/export?${query.toString()}`,
+      method: "GET",
+    });
+  }
+
+  public async getGovernanceOverview(params?: {
+    excludeTestData?: boolean;
+  }): Promise<{ data: GovernanceBackofficeOverviewContract }> {
+    const qs = params?.excludeTestData ? "?excludeTestData=true" : "";
+    return this.request({
+      path: `/governance/overview${qs}`,
+      method: "GET",
+    });
+  }
+
+  public async listRiskAlerts(params?: {
+    status?: RiskAlertStatus;
+  }): Promise<{ data: RiskAlertContract[] }> {
+    const qs = params?.status ? `?status=${encodeURIComponent(params.status)}` : "";
+    return this.request({
+      path: `/governance/risk/alerts${qs}`,
+      method: "GET",
+    });
+  }
+
+  public async evaluateRiskAlert(params: {
+    ruleCode: ExplainableRiskRuleCode;
+    subjectType: RiskAlertContract["subjectType"];
+    subjectId: string;
+    observedValue: number;
+    thresholdValue?: number;
+    evidenceRefs?: readonly string[];
+  }): Promise<{
+    data: {
+      triggered: boolean;
+      alert: RiskAlertContract | null;
+      recommendedAction: string;
+    };
+  }> {
+    return this.request({
+      path: "/governance/risk/evaluate",
+      method: "POST",
+      body: params as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async reviewRiskAlert(params: {
+    alertId: string;
+    decision: RiskHumanReviewDecision;
+    reason: string;
+  }): Promise<{ data: RiskAlertContract }> {
+    return this.request({
+      path: `/governance/risk/alerts/${encodeURIComponent(params.alertId)}/review`,
+      method: "POST",
+      body: {
+        decision: params.decision,
+        reason: params.reason,
+      },
+    });
+  }
+
+  public async listPrivacyRequests(params?: {
+    status?: PrivacyRequestStatus;
+  }): Promise<{ data: PrivacyRequestRecordContract[] }> {
+    const qs = params?.status ? `?status=${encodeURIComponent(params.status)}` : "";
+    return this.request({
+      path: `/governance/privacy/requests${qs}`,
+      method: "GET",
+    });
+  }
+
+  public async generateMyPrivacyExport(): Promise<{
+    data: {
+      request: PrivacyRequestRecordContract;
+      exportPackage: Record<string, unknown>;
+    };
+  }> {
+    return this.request({
+      path: "/me/privacy-export",
+      method: "GET",
+    });
+  }
+
+  public async requestMyPrivacyAction(params: {
+    requestType?: PrivacyRequestType;
+    reason?: string;
+    hasActiveOrders?: boolean;
+    hasOpenFinancialDisputes?: boolean;
+    hasCompletedFiscalTransactions?: boolean;
+  }): Promise<{
+    data: {
+      request?: PrivacyRequestRecordContract;
+      outcome?: string;
+      holdUntilIso?: string | null;
+      reasonCode?: string;
+    };
+  }> {
+    return this.request({
+      path: "/me/privacy-requests",
+      method: "POST",
+      body: params as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async processPrivacyRequestExport(
+    requestId: string
+  ): Promise<{ data: PrivacyRequestRecordContract }> {
+    return this.request({
+      path: `/governance/privacy/requests/${encodeURIComponent(requestId)}/export`,
+      method: "POST",
+    });
+  }
+
+  public async processPrivacyRequestAnonymization(
+    requestId: string
+  ): Promise<{ data: PrivacyRequestRecordContract }> {
+    return this.request({
+      path: `/governance/privacy/requests/${encodeURIComponent(requestId)}/anonymize`,
       method: "POST",
     });
   }
