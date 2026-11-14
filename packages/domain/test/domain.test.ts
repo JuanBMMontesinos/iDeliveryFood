@@ -40,6 +40,12 @@ import {
   evaluatePartnerReviewReply,
   evaluatePromotionEligibilityAndSubsidy,
   evaluateVerifiedOrderReviewCreation,
+  calculateOutboxBackoffMs,
+  evaluateNotificationChannelEligibility,
+  reconcileNotificationsSinceCursor,
+  renderVersionedNotificationTemplate,
+  signOutboundWebhookPayload,
+  verifyOutboundWebhookSignature,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -1255,5 +1261,182 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     ]);
     assert.equal(ratingSummary.publishedReviewsCount, 1);
     assert.equal(ratingSummary.averageRating, 5);
+  });
+
+  it("enforces M20 versioned notification templates (en/pt-BR), revoked device push block, honest external credentials status, HMAC webhooks, and Realtime cursor recovery (Fase Q)", () => {
+    // 1. Exponential backoff
+    assert.equal(calculateOutboxBackoffMs(1, 1000, 30000), 1000);
+    assert.equal(calculateOutboxBackoffMs(3, 1000, 30000), 4000);
+    assert.equal(calculateOutboxBackoffMs(10, 1000, 30000), 30000);
+
+    // 2. Bilingual versioned templates (en and pt-BR)
+    const tplEn = renderVersionedNotificationTemplate({
+      eventType: "ORDER_CREATED",
+      locale: "en",
+      payload: { orderNumber: 10042, storeName: "Paulista Artisan Burgers - Jardins" },
+    });
+    assert.equal(tplEn.templateKey, "order.created");
+    assert.equal(tplEn.version, 1);
+    assert.equal(tplEn.category, "TRANSACTIONAL");
+    assert.equal(tplEn.locale, "en");
+    assert.match(tplEn.title, /Order #10042 created/);
+
+    const tplPt = renderVersionedNotificationTemplate({
+      eventType: "payment.captured",
+      locale: "pt-BR",
+      payload: { orderNumber: 10042, amountCents: 6232 },
+    });
+    assert.equal(tplPt.templateKey, "payment.captured");
+    assert.equal(tplPt.locale, "pt-BR");
+    assert.match(tplPt.title, /Pedido #10042/);
+    assert.match(tplPt.body, /R\$\s*62,32/);
+
+    // 3. Channel eligibility: mandatory transactional IN_APP vs marketing opt-out vs revoked device vs missing credentials
+    const inAppTransactional = evaluateNotificationChannelEligibility({
+      channel: "IN_APP",
+      category: "TRANSACTIONAL",
+      preferences: {
+        pushOrderUpdates: false,
+        pushPromotions: false,
+        emailTransactional: false,
+        emailMarketing: false,
+      },
+    });
+    assert.equal(inAppTransactional.eligible, true);
+    assert.equal(inAppTransactional.deliveryStatus, "DELIVERED");
+
+    const marketingOptOut = evaluateNotificationChannelEligibility({
+      channel: "EMAIL",
+      category: "MARKETING",
+      preferences: {
+        pushOrderUpdates: true,
+        pushPromotions: false,
+        emailTransactional: true,
+        emailMarketing: false,
+      },
+      providerStatus: "ACTIVE_PRODUCTION",
+    });
+    assert.equal(marketingOptOut.eligible, false);
+    assert.equal(marketingOptOut.deliveryStatus, "SKIPPED_OPT_OUT");
+
+    const revokedDevicePush = evaluateNotificationChannelEligibility({
+      channel: "PUSH_ANDROID",
+      category: "TRANSACTIONAL",
+      device: {
+        isRevoked: true,
+        revokedAtIso: "2026-11-14T04:00:00.000Z",
+        pushConsentGranted: true,
+        pushToken: "fcm_tok_revoked_01",
+      },
+      providerStatus: "ACTIVE_PRODUCTION",
+    });
+    assert.equal(revokedDevicePush.eligible, false);
+    assert.equal(revokedDevicePush.deliveryStatus, "BLOCKED_DEVICE_REVOKED");
+
+    const blockedExternalEmail = evaluateNotificationChannelEligibility({
+      channel: "EMAIL",
+      category: "TRANSACTIONAL",
+      providerStatus: "BLOCKED_MISSING_CREDENTIALS",
+    });
+    assert.equal(blockedExternalEmail.eligible, false);
+    assert.equal(blockedExternalEmail.deliveryStatus, "BLOCKED_MISSING_CREDENTIALS");
+
+    // 4. Outbound webhook HMAC-SHA256 signing & anti-replay verification
+    const secret = "whsec_test_outbound_partner_secret_2026";
+    const envelope = signOutboundWebhookPayload({
+      eventId: "evt_outbox_101",
+      eventType: "order.status_changed",
+      payload: { orderId: "ord_101", status: "PREPARING" },
+      secret,
+      timestampSeconds: 1700000000,
+    });
+    const verifiedOk = verifyOutboundWebhookSignature({
+      envelope,
+      secret,
+      nowSeconds: 1700000120,
+      toleranceSeconds: 300,
+    });
+    assert.equal(verifiedOk.valid, true);
+
+    const verifiedReplayExpired = verifyOutboundWebhookSignature({
+      envelope,
+      secret,
+      nowSeconds: 1700000600,
+      toleranceSeconds: 300,
+    });
+    assert.equal(verifiedReplayExpired.valid, false);
+    assert.equal(verifiedReplayExpired.reasonCode, "WEBHOOK_TIMESTAMP_OUT_OF_TOLERANCE");
+
+    // 5. Realtime cursor recovery deduplication
+    const reconciled = reconcileNotificationsSinceCursor({
+      existingNotifications: [
+        {
+          id: "notif_1",
+          outboxEventId: "evt_1",
+          recipientUserId: "user_1",
+          channel: "IN_APP",
+          templateKey: "order.created",
+          templateVersion: 1,
+          category: "TRANSACTIONAL",
+          locale: "en",
+          title: "Order #10001 created",
+          body: "Received",
+          payload: {},
+          status: "DELIVERED",
+          providerCode: null,
+          idempotencyKey: "idem_1",
+          cursorSeq: 10,
+          readAtIso: null,
+          lastError: null,
+          createdAtIso: "2026-11-14T04:00:00.000Z",
+        },
+      ],
+      incomingBatch: [
+        {
+          id: "notif_1",
+          outboxEventId: "evt_1",
+          recipientUserId: "user_1",
+          channel: "IN_APP",
+          templateKey: "order.created",
+          templateVersion: 1,
+          category: "TRANSACTIONAL",
+          locale: "en",
+          title: "Order #10001 created",
+          body: "Received",
+          payload: {},
+          status: "DELIVERED",
+          providerCode: null,
+          idempotencyKey: "idem_1",
+          cursorSeq: 10,
+          readAtIso: null,
+          lastError: null,
+          createdAtIso: "2026-11-14T04:00:00.000Z",
+        },
+        {
+          id: "notif_2",
+          outboxEventId: "evt_2",
+          recipientUserId: "user_1",
+          channel: "IN_APP",
+          templateKey: "order.status_changed",
+          templateVersion: 1,
+          category: "TRANSACTIONAL",
+          locale: "en",
+          title: "Order #10001 status updated: PREPARING",
+          body: "Preparing",
+          payload: {},
+          status: "DELIVERED",
+          providerCode: null,
+          idempotencyKey: "idem_2",
+          cursorSeq: 11,
+          readAtIso: null,
+          lastError: null,
+          createdAtIso: "2026-11-14T04:01:00.000Z",
+        },
+      ],
+      sinceCursorSeq: 10,
+    });
+    assert.equal(reconciled.merged.length, 2);
+    assert.equal(reconciled.newlyRecoveredCount, 1);
+    assert.equal(reconciled.latestCursorSeq, 11);
   });
 });

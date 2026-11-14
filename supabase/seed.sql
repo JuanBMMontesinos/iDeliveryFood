@@ -1355,4 +1355,71 @@ SET platform_subsidy_cents = 1000,
     idempotency_key = 'seed_redemption_order_1001_welcome10'
 WHERE id = '00000000-0000-4000-8000-000000001706';
 
+-- Fase Q (M20): Enriched Versioned Notification Deliveries (en & pt-BR) and Honest External Channel Record
+UPDATE public.outbox_events
+SET max_attempts = 5,
+    processed_at = '2026-11-03T15:02:10Z'
+WHERE id = '00000000-0000-4000-8000-000000001722';
+
+UPDATE public.notification_deliveries
+SET template_version = 1,
+    category = 'TRANSACTIONAL',
+    title = 'Order #10001 is being prepared',
+    body = 'Kitchen at Paulista Artisan Burgers - Jardins is preparing your order #10001.',
+    payload = '{"orderId":"00000000-0000-4000-8000-000000001001","orderNumber":10001,"status":"PREPARING"}'::jsonb,
+    idempotency_key = 'seed_notif_1722_in_app_alice'
+WHERE id = '00000000-0000-4000-8000-000000001723';
+
+INSERT INTO public.notification_deliveries (
+  id, outbox_event_id, recipient_user_id, channel, template_key, template_version, category,
+  locale, title, body, payload, status, provider_code, idempotency_key, last_error, is_test_data
+) VALUES
+(
+  '00000000-0000-4000-8000-000000001731',
+  '00000000-0000-4000-8000-000000001722',
+  '00000000-0000-4000-8000-000000000001',
+  'EMAIL',
+  'order.status.preparing',
+  1,
+  'TRANSACTIONAL',
+  'en',
+  'Order #10001 is being prepared',
+  'Kitchen at Paulista Artisan Burgers - Jardins is preparing your order #10001.',
+  '{"orderId":"00000000-0000-4000-8000-000000001001","orderNumber":10001,"status":"PREPARING"}'::jsonb,
+  'BLOCKED_MISSING_CREDENTIALS',
+  'resend',
+  'seed_notif_1722_email_alice',
+  'PROVIDER_BLOCKED [resend]: Missing RESEND_API_KEY, RESEND_FROM_EMAIL',
+  true
+),
+(
+  '00000000-0000-4000-8000-000000001732',
+  '00000000-0000-4000-8000-000000001722',
+  '00000000-0000-4000-8000-000000000030',
+  'IN_APP',
+  'delivery.assigned',
+  1,
+  'TRANSACTIONAL',
+  'pt-BR',
+  'Coleta atribuída — Pedido #10001',
+  'Você foi designado para a entrega do Pedido #10001 em Paulista Artisan Burgers - Jardins.',
+  '{"orderId":"00000000-0000-4000-8000-000000001001","deliveryTaskId":"00000000-0000-4000-8000-000000001201"}'::jsonb,
+  'DELIVERED',
+  NULL,
+  'seed_notif_1722_in_app_carlos',
+  NULL,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  template_version = EXCLUDED.template_version,
+  category = EXCLUDED.category,
+  title = EXCLUDED.title,
+  body = EXCLUDED.body,
+  payload = EXCLUDED.payload,
+  status = EXCLUDED.status,
+  provider_code = EXCLUDED.provider_code,
+  idempotency_key = EXCLUDED.idempotency_key,
+  last_error = EXCLUDED.last_error,
+  is_test_data = true;
+
 COMMIT;

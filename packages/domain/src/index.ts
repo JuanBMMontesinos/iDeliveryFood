@@ -42,6 +42,15 @@ import {
   type PromotionDiscountType,
   type PromotionFundedBy,
   type PromotionRedemptionContract,
+  type NotificationCategory,
+  type NotificationChannel,
+  type NotificationDeliveryContract,
+  type NotificationDeliveryStatus,
+  type NotificationTemplateVersionContract,
+  type OutboundWebhookEnvelopeContract,
+  type SupportedLocale,
+  formatBrlCents,
+  resolveSupportedLocale,
 } from "@ideliveryfood/contracts";
 
 export type OrderStatus =
@@ -2964,6 +2973,563 @@ export function calculatePublishedStoreRatingSummary(
     averageRating: Math.round((sum / published.length) * 100) / 100,
   };
 }
+
+// ============================================================================
+// M20: Transactional Outbox Backoff, Versioned Notification Templates (en/pt-BR),
+// Channel Eligibility, Device Revocation Guard, Realtime Cursor Recovery & Webhooks (Fase Q)
+// ============================================================================
+
+/**
+ * Calculates exponential backoff in milliseconds bounded by `maxMs` for outbox retries (M20).
+ */
+export function calculateOutboxBackoffMs(
+  attempts: number,
+  baseMs = 1000,
+  maxMs = 60000
+): number {
+  const safeAttempts = Math.max(1, Math.floor(attempts));
+  return Math.min(baseMs * Math.pow(2, safeAttempts - 1), maxMs);
+}
+
+interface VersionedTemplateEntry {
+  templateKey: string;
+  version: number;
+  category: NotificationCategory;
+  en: { title: string; body: string };
+  "pt-BR": { title: string; body: string };
+}
+
+const VERSIONED_NOTIFICATION_TEMPLATES_V1: Record<string, VersionedTemplateEntry> = {
+  "order.created": {
+    templateKey: "order.created",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Order #{orderNumber} created",
+      body: "Your order #{orderNumber} at {storeName} was received and is awaiting confirmation.",
+    },
+    "pt-BR": {
+      title: "Pedido #{orderNumber} criado",
+      body: "Seu pedido #{orderNumber} em {storeName} foi recebido e aguarda confirmação.",
+    },
+  },
+  "order.status_changed": {
+    templateKey: "order.status_changed",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Order #{orderNumber} status updated: {status}",
+      body: "Your order #{orderNumber} at {storeName} is now in status {status}.",
+    },
+    "pt-BR": {
+      title: "Status do Pedido #{orderNumber} atualizado: {status}",
+      body: "Seu pedido #{orderNumber} em {storeName} agora está em status {status}.",
+    },
+  },
+  "payment.captured": {
+    templateKey: "payment.captured",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Payment confirmed for Order #{orderNumber}",
+      body: "Your payment of {amount} for order #{orderNumber} was captured.",
+    },
+    "pt-BR": {
+      title: "Pagamento confirmado para o Pedido #{orderNumber}",
+      body: "Seu pagamento de {amount} referente ao pedido #{orderNumber} foi capturado.",
+    },
+  },
+  "payment.refunded": {
+    templateKey: "payment.refunded",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Refund processed for Order #{orderNumber}",
+      body: "A refund of {amount} was processed for order #{orderNumber}.",
+    },
+    "pt-BR": {
+      title: "Reembolso processado para o Pedido #{orderNumber}",
+      body: "Um reembolso de {amount} foi processado para o pedido #{orderNumber}.",
+    },
+  },
+  "delivery.offer_created": {
+    templateKey: "delivery.offer_created",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "New delivery offer available",
+      body: "Pickup at {storeName} ({distance}m). Accept in the Courier app to view full dropoff address.",
+    },
+    "pt-BR": {
+      title: "Nova oferta de entrega disponível",
+      body: "Coleta em {storeName} ({distance}m). Aceite no app Entregador para visualizar o endereço completo.",
+    },
+  },
+  "delivery.assigned": {
+    templateKey: "delivery.assigned",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Courier assigned — Order #{orderNumber}",
+      body: "A courier has been assigned to deliver order #{orderNumber}.",
+    },
+    "pt-BR": {
+      title: "Entregador atribuído — Pedido #{orderNumber}",
+      body: "Um entregador foi designado para a entrega do pedido #{orderNumber}.",
+    },
+  },
+  "delivery.completed": {
+    templateKey: "delivery.completed",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Order #{orderNumber} delivered",
+      body: "Your order #{orderNumber} was delivered with verified handoff confirmation.",
+    },
+    "pt-BR": {
+      title: "Pedido #{orderNumber} entregue",
+      body: "Seu pedido #{orderNumber} foi entregue com confirmação verificada.",
+    },
+  },
+  "support.case_updated": {
+    templateKey: "support.case_updated",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Support Case #{caseNumber} updated",
+      body: "Support case #{caseNumber} is now in status {status}.",
+    },
+    "pt-BR": {
+      title: "Chamado de Suporte #{caseNumber} atualizado",
+      body: "O chamado de suporte #{caseNumber} agora está em status {status}.",
+    },
+  },
+  "payout.settled": {
+    templateKey: "payout.settled",
+    version: 1,
+    category: "TRANSACTIONAL",
+    en: {
+      title: "Settlement #{settlementId} updated",
+      body: "Settlement #{settlementId} ({amount}) is now {status}.",
+    },
+    "pt-BR": {
+      title: "Repasse #{settlementId} atualizado",
+      body: "O repasse #{settlementId} ({amount}) agora está em status {status}.",
+    },
+  },
+  "security.device_revoked": {
+    templateKey: "security.device_revoked",
+    version: 1,
+    category: "SECURITY",
+    en: {
+      title: "Security Alert: Device session revoked",
+      body: "Device {deviceIdentifier} was revoked from your account.",
+    },
+    "pt-BR": {
+      title: "Alerta de Segurança: Sessão de dispositivo revogada",
+      body: "O dispositivo {deviceIdentifier} foi revogado da sua conta.",
+    },
+  },
+  "marketing.promo": {
+    templateKey: "marketing.promo",
+    version: 1,
+    category: "MARKETING",
+    en: {
+      title: "Special Offer: Coupon {promoCode}",
+      body: "Use coupon {promoCode} on your next eligible order.",
+    },
+    "pt-BR": {
+      title: "Oferta Especial: Cupom {promoCode}",
+      body: "Use o cupom {promoCode} no seu próximo pedido elegível.",
+    },
+  },
+};
+
+function normalizeOutboxEventTypeToTemplateKey(eventType: string): string {
+  const normalized = eventType.trim();
+  const lower = normalized.toLowerCase();
+  if (VERSIONED_NOTIFICATION_TEMPLATES_V1[lower]) {
+    return lower;
+  }
+  switch (normalized.toUpperCase()) {
+    case "ORDER_CREATED":
+      return "order.created";
+    case "ORDER_ACCEPTED":
+    case "ORDER_PREPARING":
+    case "ORDER_READY_FOR_PICKUP":
+    case "ORDER_DISPATCHED":
+    case "ORDER_CANCELLED":
+    case "ORDER_STATUS_CHANGED":
+      return "order.status_changed";
+    case "ORDER_DELIVERED":
+    case "DELIVERY_COMPLETED":
+      return "delivery.completed";
+    case "PAYMENT_CAPTURED":
+      return "payment.captured";
+    case "PAYMENT_REFUNDED":
+    case "REFUND_APPROVED":
+      return "payment.refunded";
+    case "DELIVERY_OFFER_CREATED":
+    case "OFFER_CREATED":
+      return "delivery.offer_created";
+    case "DELIVERY_ASSIGNED":
+    case "OFFER_ACCEPTED":
+      return "delivery.assigned";
+    case "SUPPORT_CASE_UPDATED":
+    case "SUPPORT_MESSAGE_ADDED":
+      return "support.case_updated";
+    case "PAYOUT_SETTLED":
+    case "SETTLEMENT_UPDATED":
+      return "payout.settled";
+    case "SECURITY_DEVICE_REVOKED":
+      return "security.device_revoked";
+    case "MARKETING_PROMO":
+      return "marketing.promo";
+    default:
+      return "order.status_changed";
+  }
+}
+
+function interpolateTemplateTokens(
+  templateText: string,
+  tokens: Record<string, string | number>
+): string {
+  return templateText.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key: string) => {
+    const val = tokens[key];
+    return val !== undefined ? String(val) : `{${key}}`;
+  });
+}
+
+/**
+ * Renders a versioned (`v1`) notification template in `en` or `pt-BR` based on the event type,
+ * recipient's preferred locale, and payload parameters (M20).
+ */
+export function renderVersionedNotificationTemplate(params: {
+  eventType: string;
+  locale?: string | null;
+  payload?: Record<string, unknown>;
+  version?: number;
+}): NotificationTemplateVersionContract {
+  const locale: SupportedLocale = resolveSupportedLocale(params.locale);
+  const templateKey = normalizeOutboxEventTypeToTemplateKey(params.eventType);
+  const entry =
+    VERSIONED_NOTIFICATION_TEMPLATES_V1[templateKey] ??
+    VERSIONED_NOTIFICATION_TEMPLATES_V1["order.status_changed"]!;
+
+  const p = params.payload ?? {};
+  const amountCents =
+    typeof p.amountCents === "number" && Number.isSafeInteger(p.amountCents) && p.amountCents >= 0
+      ? p.amountCents
+      : typeof p.totalCents === "number" && Number.isSafeInteger(p.totalCents) && p.totalCents >= 0
+        ? p.totalCents
+        : null;
+
+  const tokens: Record<string, string | number> = {
+    orderNumber:
+      p.orderNumber !== undefined
+        ? String(p.orderNumber)
+        : p.orderId !== undefined
+          ? String(p.orderId).slice(-6)
+          : "10001",
+    storeName:
+      p.storeName !== undefined ? String(p.storeName) : "Paulista Artisan Burgers - Jardins",
+    status:
+      p.orderStatus !== undefined
+        ? String(p.orderStatus)
+        : p.status !== undefined
+          ? String(p.status)
+          : params.eventType,
+    amount: amountCents !== null ? formatBrlCents(amountCents, locale) : "R$ 0,00",
+    distance: p.distanceMeters !== undefined ? Number(p.distanceMeters) : 1420,
+    caseNumber: p.caseNumber !== undefined ? String(p.caseNumber) : "5001",
+    settlementId: p.settlementId !== undefined ? String(p.settlementId).slice(-6) : "1713",
+    deviceIdentifier:
+      p.deviceIdentifier !== undefined ? String(p.deviceIdentifier) : "mobile-device",
+    promoCode: p.promoCode !== undefined ? String(p.promoCode) : "WELCOME10",
+  };
+
+  const localized = entry[locale] ?? entry.en;
+  return {
+    templateKey: entry.templateKey,
+    version: params.version ?? entry.version,
+    category: entry.category,
+    locale,
+    title: interpolateTemplateTokens(localized.title, tokens),
+    body: interpolateTemplateTokens(localized.body, tokens),
+  };
+}
+
+/**
+ * Evaluates whether a notification can be delivered on the target channel (M20):
+ * - Enforces that `TRANSACTIONAL` and `SECURITY` alerts cannot be opted out, whereas
+ *   `MARKETING` notifications respect `user_preferences`.
+ * - Immediately blocks `PUSH` / `PUSH_ANDROID` / `PUSH_IOS` when the device is revoked (`isRevoked` or `revokedAtIso`)
+ *   or push consent is not granted.
+ * - Enforces Option 2 Honest Provider Readiness: records `BLOCKED_MISSING_CREDENTIALS` for external
+ *   channels (`PUSH*`, `EMAIL`, `WEBHOOK`) when external credentials are not configured.
+ */
+export function evaluateNotificationChannelEligibility(params: {
+  channel: NotificationChannel;
+  category: NotificationCategory;
+  preferences?: {
+    pushOrderUpdates: boolean;
+    pushPromotions: boolean;
+    emailTransactional: boolean;
+    emailMarketing: boolean;
+  } | null;
+  device?: {
+    isRevoked: boolean;
+    revokedAtIso?: string | null;
+    pushConsentGranted: boolean;
+    pushToken?: string | null;
+  } | null;
+  providerStatus?: ProviderReadinessStatus | null;
+}): {
+  eligible: boolean;
+  deliveryStatus: NotificationDeliveryStatus;
+  reasonCode: string;
+} {
+  const { channel, category, preferences, device, providerStatus } = params;
+
+  if (channel === "IN_APP") {
+    if (
+      category === "MARKETING" &&
+      preferences &&
+      !preferences.pushPromotions &&
+      !preferences.emailMarketing
+    ) {
+      return {
+        eligible: false,
+        deliveryStatus: "SKIPPED_OPT_OUT",
+        reasonCode: "MARKETING_OPT_OUT",
+      };
+    }
+    return {
+      eligible: true,
+      deliveryStatus: "DELIVERED",
+      reasonCode: "IN_APP_PERSISTED",
+    };
+  }
+
+  if (channel === "PUSH" || channel === "PUSH_ANDROID" || channel === "PUSH_IOS") {
+    if (!device || device.isRevoked || Boolean(device.revokedAtIso) || !device.pushToken) {
+      return {
+        eligible: false,
+        deliveryStatus: "BLOCKED_DEVICE_REVOKED",
+        reasonCode: "DEVICE_REVOKED_OR_TOKEN_CLEARED",
+      };
+    }
+    if (!device.pushConsentGranted) {
+      return {
+        eligible: false,
+        deliveryStatus: "SKIPPED_OPT_OUT",
+        reasonCode: "PUSH_CONSENT_NOT_GRANTED",
+      };
+    }
+    if (category === "MARKETING" && preferences && !preferences.pushPromotions) {
+      return {
+        eligible: false,
+        deliveryStatus: "SKIPPED_OPT_OUT",
+        reasonCode: "MARKETING_PUSH_OPT_OUT",
+      };
+    }
+    if (
+      providerStatus !== "ACTIVE" &&
+      providerStatus !== "ACTIVE_PRODUCTION" &&
+      providerStatus !== "SANDBOX_READY"
+    ) {
+      return {
+        eligible: false,
+        deliveryStatus: "BLOCKED_MISSING_CREDENTIALS",
+        reasonCode: "PROVIDER_MISSING_CREDENTIALS",
+      };
+    }
+    return {
+      eligible: true,
+      deliveryStatus: "SENT_TO_PROVIDER",
+      reasonCode: "PUSH_DISPATCH_READY",
+    };
+  }
+
+  if (channel === "EMAIL") {
+    if (category === "MARKETING" && preferences && !preferences.emailMarketing) {
+      return {
+        eligible: false,
+        deliveryStatus: "SKIPPED_OPT_OUT",
+        reasonCode: "MARKETING_EMAIL_OPT_OUT",
+      };
+    }
+    if (
+      providerStatus !== "ACTIVE" &&
+      providerStatus !== "ACTIVE_PRODUCTION" &&
+      providerStatus !== "SANDBOX_READY"
+    ) {
+      return {
+        eligible: false,
+        deliveryStatus: "BLOCKED_MISSING_CREDENTIALS",
+        reasonCode: "PROVIDER_MISSING_CREDENTIALS",
+      };
+    }
+    return {
+      eligible: true,
+      deliveryStatus: "SENT_TO_PROVIDER",
+      reasonCode: "EMAIL_DISPATCH_READY",
+    };
+  }
+
+  // WEBHOOK channel
+  if (
+    providerStatus !== "ACTIVE" &&
+    providerStatus !== "ACTIVE_PRODUCTION" &&
+    providerStatus !== "SANDBOX_READY"
+  ) {
+    return {
+      eligible: false,
+      deliveryStatus: "BLOCKED_MISSING_CREDENTIALS",
+      reasonCode: "WEBHOOK_CREDENTIALS_MISSING",
+    };
+  }
+  return {
+    eligible: true,
+    deliveryStatus: "SENT_TO_PROVIDER",
+    reasonCode: "WEBHOOK_DISPATCH_READY",
+  };
+}
+
+/**
+ * Signs an outbound webhook payload using HMAC-SHA256 with a timestamp anti-replay header (M20).
+ */
+export function signOutboundWebhookPayload(params: {
+  eventId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  secret: string;
+  timestampSeconds?: number;
+}): OutboundWebhookEnvelopeContract {
+  if (!params.secret || params.secret.trim().length < 8) {
+    throw new Error("WEBHOOK_SECRET_REQUIRED: Webhook signing secret must be at least 8 characters.");
+  }
+  const timestampSeconds = params.timestampSeconds ?? Math.floor(Date.now() / 1000);
+  const payloadJson = JSON.stringify(params.payload);
+  const canonicalMessage = `${timestampSeconds}.${params.eventId}.${payloadJson}`;
+  const signatureHex = crypto
+    .createHmac("sha256", params.secret)
+    .update(canonicalMessage, "utf8")
+    .digest("hex");
+
+  return {
+    eventId: params.eventId,
+    eventType: params.eventType,
+    timestampSeconds,
+    signatureHex,
+    payloadJson,
+  };
+}
+
+/**
+ * Verifies an outbound/partner webhook envelope signature and enforces anti-replay timestamp tolerance (M20).
+ */
+export function verifyOutboundWebhookSignature(params: {
+  envelope: OutboundWebhookEnvelopeContract;
+  secret: string;
+  nowSeconds?: number;
+  toleranceSeconds?: number;
+}): {
+  valid: boolean;
+  reasonCode: string;
+} {
+  const toleranceSeconds = params.toleranceSeconds ?? 300;
+  const nowSeconds = params.nowSeconds ?? Math.floor(Date.now() / 1000);
+  const driftSeconds = Math.abs(nowSeconds - params.envelope.timestampSeconds);
+  if (driftSeconds > toleranceSeconds) {
+    return {
+      valid: false,
+      reasonCode: "WEBHOOK_TIMESTAMP_OUT_OF_TOLERANCE",
+    };
+  }
+
+  const canonicalMessage = `${params.envelope.timestampSeconds}.${params.envelope.eventId}.${params.envelope.payloadJson}`;
+  const expectedHex = crypto
+    .createHmac("sha256", params.secret)
+    .update(canonicalMessage, "utf8")
+    .digest("hex");
+
+  const expectedBuf = Buffer.from(expectedHex, "utf8");
+  const receivedBuf = Buffer.from(params.envelope.signatureHex, "utf8");
+  if (
+    expectedBuf.length !== receivedBuf.length ||
+    !crypto.timingSafeEqual(expectedBuf, receivedBuf)
+  ) {
+    return {
+      valid: false,
+      reasonCode: "WEBHOOK_SIGNATURE_MISMATCH",
+    };
+  }
+
+  return {
+    valid: true,
+    reasonCode: "WEBHOOK_VERIFIED",
+  };
+}
+
+/**
+ * Reconciles a user's notification list after a Realtime WebSocket connection drop using
+ * monotonic `cursorSeq` without duplicating previously received notifications (M20).
+ */
+export function reconcileNotificationsSinceCursor(params: {
+  existingNotifications: readonly NotificationDeliveryContract[];
+  incomingBatch: readonly NotificationDeliveryContract[];
+  sinceCursorSeq?: number;
+}): {
+  merged: NotificationDeliveryContract[];
+  latestCursorSeq: number;
+  newlyRecoveredCount: number;
+} {
+  const sinceCursorSeq = params.sinceCursorSeq ?? 0;
+  const byId = new Map<string, NotificationDeliveryContract>();
+  const byCompositeKey = new Set<string>();
+
+  for (const item of params.existingNotifications) {
+    byId.set(item.id, item);
+    if (item.outboxEventId) {
+      byCompositeKey.add(`${item.outboxEventId}:${item.channel}:${item.recipientUserId}`);
+    }
+  }
+
+  let newlyRecoveredCount = 0;
+  for (const incoming of params.incomingBatch) {
+    if (incoming.cursorSeq <= sinceCursorSeq && byId.has(incoming.id)) {
+      byId.set(incoming.id, incoming);
+      continue;
+    }
+    const compositeKey = incoming.outboxEventId
+      ? `${incoming.outboxEventId}:${incoming.channel}:${incoming.recipientUserId}`
+      : null;
+
+    if (!byId.has(incoming.id) && (!compositeKey || !byCompositeKey.has(compositeKey))) {
+      if (incoming.cursorSeq > sinceCursorSeq) {
+        newlyRecoveredCount += 1;
+      }
+      if (compositeKey) {
+        byCompositeKey.add(compositeKey);
+      }
+    }
+    byId.set(incoming.id, incoming);
+  }
+
+  const merged = Array.from(byId.values()).sort((a, b) => a.cursorSeq - b.cursorSeq);
+  const latestCursorSeq = merged.reduce(
+    (max, item) => (item.cursorSeq > max ? item.cursorSeq : max),
+    sinceCursorSeq
+  );
+
+  return {
+    merged,
+    latestCursorSeq,
+    newlyRecoveredCount,
+  };
+}
+
 
 
 

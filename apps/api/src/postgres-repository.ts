@@ -67,6 +67,13 @@ import {
   type CommercialLeadContract,
   type CommercialProposalContract,
   type CommissionRuleVersionContract,
+  type NotificationCategory,
+  type NotificationChannel,
+  type NotificationDeliveryContract,
+  type NotificationDeliveryStatus,
+  type OutboxEventContract,
+  type OutboxEventStatus,
+  type UserNotificationsResponseContract,
 } from "@ideliveryfood/contracts";
 import type { ApiDataRepository, AuditLogWriteRecord } from "./index.js";
 
@@ -595,13 +602,50 @@ export function createSupabasePostgresRepository(params: {
       revokedAtIso: string
     ): Promise<void> {
       const userUuid = toDeterministicUuid(userId);
-      await pool.query(
-        `INSERT INTO public.user_devices (user_id, platform, device_identifier, is_revoked, revoked_at, is_test_data)
-         VALUES ($1, 'WEB', $2, true, $3, $4)
-         ON CONFLICT (user_id, platform, device_identifier)
-         DO UPDATE SET is_revoked = true, revoked_at = EXCLUDED.revoked_at, push_token = NULL`,
-        [userUuid, deviceIdentifier, revokedAtIso, isTestData]
-      );
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const updatedRes = await client.query(
+          `UPDATE public.user_devices
+           SET is_revoked = true,
+               revoked_at = $3,
+               push_token = NULL
+           WHERE user_id = $1 AND device_identifier = $2`,
+          [userUuid, deviceIdentifier, revokedAtIso]
+        );
+        if ((updatedRes.rowCount ?? 0) === 0) {
+          await client.query(
+            `INSERT INTO public.user_devices (user_id, platform, device_identifier, is_revoked, revoked_at, push_token, is_test_data)
+             VALUES ($1, 'WEB', $2, true, $3, NULL, $4)
+             ON CONFLICT (user_id, platform, device_identifier)
+             DO UPDATE SET is_revoked = true, revoked_at = EXCLUDED.revoked_at, push_token = NULL`,
+            [userUuid, deviceIdentifier, revokedAtIso, isTestData]
+          );
+        }
+        await client.query(
+          `INSERT INTO public.outbox_events (
+             id, aggregate_type, aggregate_id, event_type, idempotency_key, payload, status, is_test_data
+           ) VALUES ($1, 'USER_DEVICE', $2, 'security.device_revoked', $3, $4::jsonb, 'PENDING', $5)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [
+            crypto.randomUUID(),
+            userUuid,
+            `outbox_device_revoked_${userUuid}_${deviceIdentifier}_${revokedAtIso}`,
+            JSON.stringify({
+              recipientUserId: userUuid,
+              deviceIdentifier,
+              revokedAtIso,
+            }),
+            isTestData,
+          ]
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
     },
 
     async savePrivacyRequest(params: {
@@ -1183,6 +1227,27 @@ export function createSupabasePostgresRepository(params: {
             JSON.stringify(event.payload ?? {}),
             isTestData,
             event.createdAtIso,
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO public.outbox_events (
+             id, aggregate_type, aggregate_id, event_type, idempotency_key, payload, status, is_test_data
+           ) VALUES ($1, 'ORDER', $2, $3, $4, $5::jsonb, 'PENDING', $6)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [
+            crypto.randomUUID(),
+            orderUuid,
+            event.eventType,
+            `outbox_order_${orderUuid}_${event.idempotencyKey}`,
+            JSON.stringify({
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              orderStatus: order.orderStatus,
+              paymentStatus: order.paymentStatus,
+              deliveryStatus: order.deliveryStatus,
+            }),
+            isTestData,
           ]
         );
 
@@ -5025,23 +5090,21 @@ export function createSupabasePostgresRepository(params: {
         };
 
         // 3. Count prior redemptions by this customer and prior orders
-        const [priorRedemptionsRes, priorOrdersRes] = await Promise.all([
-          client.query(
-            `SELECT COUNT(*)::int AS cnt
-             FROM public.promotion_redemptions
-             WHERE promotion_id = $1
-               AND customer_id = $2
-               AND status IN ('RESERVED', 'REDEEMED')`,
-            [pRow.id, customerUuid]
-          ),
-          client.query(
-            `SELECT COUNT(*)::int AS cnt
-             FROM public.orders
-             WHERE customer_id = $1
-               AND order_status NOT IN ('CANCELLED', 'REFUNDED')`,
-            [customerUuid]
-          ),
-        ]);
+        const priorRedemptionsRes = await client.query(
+          `SELECT COUNT(*)::int AS cnt
+           FROM public.promotion_redemptions
+           WHERE promotion_id = $1
+             AND customer_id = $2
+             AND status IN ('RESERVED', 'REDEEMED')`,
+          [pRow.id, customerUuid]
+        );
+        const priorOrdersRes = await client.query(
+          `SELECT COUNT(*)::int AS cnt
+           FROM public.orders
+           WHERE customer_id = $1
+             AND order_status NOT IN ('CANCELLED', 'REFUNDED')`,
+          [customerUuid]
+        );
         const customerPriorRedemptionsForPromo = Number(
           (priorRedemptionsRes.rows[0] as { cnt: number })?.cnt ?? 0
         );
@@ -5231,6 +5294,185 @@ export function createSupabasePostgresRepository(params: {
           moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
           createdAtIso: new Date(String(r.created_at)).toISOString(),
         })),
+      };
+    },
+
+    // ========================================================================
+    // M20: Transactional Outbox & User Notifications Repository Methods (Fase Q)
+    // ========================================================================
+
+    async enqueueOutboxEvent(params: {
+      id?: string;
+      aggregateType: string;
+      aggregateId: string;
+      eventType: string;
+      idempotencyKey: string;
+      payload: Record<string, unknown>;
+      maxAttempts?: number;
+    }): Promise<OutboxEventContract> {
+      const evtUuid = params.id ? rememberLogicalId(params.id) : crypto.randomUUID();
+      const aggUuid = toDeterministicUuid(params.aggregateId);
+      const maxAttempts = params.maxAttempts ?? 5;
+      const res = await pool.query(
+        `INSERT INTO public.outbox_events (
+           id, aggregate_type, aggregate_id, event_type, idempotency_key,
+           payload, status, attempts, max_attempts, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'PENDING', 0, $7, $8)
+         ON CONFLICT (idempotency_key) DO UPDATE SET
+           payload = EXCLUDED.payload
+         RETURNING *`,
+        [
+          evtUuid,
+          params.aggregateType,
+          aggUuid,
+          params.eventType,
+          params.idempotencyKey,
+          JSON.stringify(params.payload ?? {}),
+          maxAttempts,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        aggregateType: String(r.aggregate_type),
+        aggregateId: restoreLogicalId(String(r.aggregate_id)),
+        eventType: String(r.event_type),
+        idempotencyKey: String(r.idempotency_key),
+        payload: (r.payload as Record<string, unknown>) ?? {},
+        status: String(r.status) as OutboxEventStatus,
+        attempts: Number(r.attempts ?? 0),
+        maxAttempts: Number(r.max_attempts ?? 5),
+        nextAttemptAtIso: new Date(String(r.next_attempt_at)).toISOString(),
+        processedAtIso: r.processed_at ? new Date(String(r.processed_at)).toISOString() : null,
+        lastError: r.last_error ? String(r.last_error) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listUserNotifications(params: {
+      userId: string;
+      sinceCursorSeq?: number;
+      unreadOnly?: boolean;
+      channel?: NotificationChannel;
+    }): Promise<UserNotificationsResponseContract> {
+      const userUuid = toDeterministicUuid(params.userId);
+      const sinceCursorSeq =
+        params.sinceCursorSeq !== undefined && Number.isFinite(params.sinceCursorSeq)
+          ? Math.max(0, Math.floor(params.sinceCursorSeq))
+          : 0;
+
+      const conditions: string[] = ["recipient_user_id = $1", "cursor_seq > $2"];
+      const queryArgs: unknown[] = [userUuid, sinceCursorSeq];
+
+      if (params.unreadOnly) {
+        conditions.push("read_at IS NULL");
+      }
+      if (params.channel) {
+        queryArgs.push(params.channel);
+        conditions.push(`channel = $${queryArgs.length}`);
+      }
+
+      const [listRes, unreadRes, latestCursorRes] = await Promise.all([
+        pool.query(
+          `SELECT *
+           FROM public.notification_deliveries
+           WHERE ${conditions.join(" AND ")}
+           ORDER BY cursor_seq ASC
+           LIMIT 200`,
+          queryArgs
+        ),
+        pool.query(
+          `SELECT COUNT(*)::int AS unread_count
+           FROM public.notification_deliveries
+           WHERE recipient_user_id = $1
+             AND channel = 'IN_APP'
+             AND read_at IS NULL`,
+          [userUuid]
+        ),
+        pool.query(
+          `SELECT COALESCE(MAX(cursor_seq), 0)::bigint AS max_cursor
+           FROM public.notification_deliveries
+           WHERE recipient_user_id = $1`,
+          [userUuid]
+        ),
+      ]);
+
+      const notifications: NotificationDeliveryContract[] = listRes.rows.map(
+        (r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          outboxEventId: r.outbox_event_id ? restoreLogicalId(String(r.outbox_event_id)) : null,
+          recipientUserId: restoreLogicalId(String(r.recipient_user_id)),
+          channel: String(r.channel) as NotificationChannel,
+          templateKey: String(r.template_key),
+          templateVersion: Number(r.template_version ?? 1),
+          category: String(r.category ?? "TRANSACTIONAL") as NotificationCategory,
+          locale: (String(r.locale ?? "en") === "pt-BR" ? "pt-BR" : "en") as SupportedLocale,
+          title: String(r.title ?? ""),
+          body: String(r.body ?? ""),
+          payload: (r.payload as Record<string, unknown>) ?? {},
+          status: String(r.status) as NotificationDeliveryStatus,
+          providerCode: r.provider_code ? String(r.provider_code) : null,
+          idempotencyKey: r.idempotency_key ? String(r.idempotency_key) : null,
+          cursorSeq: Number(r.cursor_seq ?? 0),
+          readAtIso: r.read_at ? new Date(String(r.read_at)).toISOString() : null,
+          lastError: r.last_error ? String(r.last_error) : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })
+      );
+
+      const unreadCount = Number(
+        (unreadRes.rows[0] as { unread_count?: number } | undefined)?.unread_count ?? 0
+      );
+      const latestCursorSeq = Number(
+        (latestCursorRes.rows[0] as { max_cursor?: string | number } | undefined)?.max_cursor ?? 0
+      );
+
+      return {
+        userId: restoreLogicalId(userUuid),
+        latestCursorSeq,
+        unreadCount,
+        notifications,
+      };
+    },
+
+    async markNotificationRead(params: {
+      userId: string;
+      notificationId: string;
+      now?: Date;
+    }): Promise<NotificationDeliveryContract | null> {
+      const userUuid = toDeterministicUuid(params.userId);
+      const notifUuid = toDeterministicUuid(params.notificationId);
+      const nowIso = (params.now ?? new Date()).toISOString();
+
+      const res = await pool.query(
+        `UPDATE public.notification_deliveries
+         SET read_at = COALESCE(read_at, $3)
+         WHERE id = $1 AND recipient_user_id = $2
+         RETURNING *`,
+        [notifUuid, userUuid, nowIso]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        outboxEventId: r.outbox_event_id ? restoreLogicalId(String(r.outbox_event_id)) : null,
+        recipientUserId: restoreLogicalId(String(r.recipient_user_id)),
+        channel: String(r.channel) as NotificationChannel,
+        templateKey: String(r.template_key),
+        templateVersion: Number(r.template_version ?? 1),
+        category: String(r.category ?? "TRANSACTIONAL") as NotificationCategory,
+        locale: (String(r.locale ?? "en") === "pt-BR" ? "pt-BR" : "en") as SupportedLocale,
+        title: String(r.title ?? ""),
+        body: String(r.body ?? ""),
+        payload: (r.payload as Record<string, unknown>) ?? {},
+        status: String(r.status) as NotificationDeliveryStatus,
+        providerCode: r.provider_code ? String(r.provider_code) : null,
+        idempotencyKey: r.idempotency_key ? String(r.idempotency_key) : null,
+        cursorSeq: Number(r.cursor_seq ?? 0),
+        readAtIso: r.read_at ? new Date(String(r.read_at)).toISOString() : null,
+        lastError: r.last_error ? String(r.last_error) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
   };

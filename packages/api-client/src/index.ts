@@ -71,6 +71,9 @@ import {
   type PromotionDiscountType,
   type PromotionFundedBy,
   type PromotionRedemptionContract,
+  type NotificationChannel,
+  type NotificationDeliveryContract,
+  type UserNotificationsResponseContract,
 } from "@ideliveryfood/contracts";
 
 export interface ApiClientOptions {
@@ -1236,6 +1239,41 @@ export class IDeliveryApiClient {
         moderationStatus: params.moderationStatus,
         reason: params.reason,
       },
+    });
+  }
+
+  // ==========================================================================
+  // M20: Notifications & Realtime Cursor Catch-Up (Fase Q)
+  // ==========================================================================
+
+  public async listMyNotifications(params?: {
+    sinceCursorSeq?: number;
+    unreadOnly?: boolean;
+    channel?: NotificationChannel;
+  }): Promise<{ data: UserNotificationsResponseContract }> {
+    const query = new URLSearchParams();
+    if (params?.sinceCursorSeq !== undefined) {
+      query.set("sinceCursor", String(params.sinceCursorSeq));
+    }
+    if (params?.unreadOnly) {
+      query.set("unreadOnly", "true");
+    }
+    if (params?.channel) {
+      query.set("channel", params.channel);
+    }
+    const qs = query.toString();
+    return this.request({
+      path: `/me/notifications${qs ? `?${qs}` : ""}`,
+      method: "GET",
+    });
+  }
+
+  public async markNotificationRead(
+    notificationId: string
+  ): Promise<{ data: NotificationDeliveryContract }> {
+    return this.request({
+      path: `/me/notifications/${encodeURIComponent(notificationId)}/read`,
+      method: "POST",
     });
   }
 }

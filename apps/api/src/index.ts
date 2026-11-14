@@ -85,6 +85,10 @@ import {
   type PromotionDiscountType,
   type PromotionFundedBy,
   type PromotionRedemptionContract,
+  type NotificationChannel,
+  type NotificationDeliveryContract,
+  type OutboxEventContract,
+  type UserNotificationsResponseContract,
 } from "@ideliveryfood/contracts";
 import {
   DEFAULT_BR_PLATFORM_POLICY,
@@ -500,6 +504,26 @@ export interface ApiDataRepository {
     redemption: PromotionRedemptionContract;
   }>;
   getMarketingBackofficeOverview?(): Promise<MarketingBackofficeOverviewContract>;
+  enqueueOutboxEvent?(params: {
+    id?: string;
+    aggregateType: string;
+    aggregateId: string;
+    eventType: string;
+    idempotencyKey: string;
+    payload: Record<string, unknown>;
+    maxAttempts?: number;
+  }): Promise<OutboxEventContract>;
+  listUserNotifications?(params: {
+    userId: string;
+    sinceCursorSeq?: number;
+    unreadOnly?: boolean;
+    channel?: NotificationChannel;
+  }): Promise<UserNotificationsResponseContract>;
+  markNotificationRead?(params: {
+    userId: string;
+    notificationId: string;
+    now?: Date;
+  }): Promise<NotificationDeliveryContract | null>;
 }
 
 /**
@@ -1082,13 +1106,13 @@ export function createApiServer(deps: {
           return;
         }
         const { json: body } = await readRawAndJsonBody(req);
-        const deviceId = String(body.deviceId ?? "").trim();
+        const deviceId = String(body.deviceId ?? body.deviceIdentifier ?? "").trim();
         if (!deviceId) {
           sendError(
             res,
             400,
             "VALIDATION_ERROR",
-            "deviceId is required.",
+            "deviceId (or deviceIdentifier) is required.",
             correlationId
           );
           return;
@@ -1105,13 +1129,15 @@ export function createApiServer(deps: {
           targetId: deviceId,
           correlationId,
           reason: "User initiated device session revocation",
-          redactedPayload: { deviceId },
+          redactedPayload: { deviceId, pushTokenCleared: true },
           createdAt: revokedAt,
         });
 
         sendJson(res, 200, correlationId, {
           status: "REVOKED",
           deviceId,
+          deviceIdentifier: deviceId,
+          pushTokenCleared: true,
           revokedAt,
         });
         return;
@@ -6858,6 +6884,82 @@ export function createApiServer(deps: {
           sendError(res, statusCode, code, msg, correlationId);
           return;
         }
+      }
+
+      // ======================================================================
+      // Fase Q (M20): User Notifications & Realtime Cursor Catch-Up Endpoints
+      // ======================================================================
+
+      // 22a. GET /v1/me/notifications (M20 — List user notifications with optional ?sinceCursor= & ?unreadOnly=true)
+      if (method === "GET" && pathname === "/v1/me/notifications") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        if (!deps.repository.listUserNotifications) {
+          sendError(
+            res,
+            501,
+            "NOT_IMPLEMENTED",
+            "Notifications repository not configured.",
+            correlationId
+          );
+          return;
+        }
+        const sinceCursorRaw = parsedUrl.searchParams.get("sinceCursor") ?? parsedUrl.searchParams.get("sinceCursorSeq");
+        const sinceCursorSeq =
+          sinceCursorRaw !== null && sinceCursorRaw.trim() !== ""
+            ? Number(sinceCursorRaw)
+            : undefined;
+        const unreadOnly = parsedUrl.searchParams.get("unreadOnly") === "true";
+        const channelParam = parsedUrl.searchParams.get("channel") as NotificationChannel | null;
+
+        const result = await deps.repository.listUserNotifications({
+          userId: actor.id,
+          ...(sinceCursorSeq !== undefined && Number.isFinite(sinceCursorSeq)
+            ? { sinceCursorSeq }
+            : {}),
+          unreadOnly,
+          ...(channelParam ? { channel: channelParam } : {}),
+        });
+        sendJson(res, 200, correlationId, { data: result });
+        return;
+      }
+
+      // 22b. POST /v1/me/notifications/:id/read (M20 — Mark user notification as read)
+      const markNotifReadMatch = pathname.match(/^\/v1\/me\/notifications\/([^/]+)\/read$/);
+      if (method === "POST" && markNotifReadMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        if (!deps.repository.markNotificationRead) {
+          sendError(
+            res,
+            501,
+            "NOT_IMPLEMENTED",
+            "Notifications repository not configured.",
+            correlationId
+          );
+          return;
+        }
+        const notificationId = markNotifReadMatch[1] ?? "";
+        const updated = await deps.repository.markNotificationRead({
+          userId: actor.id,
+          notificationId,
+        });
+        if (!updated) {
+          sendError(
+            res,
+            404,
+            "NOTIFICATION_NOT_FOUND",
+            `Notification ${notificationId} not found for user.`,
+            correlationId
+          );
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: updated });
+        return;
       }
 
       sendError(

@@ -55,6 +55,7 @@ export type ProviderCategory =
 
 export type ProviderReadinessStatus =
   | "ACTIVE"
+  | "ACTIVE_PRODUCTION"
   | "SANDBOX_READY"
   | "BLOCKED_MISSING_CREDENTIALS"
   | "DISABLED";
@@ -955,6 +956,98 @@ export interface CommercialBackofficeOverviewContract {
   commissionRuleVersions: CommissionRuleVersionContract[];
 }
 
+// ============================================================================
+// M20: Transactional Outbox, Versioned Notifications & Outbound Webhooks (Fase Q)
+// ============================================================================
+
+export type OutboxEventStatus =
+  | "PENDING"
+  | "PROCESSING"
+  | "PUBLISHED"
+  | "COMPLETED"
+  | "FAILED"
+  | "DEAD_LETTER";
+
+export interface OutboxEventContract {
+  id: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  idempotencyKey: string;
+  payload: Record<string, unknown>;
+  status: OutboxEventStatus;
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAtIso: string;
+  processedAtIso: string | null;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export type NotificationChannel =
+  | "IN_APP"
+  | "PUSH"
+  | "PUSH_ANDROID"
+  | "PUSH_IOS"
+  | "EMAIL"
+  | "WEBHOOK";
+
+export type NotificationCategory = "TRANSACTIONAL" | "SECURITY" | "MARKETING";
+
+export type NotificationDeliveryStatus =
+  | "QUEUED"
+  | "SENT_TO_PROVIDER"
+  | "DELIVERED"
+  | "BLOCKED_MISSING_CREDENTIALS"
+  | "SKIPPED_OPT_OUT"
+  | "BLOCKED_DEVICE_REVOKED"
+  | "FAILED";
+
+export interface NotificationTemplateVersionContract {
+  templateKey: string;
+  version: number;
+  category: NotificationCategory;
+  locale: SupportedLocale;
+  title: string;
+  body: string;
+}
+
+export interface NotificationDeliveryContract {
+  id: string;
+  outboxEventId: string | null;
+  recipientUserId: string;
+  channel: NotificationChannel;
+  templateKey: string;
+  templateVersion: number;
+  category: NotificationCategory;
+  locale: SupportedLocale;
+  title: string;
+  body: string;
+  payload: Record<string, unknown>;
+  status: NotificationDeliveryStatus;
+  providerCode: string | null;
+  idempotencyKey: string | null;
+  cursorSeq: number;
+  readAtIso: string | null;
+  lastError: string | null;
+  createdAtIso: string;
+}
+
+export interface UserNotificationsResponseContract {
+  userId: string;
+  latestCursorSeq: number;
+  unreadCount: number;
+  notifications: NotificationDeliveryContract[];
+}
+
+export interface OutboundWebhookEnvelopeContract {
+  eventId: string;
+  eventType: string;
+  timestampSeconds: number;
+  signatureHex: string;
+  payloadJson: string;
+}
+
 export interface PartnerFinanceSummaryContract {
   organizationId: string;
   payableBalanceCents: number;
@@ -1222,7 +1315,10 @@ export const I18N_MESSAGES = {
     "commercial.segregation.finance_blocked_notice": "Role Segregation: Commercial staff manage leads, proposals, and commission rules, and are strictly blocked from operational settlements and bank accounts.",
     "marketing.console.title": "Growth, Promotions, Atomic Budget & Verified Reviews Moderation Console (M19)",
     "marketing.feature_flags.disabled_notice": "Platform Policy Guard: Sponsored Ads (feature_sponsored_ads_enabled=false) and Subscriptions (feature_subscriptions_enabled=false) are disabled by default policy.",
-    "marketing.budget.atomic_guard_notice": "Atomic PostgreSQL Budget Guard: Concurrent coupon redemptions never exceed budget_limit_cents."
+    "marketing.budget.atomic_guard_notice": "Atomic PostgreSQL Budget Guard: Concurrent coupon redemptions never exceed budget_limit_cents.",
+    "notifications.inbox.title": "Notifications & Realtime Event Stream (M20)",
+    "notifications.external.blocked_notice": "External notification provider ({providerCode}) is in BLOCKED_MISSING_CREDENTIALS status. In-app notification was persisted without simulating external dispatch.",
+    "notifications.realtime.cursor_recovered": "Realtime cursor synchronized from sequence #{cursorSeq} ({count} events recovered)."
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1306,7 +1402,10 @@ export const I18N_MESSAGES = {
     "commercial.segregation.finance_blocked_notice": "Segregação de Papéis: O papel comercial gerencia leads, propostas e regras de comissão, sendo estritamente bloqueado de repasses operacionais e contas bancárias.",
     "marketing.console.title": "Console de Marketing, Promoções, Orçamento Atômico e Moderação de Avaliações (M19)",
     "marketing.feature_flags.disabled_notice": "Guarda de Política da Plataforma: Mídia Patrocinada (feature_sponsored_ads_enabled=false) e Clube de Assinatura (feature_subscriptions_enabled=false) estão desabilitados por padrão.",
-    "marketing.budget.atomic_guard_notice": "Guarda Atômica de Orçamento PostgreSQL: Resgates concorrentes de cupons nunca ultrapassam budget_limit_cents."
+    "marketing.budget.atomic_guard_notice": "Guarda Atômica de Orçamento PostgreSQL: Resgates concorrentes de cupons nunca ultrapassam budget_limit_cents.",
+    "notifications.inbox.title": "Central de Notificações e Eventos em Tempo Real (M20)",
+    "notifications.external.blocked_notice": "Provedor externo de notificação ({providerCode}) em status BLOCKED_MISSING_CREDENTIALS. A notificação in-app foi persistida sem simular envio externo.",
+    "notifications.realtime.cursor_recovered": "Cursor Realtime ressincronizado a partir da sequência #{cursorSeq} ({count} eventos recuperados)."
   }
 } as const;
 
