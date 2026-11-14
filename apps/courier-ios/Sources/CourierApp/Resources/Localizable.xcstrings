@@ -37,6 +37,20 @@
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Idioma" } }
       }
     },
+    "courier_locale_en": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "English (Default)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "English (Padrão)" } }
+      }
+    },
+    "courier_locale_pt_br": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Português (Brasil)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Português (Brasil)" } }
+      }
+    },
     "state_loading": {
       "extractionState": "manual",
       "localizations": {
@@ -84,6 +98,132 @@
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Cannot finalize delivery while offline. Event queued for server verification." } },
         "pt-BR": { "stringUnit": { "state": "translated", "value": "Não é possível concluir a entrega offline. Evento enfileirado para validação no servidor." } }
+      }
+    },
+    "courier_onboarding_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Courier Onboarding & KYC Documents" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Cadastro do Entregador e Documentos KYC" } }
+      }
+    },
+    "courier_onboarding_vehicle_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Vehicle Modality (Motorcycle / Bicycle / Car)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Modalidade de Veículo (Moto / Bicicleta / Carro)" } }
+      }
+    },
+    "courier_onboarding_cnh_label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Driver License (CNH) / Document Number" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Número da CNH / Documento" } }
+      }
+    },
+    "courier_onboarding_submit_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Submit KYC for Review" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Enviar KYC para Análise" } }
+      }
+    },
+    "courier_availability_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Shift Availability & GPS Telemetry" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Disponibilidade de Turno e Telemetria GPS" } }
+      }
+    },
+    "courier_availability_toggle_online": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Go Online for Dispatch" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Ficar Online para Entregas" } }
+      }
+    },
+    "courier_availability_toggle_offline": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Go Offline" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Ficar Offline" } }
+      }
+    },
+    "courier_offer_ring_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Incoming Delivery Offer" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Nova Oferta de Entrega" } }
+      }
+    },
+    "courier_offer_accept_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Accept Offer" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Aceitar Oferta" } }
+      }
+    },
+    "courier_offer_reject_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Decline Offer" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Recusar Oferta" } }
+      }
+    },
+    "courier_active_delivery_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Active Delivery Progression" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Andamento da Entrega Ativa" } }
+      }
+    },
+    "courier_stage_arrived_store_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm Arrived at Store" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Confirmar Chegada na Loja" } }
+      }
+    },
+    "courier_stage_picked_up_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm Order Picked Up" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Confirmar Coleta do Pedido" } }
+      }
+    },
+    "courier_stage_arrived_customer_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm Arrived at Customer" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Confirmar Chegada no Cliente" } }
+      }
+    },
+    "courier_stage_complete_otp_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm Delivery with 4-Digit OTP" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Concluir Entrega com OTP de 4 Dígitos" } }
+      }
+    },
+    "courier_incident_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Report Delivery / Route Incident" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Relatar Incidente de Rota / Entrega" } }
+      }
+    },
+    "courier_incident_submit_cta": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Submit Incident Report" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Enviar Relato de Incidente" } }
+      }
+    },
+    "courier_earnings_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Earnings Statement & Settlements" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Extrato de Ganhos e Repasses" } }
       }
     }
   }

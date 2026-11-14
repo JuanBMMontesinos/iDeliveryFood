@@ -31,11 +31,35 @@ public struct CourierOfferCardModel: Equatable, Sendable {
     }
 }
 
+public struct CourierLocationQueueSample: Equatable, Sendable, Codable {
+    public let deliveryTaskId: String?
+    public let latitude: Double
+    public let longitude: Double
+    public let accuracyMeters: Double
+    public let recordedAtEpochSeconds: Int64
+
+    public init(
+        deliveryTaskId: String?,
+        latitude: Double,
+        longitude: Double,
+        accuracyMeters: Double,
+        recordedAtEpochSeconds: Int64
+    ) {
+        self.deliveryTaskId = deliveryTaskId
+        self.latitude = latitude
+        self.longitude = longitude
+        self.accuracyMeters = accuracyMeters
+        self.recordedAtEpochSeconds = recordedAtEpochSeconds
+    }
+}
+
 public enum CourierDeliveryStage: String, Equatable, Sendable {
     case idle = "IDLE"
     case offerRinging = "OFFER_RINGING"
     case assignedEnRouteToStore = "ASSIGNED_EN_ROUTE_TO_STORE"
+    case arrivedAtStore = "ARRIVED_AT_STORE"
     case pickedUpEnRouteToCustomer = "PICKED_UP_EN_ROUTE_TO_CUSTOMER"
+    case arrivedAtCustomer = "ARRIVED_AT_CUSTOMER"
     case deliveredConfirmed = "DELIVERED_CONFIRMED"
 }
 
@@ -43,6 +67,7 @@ public enum CourierDispatchError: Error, Equatable {
     case courierOffline
     case noActiveOffer
     case offerExpired
+    case invalidTransition
     case offlineCompletionBlocked
     case invalidOtpCode
 }
@@ -56,6 +81,7 @@ public final class CourierDispatchController {
     public private(set) var isNetworkOnline: Bool = true
     public private(set) var stage: CourierDeliveryStage = .idle
     public private(set) var currentOffer: CourierOfferCardModel?
+    private var offlineLocationQueue: [CourierLocationQueueSample] = []
 
     public init(courierId: String, initialLocale: String = "en") {
         self.courierId = courierId
@@ -66,6 +92,16 @@ public final class CourierDispatchController {
     public func switchLocale(_ newLocale: String) -> String {
         selectedLocale = newLocale == "pt-BR" ? "pt-BR" : "en"
         return selectedLocale
+    }
+
+    public func formatBrlCents(_ cents: Int) -> String {
+        precondition(cents >= 0, "Monetary cents must be a non-negative integer.")
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "BRL"
+        formatter.locale = Locale(identifier: selectedLocale == "pt-BR" ? "pt_BR" : "en_US")
+        let major = Double(cents) / 100.0
+        return formatter.string(from: NSNumber(value: major)) ?? "R$ \(String(format: "%.2f", major))"
     }
 
     public func setOnlineAvailability(online: Bool, gpsAuthorized: Bool) {
@@ -121,6 +157,53 @@ public final class CourierDispatchController {
         return accepted
     }
 
+    @discardableResult
+    public func markArrivedAtStore() throws -> CourierDeliveryStage {
+        guard stage == .assignedEnRouteToStore else {
+            throw CourierDispatchError.invalidTransition
+        }
+        stage = .arrivedAtStore
+        return stage
+    }
+
+    @discardableResult
+    public func markPickedUpOrder() throws -> CourierDeliveryStage {
+        guard stage == .arrivedAtStore || stage == .assignedEnRouteToStore else {
+            throw CourierDispatchError.invalidTransition
+        }
+        stage = .pickedUpEnRouteToCustomer
+        return stage
+    }
+
+    @discardableResult
+    public func markArrivedAtCustomer() throws -> CourierDeliveryStage {
+        guard stage == .pickedUpEnRouteToCustomer else {
+            throw CourierDispatchError.invalidTransition
+        }
+        stage = .arrivedAtCustomer
+        return stage
+    }
+
+    @discardableResult
+    public func recordLocationSample(_ sample: CourierLocationQueueSample) -> Bool {
+        guard isGpsAuthorized else { return false }
+        if !isNetworkOnline {
+            offlineLocationQueue.append(sample)
+            return false
+        }
+        return true
+    }
+
+    public func queuedOfflineSamplesCount() -> Int {
+        return offlineLocationQueue.count
+    }
+
+    public func drainOfflineLocationQueue() -> [CourierLocationQueueSample] {
+        let snapshot = offlineLocationQueue
+        offlineLocationQueue.removeAll()
+        return snapshot
+    }
+
     public func completeDeliveryWithOtp(
         providedOtp: String,
         expectedOtp: String
@@ -128,7 +211,9 @@ public final class CourierDispatchController {
         guard isNetworkOnline else {
             throw CourierDispatchError.offlineCompletionBlocked
         }
-        guard providedOtp.count == 4, providedOtp == expectedOtp else {
+        guard providedOtp.count == 4,
+              providedOtp.allSatisfy({ $0.isNumber }),
+              providedOtp == expectedOtp else {
             throw CourierDispatchError.invalidOtpCode
         }
         stage = .deliveredConfirmed
