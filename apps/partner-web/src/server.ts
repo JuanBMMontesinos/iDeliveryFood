@@ -143,6 +143,7 @@ export function createPartnerWebServer(deps: PartnerWebServerDeps): http.Server 
 
       if (
         pathname === "/reviews" ||
+        pathname === "/promotions" ||
         pathname === "/contract" ||
         pathname === "/support"
       ) {

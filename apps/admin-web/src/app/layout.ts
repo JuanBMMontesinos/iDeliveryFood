@@ -62,9 +62,9 @@ const MODULE_LINKS: Record<
     labelPtBr: "Comercial e Contratos (M18)",
   },
   GROWTH_PROMOTIONS: {
-    href: "/admin",
-    labelEn: "Growth & Promotions",
-    labelPtBr: "Growth e Promoções",
+    href: "/marketing",
+    labelEn: "Marketing & Promotions (M19)",
+    labelPtBr: "Marketing e Promoções (M19)",
   },
   RISK_COMPLIANCE_AND_LGPD: {
     href: "/admin/audit",

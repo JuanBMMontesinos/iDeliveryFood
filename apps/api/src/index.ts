@@ -80,6 +80,11 @@ import {
   type CommercialProposalContract,
   type CommercialProposalStatus,
   type CommissionRuleVersionContract,
+  type MarketingBackofficeOverviewContract,
+  type PromotionCampaignContract,
+  type PromotionDiscountType,
+  type PromotionFundedBy,
+  type PromotionRedemptionContract,
 } from "@ideliveryfood/contracts";
 import {
   DEFAULT_BR_PLATFORM_POLICY,
@@ -87,6 +92,7 @@ import {
   assertExternalProviderReady,
   buildKitchenOrderQueue,
   buildVersionedContractAndCommissionRule,
+  calculatePublishedStoreRatingSummary,
   calculateServerQuoteAndSplit,
   computeSupportSlaDueAt,
   createBankAccountChangeRequest,
@@ -94,8 +100,11 @@ import {
   decideEscalatedSupportActionRequest,
   evaluateAccountDeletionRequest,
   evaluateAdminGovernanceDecision,
+  evaluateAdminReviewModeration,
   evaluateCourierLocationSample,
   evaluatePartnerContractAcceptance,
+  evaluatePartnerReviewReply,
+  evaluatePromotionEligibilityAndSubsidy,
   evaluatePspReconciliationRun,
   evaluateRefundRequest,
   evaluateServiceAreaEligibility,
@@ -103,6 +112,7 @@ import {
   evaluateStaffScopeGrant,
   evaluateStoreAvailability,
   evaluateSupportActionRequest,
+  evaluateVerifiedOrderReviewCreation,
   executeOrderCommand,
   filterSupportCaseViewForActor,
   hashDeliveryConfirmationCode,
@@ -473,6 +483,23 @@ export interface ApiDataRepository {
   ): Promise<MerchantContractRecordContract>;
   listCommissionRuleVersions?(organizationId: string): Promise<CommissionRuleVersionContract[]>;
   getCommercialBackofficeOverview?(): Promise<CommercialBackofficeOverviewContract>;
+  getOrderReviewById?(reviewId: string): Promise<OrderReviewContract | null>;
+  moderateOrderReview?(review: OrderReviewContract): Promise<OrderReviewContract>;
+  listPromotions?(storeId?: string): Promise<PromotionCampaignContract[]>;
+  getPromotionByCode?(code: string): Promise<PromotionCampaignContract | null>;
+  createPromotion?(promo: PromotionCampaignContract): Promise<PromotionCampaignContract>;
+  redeemPromotionAtomically?(params: {
+    promotionCode: string;
+    storeId: string;
+    customerId: string;
+    orderId?: string | null;
+    grossMerchandiseCents: number;
+    idempotencyKey: string;
+  }): Promise<{
+    promotion: PromotionCampaignContract;
+    redemption: PromotionRedemptionContract;
+  }>;
+  getMarketingBackofficeOverview?(): Promise<MarketingBackofficeOverviewContract>;
 }
 
 /**
@@ -1940,8 +1967,8 @@ export function createApiServer(deps: {
         return;
       }
 
-      // 13e. GET & POST /v1/orders/:orderId/review (M05 / M19 Verified Order Review)
-      const orderReviewMatch = pathname.match(/^\/v1\/orders\/([^/]+)\/review$/);
+      // 13e. GET & POST /v1/orders/:orderId/review(s) (M05 / M19 Verified Order Review)
+      const orderReviewMatch = pathname.match(/^\/v1\/orders\/([^/]+)\/reviews?$/);
       if (orderReviewMatch) {
         if (!actor) {
           sendError(
@@ -1973,45 +2000,40 @@ export function createApiServer(deps: {
           return;
         }
         if (method === "POST") {
-          if (order.customerId !== actor.id) {
-            sendError(
-              res,
-              403,
-              "REVIEW_FORBIDDEN",
-              "Only the verified customer who placed the order can submit a review.",
-              correlationId
-            );
-            return;
-          }
           const { json: body } = await readRawAndJsonBody(req);
           const rating = Number(body.rating);
-          if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-            sendError(
-              res,
-              400,
-              "VALIDATION_ERROR",
-              "rating must be an integer between 1 and 5.",
-              correlationId
-            );
+          const existingRev = deps.repository.getOrderReview
+            ? await deps.repository.getOrderReview(order.id)
+            : null;
+          try {
+            const reviewInput = evaluateVerifiedOrderReviewCreation({
+              id: body.id ? String(body.id) : crypto.randomUUID(),
+              order,
+              actorCustomerId: actor.id,
+              existingReviewForOrder: existingRev,
+              rating,
+              comment: body.comment ? String(body.comment) : null,
+            });
+            const saved = deps.repository.saveOrderReview
+              ? await deps.repository.saveOrderReview(reviewInput)
+              : reviewInput;
+            sendJson(res, 201, correlationId, { data: saved });
+            return;
+          } catch (revErr) {
+            const msg = revErr instanceof Error ? revErr.message : "Invalid order review";
+            const code = msg.split(":")[0] ?? "REVIEW_ERROR";
+            const statusCode =
+              code === "REVIEW_NOT_ORDER_OWNER" || code === "REVIEW_ACTOR_MISMATCH"
+                ? 403
+                : code === "REVIEW_ORDER_NOT_DELIVERED" ||
+                    code === "REVIEW_ALREADY_SUBMITTED" ||
+                    code === "REVIEW_ORDER_NOT_COMPLETED" ||
+                    code === "REVIEW_ALREADY_EXISTS"
+                  ? 409
+                  : 400;
+            sendError(res, statusCode, code, msg, correlationId);
             return;
           }
-          const reviewInput: OrderReviewContract = {
-            id: body.id ? String(body.id) : crypto.randomUUID(),
-            orderId: order.id,
-            storeId: order.storeId,
-            customerId: actor.id,
-            rating,
-            comment: body.comment ? String(body.comment).trim() : null,
-            partnerReply: null,
-            partnerRepliedAtIso: null,
-            moderationStatus: "PUBLISHED",
-            createdAtIso: new Date().toISOString(),
-          };
-          const saved = deps.repository.saveOrderReview
-            ? await deps.repository.saveOrderReview(reviewInput)
-            : reviewInput;
-          sendJson(res, 201, correlationId, { data: saved });
-          return;
         }
       }
 
@@ -4841,6 +4863,7 @@ export function createApiServer(deps: {
             "partner_manager",
             "partner_operator",
             "partner_support",
+            "partner_marketing",
           ],
         });
         if (!decision.allowed) {
@@ -4931,6 +4954,7 @@ export function createApiServer(deps: {
             "partner_manager",
             "partner_operator",
             "partner_support",
+            "partner_marketing",
           ],
         });
         if (!decision.allowed) {
@@ -6407,6 +6431,433 @@ export function createApiServer(deps: {
         const rules = await deps.repository.listCommissionRuleVersions(organizationId);
         sendJson(res, 200, correlationId, { data: rules });
         return;
+      }
+
+      // =======================================================================
+      // 21. Fase P (M19): Marketing, Atomic Coupon Budget & Verified Reviews
+      // =======================================================================
+
+      // 21a. GET /v1/marketing/overview
+      if (method === "GET" && pathname === "/v1/marketing/overview") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "marketing",
+            "growth_marketing",
+            "commercial",
+            "operations",
+            "tech_admin",
+          ],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(
+            res,
+            403,
+            authz.reasonCode,
+            "Staff marketing/commercial/operations role required.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getMarketingBackofficeOverview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Marketing repository not configured.", correlationId);
+          return;
+        }
+        const overview = await deps.repository.getMarketingBackofficeOverview();
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 21b. GET /v1/promotions & POST /v1/promotions
+      if (pathname === "/v1/promotions" && (method === "GET" || method === "POST")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const storeId = parsedUrl.searchParams.get("storeId") ?? undefined;
+          const promotions = deps.repository.listPromotions
+            ? await deps.repository.listPromotions(storeId)
+            : [];
+          sendJson(res, 200, correlationId, { data: promotions });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const requestedStoreId = body.storeId ? String(body.storeId).trim() : null;
+        const staffAuthz = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "marketing",
+            "growth_marketing",
+            "commercial",
+            "operations",
+            "tech_admin",
+          ],
+          requireMfaAal2: false,
+        });
+
+        let partnerAllowed = false;
+        if (!staffAuthz.allowed && requestedStoreId) {
+          const store = await deps.repository.getStoreById(requestedStoreId, locale);
+          if (store) {
+            const pDecision = authorizePartnerScope({
+              actor,
+              organizationId: store.organizationId,
+              storeId: store.id,
+              allowedRoles: ["partner_owner", "partner_manager", "partner_marketing"],
+            });
+            partnerAllowed = pDecision.allowed;
+          }
+        }
+
+        if (!staffAuthz.allowed && !partnerAllowed) {
+          sendError(
+            res,
+            403,
+            staffAuthz.reasonCode,
+            "Promotion creation requires staff marketing/commercial role or store partner_owner/partner_manager/partner_marketing scope.",
+            correlationId
+          );
+          return;
+        }
+
+        const code = String(body.code ?? "")
+          .trim()
+          .toUpperCase();
+        if (code.length < 3) {
+          sendError(
+            res,
+            400,
+            "PROMO_INVALID_CODE",
+            "Promotion code must be at least 3 characters.",
+            correlationId
+          );
+          return;
+        }
+
+        const rawFundedBy = String(
+          body.fundedBy ?? (partnerAllowed ? "STORE" : "PLATFORM")
+        ).toUpperCase() as PromotionFundedBy;
+        if (
+          partnerAllowed &&
+          !staffAuthz.allowed &&
+          rawFundedBy !== "STORE" &&
+          rawFundedBy !== "MERCHANT"
+        ) {
+          sendError(
+            res,
+            403,
+            "PROMO_FUNDING_FORBIDDEN",
+            "Partner-created promotions must be funded by STORE/MERCHANT.",
+            correlationId
+          );
+          return;
+        }
+
+        const platformShareBps =
+          rawFundedBy === "PLATFORM"
+            ? 10000
+            : rawFundedBy === "STORE" || rawFundedBy === "MERCHANT"
+              ? 0
+              : Number(body.platformShareBps ?? 5000);
+        const discountType = (
+          String(body.discountType ?? "FIXED_CENTS").toUpperCase() === "PERCENTAGE_BPS"
+            ? "PERCENTAGE_BPS"
+            : "FIXED_CENTS"
+        ) as PromotionDiscountType;
+        const discountValue = Number(body.discountValue ?? 1000);
+        const maxDiscountCents =
+          body.maxDiscountCents !== undefined && body.maxDiscountCents !== null
+            ? Number(body.maxDiscountCents)
+            : discountValue;
+        const minOrderCents = Number(body.minOrderCents ?? 2500);
+        const budgetLimitCents = Number(body.budgetLimitCents ?? 50000);
+        const budgetConsumedCents = Number(body.budgetConsumedCents ?? 0);
+        const maxUsesPerUser = Number(body.maxUsesPerUser ?? 1);
+        const firstOrderOnly = Boolean(body.firstOrderOnly ?? false);
+
+        if (
+          !Number.isInteger(discountValue) ||
+          discountValue <= 0 ||
+          !Number.isInteger(budgetLimitCents) ||
+          budgetLimitCents <= 0 ||
+          !Number.isInteger(maxUsesPerUser) ||
+          maxUsesPerUser <= 0
+        ) {
+          sendError(
+            res,
+            400,
+            "PROMO_INVALID_PARAMETERS",
+            "discountValue, budgetLimitCents, and maxUsesPerUser must be positive integers.",
+            correlationId
+          );
+          return;
+        }
+
+        if (!deps.repository.createPromotion) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Marketing repository not configured.", correlationId);
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const createdPromo = await deps.repository.createPromotion({
+          id: body.id ? String(body.id) : crypto.randomUUID(),
+          code,
+          storeId: requestedStoreId,
+          fundedBy: rawFundedBy,
+          platformShareBps,
+          discountType,
+          discountValue,
+          maxDiscountCents,
+          minOrderCents,
+          budgetLimitCents,
+          budgetConsumedCents,
+          maxUsesPerUser,
+          firstOrderOnly,
+          startsAtIso: String(
+            body.startsAtIso ?? new Date(Date.now() - 60_000).toISOString()
+          ),
+          endsAtIso: String(
+            body.endsAtIso ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+          ),
+          isActive: body.isActive !== undefined ? Boolean(body.isActive) : true,
+          createdBy: actor.id,
+          createdAtIso: nowIso,
+        });
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "PROMOTION_CAMPAIGN_CREATED",
+          targetType: "PROMOTION",
+          targetId: createdPromo.id,
+          correlationId,
+          reason: `Created promotion campaign ${createdPromo.code} (${createdPromo.fundedBy})`,
+          redactedPayload: {
+            code: createdPromo.code,
+            storeId: createdPromo.storeId,
+            fundedBy: createdPromo.fundedBy,
+            platformShareBps: createdPromo.platformShareBps,
+            discountType: createdPromo.discountType,
+            discountValue: createdPromo.discountValue,
+            budgetLimitCents: createdPromo.budgetLimitCents,
+          },
+          createdAt: nowIso,
+        });
+
+        sendJson(res, 201, correlationId, { data: createdPromo });
+        return;
+      }
+
+      // 21c. POST /v1/promotions/redeem (M19 — Atomic PostgreSQL coupon budget guard)
+      if (method === "POST" && pathname === "/v1/promotions/redeem") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
+        if (!idempotencyKey || idempotencyKey.trim().length < 6) {
+          sendError(
+            res,
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Header X-Idempotency-Key (>= 6 chars) is required for atomic coupon redemption.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.redeemPromotionAtomically) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Marketing repository not configured.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const promotionCode = String(body.code ?? body.promotionCode ?? "")
+          .trim()
+          .toUpperCase();
+        const storeId = String(body.storeId ?? "").trim();
+        const grossMerchandiseCents = Number(body.grossMerchandiseCents ?? 0);
+        const customerId = body.customerId ? String(body.customerId).trim() : actor.id;
+        const orderId = body.orderId ? String(body.orderId).trim() : null;
+
+        if (!promotionCode || !storeId || !Number.isInteger(grossMerchandiseCents) || grossMerchandiseCents <= 0) {
+          sendError(
+            res,
+            400,
+            "PROMO_REDEEM_INVALID_INPUT",
+            "code, storeId, and positive integer grossMerchandiseCents are required.",
+            correlationId
+          );
+          return;
+        }
+
+        try {
+          const result = await deps.repository.redeemPromotionAtomically({
+            promotionCode,
+            storeId,
+            customerId,
+            orderId,
+            grossMerchandiseCents,
+            idempotencyKey: idempotencyKey.trim(),
+          });
+          sendJson(res, 201, correlationId, { data: result });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Coupon redemption rejected";
+          const code = msg.split(":")[0] ?? "PROMO_REDEEM_ERROR";
+          const statusCode =
+            code === "PROMO_NOT_FOUND"
+              ? 404
+              : code === "PROMO_BUDGET_EXHAUSTED" ||
+                  code === "PROMO_USER_LIMIT_EXCEEDED" ||
+                  code === "PROMO_FIRST_ORDER_ONLY" ||
+                  code === "PROMO_INACTIVE" ||
+                  code === "PROMO_EXPIRED" ||
+                  code === "PROMO_NOT_STARTED"
+                ? 409
+                : 400;
+          sendError(res, statusCode, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 21d. POST /v1/reviews/:reviewId/reply (M19 — Partner reply preserving customer rating)
+      const reviewReplyDirectMatch = pathname.match(/^\/v1\/reviews\/([^/]+)\/reply$/);
+      if (method === "POST" && reviewReplyDirectMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const reviewId = reviewReplyDirectMatch[1] ?? "";
+        if (!deps.repository.getOrderReviewById || !deps.repository.replyToStoreReview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Reviews repository not configured.", correlationId);
+          return;
+        }
+        const existingReview = await deps.repository.getOrderReviewById(reviewId);
+        if (!existingReview) {
+          sendError(res, 404, "REVIEW_NOT_FOUND", `Review ${reviewId} not found.`, correlationId);
+          return;
+        }
+        const store = await deps.repository.getStoreById(existingReview.storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${existingReview.storeId} not found.`, correlationId);
+          return;
+        }
+        const decision = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_support",
+            "partner_marketing",
+          ],
+        });
+        if (!decision.allowed) {
+          sendError(
+            res,
+            403,
+            decision.reasonCode,
+            "Not authorized to reply to reviews for this store.",
+            correlationId
+          );
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const evaluated = evaluatePartnerReviewReply({
+            review: existingReview,
+            replyText: String(body.reply ?? ""),
+          });
+          const saved = await deps.repository.replyToStoreReview(
+            store.id,
+            existingReview.id,
+            evaluated.partnerReply ?? ""
+          );
+          sendJson(res, 200, correlationId, { data: saved ?? evaluated });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unable to reply to review";
+          const code = msg.split(":")[0] ?? "REVIEW_REPLY_ERROR";
+          sendError(res, code === "REVIEW_STORE_MISMATCH" ? 403 : 400, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 21e. POST /v1/admin/reviews/:reviewId/moderate (M19 — Audited moderation requiring justification)
+      const adminModerateReviewMatch = pathname.match(
+        /^\/v1\/admin\/reviews\/([^/]+)\/moderate$/
+      );
+      if (method === "POST" && adminModerateReviewMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const reviewId = adminModerateReviewMatch[1] ?? "";
+        if (!deps.repository.getOrderReviewById || !deps.repository.moderateOrderReview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Reviews repository not configured.", correlationId);
+          return;
+        }
+        const existingReview = await deps.repository.getOrderReviewById(reviewId);
+        if (!existingReview) {
+          sendError(res, 404, "REVIEW_NOT_FOUND", `Review ${reviewId} not found.`, correlationId);
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const rawTargetStatus = String(
+            body.moderationStatus ?? body.status ?? "HIDDEN_BY_MODERATION"
+          ).toUpperCase();
+          const targetModerationStatus: "PUBLISHED" | "HIDDEN_BY_MODERATION" =
+            rawTargetStatus === "PUBLISHED" ? "PUBLISHED" : "HIDDEN_BY_MODERATION";
+          const moderated = evaluateAdminReviewModeration({
+            review: existingReview,
+            targetModerationStatus,
+            moderatorStaffId: actor.id,
+            actorStaffRoles: actor.staffScopes.map((s) => s.role),
+            moderationReason: String(body.reason ?? ""),
+          });
+          const saved = await deps.repository.moderateOrderReview(moderated);
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: `ORDER_REVIEW_MODERATED_${saved.moderationStatus}`,
+            targetType: "ORDER_REVIEW",
+            targetId: saved.id,
+            correlationId,
+            reason: saved.moderationReason ?? String(body.reason ?? ""),
+            redactedPayload: {
+              orderId: saved.orderId,
+              storeId: saved.storeId,
+              previousStatus: existingReview.moderationStatus,
+              newStatus: saved.moderationStatus,
+              ratingPreserved: saved.rating,
+            },
+            createdAt: saved.moderatedAtIso ?? new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, { data: saved });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unable to moderate review";
+          const code = msg.split(":")[0] ?? "REVIEW_MODERATION_ERROR";
+          const statusCode =
+            code === "REVIEW_MODERATION_FORBIDDEN" || code === "REVIEW_MODERATION_ROLE_FORBIDDEN"
+              ? 403
+              : 400;
+          sendError(res, statusCode, code, msg, correlationId);
+          return;
+        }
       }
 
       sendError(

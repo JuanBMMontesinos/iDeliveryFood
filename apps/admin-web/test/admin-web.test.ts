@@ -531,5 +531,30 @@ describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16,
     });
     assert.equal(deniedFinance.status, 403);
   });
+
+  it("renders M19 Marketing, Atomic Coupon Budget & Verified Reviews Moderation Console (/marketing) with live Supabase data", async () => {
+    const res = await fetch(`${adminBaseUrl}/marketing?locale=en`, {
+      headers: { Authorization: `Bearer ${opsStaffTokenAal2}` },
+    });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(
+      html,
+      /Growth, Promotions, Atomic Budget &amp; Verified Reviews Moderation Console \(M19\)/
+    );
+    assert.match(html, /WELCOME10/);
+    assert.match(html, /PAULISTA15/);
+    assert.match(html, /SHARED \(50% plat\)/);
+    assert.match(html, /Sponsored Ads:\s*DISABLED \(Policy Gate\)/);
+    assert.match(html, /Subscriptions:\s*DISABLED \(Policy Gate\)/);
+    assert.match(html, /Atomic PostgreSQL Budget Guard/);
+    assert.match(html, /Crisp smash burger crust and fast delivery!/);
+
+    // Finance-only staff Roberto is blocked from /marketing (HTTP 403)
+    const deniedFinance = await fetch(`${adminBaseUrl}/marketing?locale=en`, {
+      headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+    });
+    assert.equal(deniedFinance.status, 403);
+  });
 });
 

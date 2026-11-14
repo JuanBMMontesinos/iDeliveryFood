@@ -66,6 +66,11 @@ import {
   type CommercialProposalContract,
   type CommercialProposalStatus,
   type CommissionRuleVersionContract,
+  type MarketingBackofficeOverviewContract,
+  type PromotionCampaignContract,
+  type PromotionDiscountType,
+  type PromotionFundedBy,
+  type PromotionRedemptionContract,
 } from "@ideliveryfood/contracts";
 
 export interface ApiClientOptions {
@@ -1139,6 +1144,98 @@ export class IDeliveryApiClient {
     return this.request({
       path: `/partner/organizations/${encodeURIComponent(organizationId)}/commission-rules`,
       method: "GET",
+    });
+  }
+
+  public async getMarketingBackofficeOverview(): Promise<{
+    data: MarketingBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/marketing/overview",
+      method: "GET",
+    });
+  }
+
+  public async listPromotions(
+    storeId?: string
+  ): Promise<{ data: PromotionCampaignContract[] }> {
+    const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : "";
+    return this.request({
+      path: `/promotions${query}`,
+      method: "GET",
+    });
+  }
+
+  public async createPromotion(params: {
+    id?: string;
+    code: string;
+    storeId?: string | null;
+    fundedBy?: PromotionFundedBy;
+    platformShareBps?: number;
+    discountType?: PromotionDiscountType;
+    discountValue: number;
+    maxDiscountCents?: number | null;
+    minOrderCents?: number;
+    budgetLimitCents: number;
+    budgetConsumedCents?: number;
+    maxUsesPerUser?: number;
+    firstOrderOnly?: boolean;
+    startsAtIso?: string;
+    endsAtIso?: string;
+    isActive?: boolean;
+  }): Promise<{ data: PromotionCampaignContract }> {
+    return this.request({
+      path: "/promotions",
+      method: "POST",
+      body: params as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async redeemPromotion(params: {
+    code: string;
+    storeId: string;
+    grossMerchandiseCents: number;
+    customerId?: string;
+    orderId?: string | null;
+    idempotencyKey: string;
+  }): Promise<{
+    data: {
+      promotion: PromotionCampaignContract;
+      redemption: PromotionRedemptionContract;
+    };
+  }> {
+    const { idempotencyKey, ...rest } = params;
+    return this.request({
+      path: "/promotions/redeem",
+      method: "POST",
+      idempotencyKey,
+      body: rest as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async replyToReviewDirect(params: {
+    reviewId: string;
+    reply: string;
+  }): Promise<{ data: OrderReviewContract }> {
+    return this.request({
+      path: `/reviews/${encodeURIComponent(params.reviewId)}/reply`,
+      method: "POST",
+      body: { reply: params.reply },
+    });
+  }
+
+  public async moderateOrderReview(params: {
+    reviewId: string;
+    moderationStatus: OrderReviewContract["moderationStatus"];
+    reason: string;
+  }): Promise<{ data: OrderReviewContract }> {
+    return this.request({
+      path: `/admin/reviews/${encodeURIComponent(params.reviewId)}/moderate`,
+      method: "POST",
+      body: {
+        moderationStatus: params.moderationStatus,
+        reason: params.reason,
+      },
     });
   }
 }

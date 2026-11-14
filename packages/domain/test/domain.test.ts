@@ -34,7 +34,12 @@ import {
   verifyDeliveryConfirmationCode,
   assertCommercialSegregationFromFinance,
   buildVersionedContractAndCommissionRule,
+  calculatePublishedStoreRatingSummary,
+  evaluateAdminReviewModeration,
   evaluatePartnerContractAcceptance,
+  evaluatePartnerReviewReply,
+  evaluatePromotionEligibilityAndSubsidy,
+  evaluateVerifiedOrderReviewCreation,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -1076,5 +1081,179 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
         operation: "SETTLEMENT_EXECUTION",
       })
     );
+  });
+
+  it("enforces Fase P (M19) promotion eligibility, shared subsidy double-entry ledger balance, and verified order review moderation", () => {
+    const now = new Date("2026-11-14T15:00:00.000Z");
+
+    const sharedPromo = {
+      id: "promo_shared_01",
+      code: "PAULISTA15",
+      storeId: "store_201",
+      fundedBy: "SHARED" as const,
+      platformShareBps: 5000,
+      firstOrderOnly: false,
+      discountType: "PERCENTAGE_BPS" as const,
+      discountValue: 1500, // 15%
+      maxDiscountCents: 2000,
+      minOrderCents: 4000,
+      budgetLimitCents: 10000,
+      budgetConsumedCents: 9000,
+      maxUsesPerUser: 2,
+      startsAtIso: "2026-01-01T00:00:00.000Z",
+      endsAtIso: "2027-12-31T23:59:59.000Z",
+      isActive: true,
+      createdBy: "staff_mkt_01",
+      createdAtIso: now.toISOString(),
+    };
+
+    // 1. Store mismatch
+    const wrongStore = evaluatePromotionEligibilityAndSubsidy({
+      promotion: sharedPromo,
+      storeId: "store_202",
+      grossMerchandiseCents: 6000,
+      customerPriorOrdersCount: 1,
+      customerPriorRedemptionsForPromo: 0,
+      now,
+    });
+    assert.equal(wrongStore.eligible, false);
+    assert.equal(wrongStore.reasonCode, "PROMO_STORE_MISMATCH");
+
+    // 2. Budget exhausted (15% of 8000 = 1200 cents, but only 1000 cents remaining in budget)
+    const budgetExhausted = evaluatePromotionEligibilityAndSubsidy({
+      promotion: sharedPromo,
+      storeId: "store_201",
+      grossMerchandiseCents: 8000,
+      customerPriorOrdersCount: 1,
+      customerPriorRedemptionsForPromo: 0,
+      now,
+    });
+    assert.equal(budgetExhausted.eligible, false);
+    assert.equal(budgetExhausted.reasonCode, "PROMO_BUDGET_EXHAUSTED");
+
+    // 3. Eligible shared subsidy (15% of 6000 = 900 cents -> 450 platform, 450 merchant)
+    const eligible = evaluatePromotionEligibilityAndSubsidy({
+      promotion: sharedPromo,
+      storeId: "store_201",
+      grossMerchandiseCents: 6000,
+      customerPriorOrdersCount: 1,
+      customerPriorRedemptionsForPromo: 1,
+      now,
+    });
+    assert.equal(eligible.eligible, true);
+    assert.equal(eligible.discountCents, 900);
+    assert.equal(eligible.platformSubsidyCents, 450);
+    assert.equal(eligible.merchantSubsidyCents, 450);
+
+    // 4. Quote & double-entry ledger balance with SHARED 50/50 subsidy
+    const split = calculateServerQuoteAndSplit({
+      items: [{ productId: "p1", quantity: 1, unitPriceCents: 6000, addonsUnitPriceCents: 0 }],
+      fulfillmentModality: "PLATFORM_DELIVERY",
+      deliveryFeeCents: 700,
+      discountCents: eligible.discountCents,
+      discountFundedBy: "SHARED",
+      platformSubsidyShareBps: 5000,
+      minOrderCents: 2500,
+    });
+    assert.equal(split.ledgerDebitsCents, split.ledgerCreditsCents);
+
+    const sampleDeliveredOrder = {
+      id: "ord_delivered_1",
+      orderNumber: 20001,
+      customerId: "cust_alice",
+      organizationId: "org_101",
+      storeId: "store_201",
+      quoteId: "q_1",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      orderStatus: "DELIVERED" as const,
+      paymentStatus: "CAPTURED" as const,
+      deliveryStatus: "DELIVERED" as const,
+      currencyCode: "BRL" as const,
+      subtotalCents: split.subtotalCents,
+      addonsCents: split.addonsCents,
+      serviceFeeCents: split.serviceFeeCents,
+      deliveryFeeCents: split.deliveryFeeCents,
+      discountCents: split.discountCents,
+      totalCents: split.totalCents,
+      platformCommissionCents: split.platformCommissionCents,
+      merchantNetCents: split.merchantNetCents,
+      courierEarningsCents: split.courierEarningsCents,
+      deliveryAddressSnapshot: null,
+      itemsSnapshot: [],
+      customerNotes: null,
+      cancellationReason: null,
+      cancelledByRole: null,
+      version: 5,
+      idempotencyKey: "idem_ord_del_1",
+      acceptedAtIso: now.toISOString(),
+      readyAtIso: now.toISOString(),
+      deliveredAtIso: now.toISOString(),
+      cancelledAtIso: null,
+      createdAtIso: now.toISOString(),
+      updatedAtIso: now.toISOString(),
+    };
+
+    const sharedJournal = buildBalancedOrderCaptureJournal({
+      journalId: "jnl_shared_1",
+      order: sampleDeliveredOrder,
+      discountFundedBy: "SHARED",
+      platformSubsidyShareBps: 5000,
+      postedBy: "staff_fin_01",
+      now,
+    });
+    assert.equal(sharedJournal.totalDebitsCents, sharedJournal.totalCreditsCents);
+
+    // 5. Verified review creation, partner reply, and admin moderation
+    assert.throws(
+      () =>
+        evaluateVerifiedOrderReviewCreation({
+          id: "rev_1",
+          order: sampleDeliveredOrder,
+          actorCustomerId: "cust_bruno_wrong",
+          existingReviewForOrder: null,
+          rating: 5,
+          comment: "Great!",
+          now,
+        }),
+      /REVIEW_NOT_ORDER_OWNER/
+    );
+
+    const createdReview = evaluateVerifiedOrderReviewCreation({
+      id: "rev_1",
+      order: sampleDeliveredOrder,
+      actorCustomerId: "cust_alice",
+      existingReviewForOrder: null,
+      rating: 5,
+      comment: "Crispy smash burger!",
+      now,
+    });
+    assert.equal(createdReview.moderationStatus, "PUBLISHED");
+
+    const repliedReview = evaluatePartnerReviewReply({
+      review: createdReview,
+      replyText: "Thank you for your feedback, Alice!",
+      now,
+    });
+    assert.equal(repliedReview.rating, 5);
+    assert.equal(repliedReview.comment, "Crispy smash burger!");
+    assert.equal(repliedReview.partnerReply, "Thank you for your feedback, Alice!");
+
+    const moderatedReview = evaluateAdminReviewModeration({
+      review: repliedReview,
+      targetModerationStatus: "HIDDEN_BY_MODERATION",
+      moderatorStaffId: "staff_mod_01",
+      actorStaffRoles: ["marketing"],
+      moderationReason: "Confirmed policy violation in review attachment reference",
+      now,
+    });
+    assert.equal(moderatedReview.moderationStatus, "HIDDEN_BY_MODERATION");
+    assert.equal(moderatedReview.rating, 5);
+
+    const ratingSummary = calculatePublishedStoreRatingSummary([
+      createdReview,
+      moderatedReview,
+    ]);
+    assert.equal(ratingSummary.publishedReviewsCount, 1);
+    assert.equal(ratingSummary.averageRating, 5);
   });
 });

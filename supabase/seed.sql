@@ -1317,4 +1317,42 @@ ON CONFLICT (id) DO UPDATE SET
   platform_delivery_commission_bps = EXCLUDED.platform_delivery_commission_bps,
   is_test_data = true;
 
+-- Fase P (M19): Shared-Subsidy Store Promotion & Enriched Redemption Split
+INSERT INTO public.promotions (
+  id, code, store_id, funded_by, platform_share_bps, first_order_only,
+  discount_type, discount_value, max_discount_cents, min_order_cents,
+  budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+  starts_at, ends_at, is_active, created_by, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000000902',
+  'PAULISTA15',
+  '00000000-0000-4000-8000-000000000201',
+  'SHARED',
+  5000,
+  false,
+  'PERCENTAGE_BPS',
+  1500,
+  2000,
+  4000,
+  300000,
+  0,
+  2,
+  '2026-01-01T00:00:00Z',
+  '2027-12-31T23:59:59Z',
+  true,
+  '00000000-0000-4000-8000-000000000010',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  funded_by = EXCLUDED.funded_by,
+  platform_share_bps = EXCLUDED.platform_share_bps,
+  is_active = EXCLUDED.is_active,
+  is_test_data = true;
+
+UPDATE public.promotion_redemptions
+SET platform_subsidy_cents = 1000,
+    merchant_subsidy_cents = 0,
+    idempotency_key = 'seed_redemption_order_1001_welcome10'
+WHERE id = '00000000-0000-4000-8000-000000001706';
+
 COMMIT;

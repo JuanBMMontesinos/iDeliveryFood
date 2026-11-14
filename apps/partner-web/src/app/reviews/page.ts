@@ -1,21 +1,28 @@
 import type { IDeliveryApiClient } from "@ideliveryfood/api-client";
 import {
   DEFAULT_LOCALE,
+  formatBrlCents,
   type AuthenticatedActorProfileContract,
   type MerchantContractRecordContract,
   type OrderReviewContract,
+  type PromotionCampaignContract,
   type SupportCaseContract,
   type SupportedLocale,
 } from "@ideliveryfood/contracts";
 import { escapeHtml, renderPartnerLayoutHtml } from "../layout.js";
 
-export type PartnerEngagementSubRoute = "/reviews" | "/contract" | "/support";
+export type PartnerEngagementSubRoute =
+  | "/reviews"
+  | "/promotions"
+  | "/contract"
+  | "/support";
 
 export interface PartnerEngagementScreenModel {
   locale: SupportedLocale;
   subRoute: PartnerEngagementSubRoute;
   actor: AuthenticatedActorProfileContract;
   reviews: readonly OrderReviewContract[];
+  promotions: readonly PromotionCampaignContract[];
   contract: MerchantContractRecordContract | null;
   supportCases: readonly SupportCaseContract[];
 }
@@ -27,12 +34,14 @@ export async function loadPartnerEngagementScreen(params: {
   subRoute?: PartnerEngagementSubRoute;
   locale?: SupportedLocale;
 }): Promise<PartnerEngagementScreenModel> {
-  const [meRes, reviewsRes, contractRes, supportRes] = await Promise.all([
-    params.apiClient.getMe(),
-    params.apiClient.listStoreReviews(params.storeId),
-    params.apiClient.getMerchantContract(params.organizationId),
-    params.apiClient.listStoreSupportCases(params.storeId),
-  ]);
+  const [meRes, reviewsRes, promosRes, contractRes, supportRes] =
+    await Promise.all([
+      params.apiClient.getMe(),
+      params.apiClient.listStoreReviews(params.storeId),
+      params.apiClient.listPromotions(params.storeId),
+      params.apiClient.getMerchantContract(params.organizationId),
+      params.apiClient.listStoreSupportCases(params.storeId),
+    ]);
 
   const locale = params.locale ?? meRes.data.preferredLocale ?? DEFAULT_LOCALE;
   return {
@@ -40,6 +49,7 @@ export async function loadPartnerEngagementScreen(params: {
     subRoute: params.subRoute ?? "/reviews",
     actor: meRes.data,
     reviews: reviewsRes.data,
+    promotions: promosRes.data,
     contract: contractRes.data,
     supportCases: supportRes.data,
   };
@@ -48,8 +58,41 @@ export async function loadPartnerEngagementScreen(params: {
 export function renderPartnerEngagementHtml(
   model: PartnerEngagementScreenModel
 ): string {
-  const { locale, subRoute, actor, reviews, contract, supportCases } = model;
+  const { locale, subRoute, actor, reviews, promotions, contract, supportCases } =
+    model;
   const isPt = locale === "pt-BR";
+
+  const promotionsHtml = `
+    <div class="card" data-testid="partner-promotions-section">
+      <h2 style="margin-top:0;">${isPt ? "Campanhas & Cupons da Loja (M19 — Subsídio e Orçamento Atômico)" : "Store Promotions & Coupons (M19 — Subsidy & Atomic Budget)"}</h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>${isPt ? "Código" : "Code"}</th>
+            <th>${isPt ? "Subsídio" : "Subsidy"}</th>
+            <th>${isPt ? "Desconto" : "Discount"}</th>
+            <th>${isPt ? "Pedido Mín." : "Min Order"}</th>
+            <th>${isPt ? "Orçamento Consumido / Limite" : "Budget Consumed / Limit"}</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${promotions
+            .map(
+              (p) => `
+            <tr data-testid="partner-promo-row-${escapeHtml(p.id)}">
+              <td><strong><code>${escapeHtml(p.code)}</code></strong></td>
+              <td><span class="badge">${escapeHtml(p.fundedBy)} (${(p.platformShareBps / 100).toFixed(0)}% plat)</span></td>
+              <td>${escapeHtml(p.discountType === "FIXED_CENTS" ? formatBrlCents(p.discountValue, locale) : `${(p.discountValue / 100).toFixed(2)}%`)}</td>
+              <td>${escapeHtml(formatBrlCents(p.minOrderCents, locale))}</td>
+              <td>${escapeHtml(formatBrlCents(p.budgetConsumedCents, locale))} / ${escapeHtml(formatBrlCents(p.budgetLimitCents, locale))}</td>
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 
   const reviewsHtml = `
     <div class="card" data-testid="partner-reviews-section">
@@ -140,12 +183,16 @@ export function renderPartnerEngagementHtml(
           ? isPt
             ? "Suporte ao Parceiro"
             : "Partner Support"
-          : isPt
-            ? "Avaliações da Loja"
-            : "Store Reviews",
+          : subRoute === "/promotions"
+            ? isPt
+              ? "Promoções e Cupons (M19)"
+              : "Promotions & Coupons (M19)"
+            : isPt
+              ? "Avaliações da Loja"
+              : "Store Reviews",
     locale,
-    activeRoute: subRoute,
+    activeRoute: subRoute === "/promotions" ? "/reviews" : subRoute,
     actorSummary: `${actor.fullName} (${actor.email})`,
-    bodyHtml: `<section>${reviewsHtml}${contractHtml}${supportHtml}</section>`,
+    bodyHtml: `<section>${promotionsHtml}${reviewsHtml}${contractHtml}${supportHtml}</section>`,
   });
 }

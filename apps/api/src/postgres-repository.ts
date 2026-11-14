@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 import pg from "pg";
 import type { StoredInvitationRecord } from "@ideliveryfood/authz";
-import type {
-  DeliveryStatus,
-  OrderStatus,
-  PaymentStatus,
+import {
+  evaluatePromotionEligibilityAndSubsidy,
+  type DeliveryStatus,
+  type OrderStatus,
+  type PaymentStatus,
 } from "@ideliveryfood/domain";
 import {
   CURRENCY_CODE,
@@ -31,6 +32,7 @@ import {
   type FleetsBackofficeOverviewContract,
   type FulfillmentModality,
   type LogisticsBackofficeOverviewContract,
+  type MarketingBackofficeOverviewContract,
   type MerchantContractRecordContract,
   type OrderEventRecordContract,
   type OrderRecordContract,
@@ -39,6 +41,8 @@ import {
   type PartnerRole,
   type PaymentAttemptContract,
   type PaymentMethodCode,
+  type PromotionCampaignContract,
+  type PromotionRedemptionContract,
   type PspReconciliationRunContract,
   type PublishedStoreContract,
   type RefundRecordContract,
@@ -2607,7 +2611,7 @@ export function createSupabasePostgresRepository(params: {
       const orderUuid = toDeterministicUuid(orderId);
       const res = await pool.query(
         `SELECT id, order_id, store_id, customer_id, rating, comment, partner_reply,
-                partner_replied_at, moderation_status, created_at
+                partner_replied_at, moderation_status, moderated_by, moderated_at, moderation_reason, created_at
          FROM public.order_reviews
          WHERE order_id = $1
          LIMIT 1`,
@@ -2629,6 +2633,11 @@ export function createSupabasePostgresRepository(params: {
         moderationStatus: String(
           r.moderation_status
         ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
@@ -2638,6 +2647,7 @@ export function createSupabasePostgresRepository(params: {
       const orderUuid = toDeterministicUuid(review.orderId);
       const storeUuid = toDeterministicUuid(review.storeId);
       const custUuid = toDeterministicUuid(review.customerId);
+      await ensureProfileExists(custUuid);
       const res = await pool.query(
         `INSERT INTO public.order_reviews (
            id, order_id, store_id, customer_id, rating, comment, moderation_status, is_test_data
@@ -2646,7 +2656,7 @@ export function createSupabasePostgresRepository(params: {
            rating = EXCLUDED.rating,
            comment = EXCLUDED.comment
          RETURNING id, order_id, store_id, customer_id, rating, comment, partner_reply,
-                   partner_replied_at, moderation_status, created_at`,
+                   partner_replied_at, moderation_status, moderated_by, moderated_at, moderation_reason, created_at`,
         [
           revUuid,
           orderUuid,
@@ -2673,6 +2683,11 @@ export function createSupabasePostgresRepository(params: {
         moderationStatus: String(
           r.moderation_status
         ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
@@ -2913,7 +2928,8 @@ export function createSupabasePostgresRepository(params: {
       const storeUuid = toDeterministicUuid(storeId);
       const res = await pool.query(
         `SELECT id, order_id, store_id, customer_id, rating, comment,
-                partner_reply, partner_replied_at, moderation_status, created_at
+                partner_reply, partner_replied_at, moderation_status,
+                moderated_by, moderated_at, moderation_reason, created_at
          FROM public.order_reviews
          WHERE store_id = $1
          ORDER BY created_at DESC`,
@@ -2933,6 +2949,11 @@ export function createSupabasePostgresRepository(params: {
         moderationStatus: String(
           r.moderation_status
         ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       }));
     },
@@ -2950,7 +2971,8 @@ export function createSupabasePostgresRepository(params: {
              partner_replied_at = timezone('utc', now())
          WHERE id = $2 AND store_id = $3
          RETURNING id, order_id, store_id, customer_id, rating, comment,
-                   partner_reply, partner_replied_at, moderation_status, created_at`,
+                   partner_reply, partner_replied_at, moderation_status,
+                   moderated_by, moderated_at, moderation_reason, created_at`,
         [replyText, revUuid, storeUuid]
       );
       if (res.rowCount === 0) return null;
@@ -2969,6 +2991,11 @@ export function createSupabasePostgresRepository(params: {
         moderationStatus: String(
           r.moderation_status
         ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
@@ -4612,6 +4639,596 @@ export function createSupabasePostgresRepository(params: {
           createdByStaffId: r.created_by_staff_id
             ? restoreLogicalId(String(r.created_by_staff_id))
             : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })),
+      };
+    },
+
+    async getOrderReviewById(reviewId: string): Promise<OrderReviewContract | null> {
+      const revUuid = toDeterministicUuid(reviewId);
+      const res = await pool.query(
+        `SELECT id, order_id, store_id, customer_id, rating, comment,
+                partner_reply, partner_replied_at, moderation_status,
+                moderated_by, moderated_at, moderation_reason, created_at
+         FROM public.order_reviews
+         WHERE id = $1
+         LIMIT 1`,
+        [revUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async moderateOrderReview(review: OrderReviewContract): Promise<OrderReviewContract> {
+      const revUuid = toDeterministicUuid(review.id);
+      const modByUuid = review.moderatedBy ? toDeterministicUuid(review.moderatedBy) : null;
+      if (modByUuid) {
+        await ensureProfileExists(modByUuid);
+      }
+      const res = await pool.query(
+        `UPDATE public.order_reviews
+         SET moderation_status = $2,
+             moderated_by = $3,
+             moderated_at = $4,
+             moderation_reason = $5
+         WHERE id = $1
+         RETURNING id, order_id, store_id, customer_id, rating, comment,
+                   partner_reply, partner_replied_at, moderation_status,
+                   moderated_by, moderated_at, moderation_reason, created_at`,
+        [
+          revUuid,
+          review.moderationStatus,
+          modByUuid,
+          review.moderatedAtIso ?? new Date().toISOString(),
+          review.moderationReason ?? null,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        storeId: restoreLogicalId(String(r.store_id)),
+        customerId: restoreLogicalId(String(r.customer_id)),
+        rating: Number(r.rating),
+        comment: r.comment ? String(r.comment) : null,
+        partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+        partnerRepliedAtIso: r.partner_replied_at
+          ? new Date(String(r.partner_replied_at)).toISOString()
+          : null,
+        moderationStatus: String(
+          r.moderation_status
+        ) as OrderReviewContract["moderationStatus"],
+        moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+        moderatedAtIso: r.moderated_at
+          ? new Date(String(r.moderated_at)).toISOString()
+          : null,
+        moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listPromotions(storeId?: string): Promise<PromotionCampaignContract[]> {
+      const params: unknown[] = [];
+      let whereClause = "";
+      if (storeId) {
+        params.push(toDeterministicUuid(storeId));
+        whereClause = "WHERE store_id = $1 OR store_id IS NULL";
+      }
+      const res = await pool.query(
+        `SELECT id, code, store_id, funded_by, platform_share_bps, discount_type,
+                discount_value, max_discount_cents, min_order_cents,
+                budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                first_order_only, starts_at, ends_at, is_active, created_by, created_at
+         FROM public.promotions
+         ${whereClause}
+         ORDER BY created_at DESC`,
+        params
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        code: String(r.code),
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        fundedBy: String(r.funded_by) as PromotionCampaignContract["fundedBy"],
+        platformShareBps: Number(r.platform_share_bps ?? 10000),
+        discountType: String(r.discount_type) as PromotionCampaignContract["discountType"],
+        discountValue: Number(r.discount_value),
+        maxDiscountCents:
+          r.max_discount_cents !== null && r.max_discount_cents !== undefined
+            ? Number(r.max_discount_cents)
+            : Number(r.discount_value),
+        minOrderCents: Number(r.min_order_cents),
+        budgetLimitCents: Number(r.budget_limit_cents),
+        budgetConsumedCents: Number(r.budget_consumed_cents),
+        maxUsesPerUser: Number(r.max_uses_per_user),
+        firstOrderOnly: Boolean(r.first_order_only),
+        startsAtIso: new Date(String(r.starts_at)).toISOString(),
+        endsAtIso: new Date(String(r.ends_at)).toISOString(),
+        isActive: Boolean(r.is_active),
+        createdBy: r.created_by ? restoreLogicalId(String(r.created_by)) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
+    },
+
+    async getPromotionByCode(code: string): Promise<PromotionCampaignContract | null> {
+      const normalized = code.trim().toUpperCase();
+      const res = await pool.query(
+        `SELECT id, code, store_id, funded_by, platform_share_bps, discount_type,
+                discount_value, max_discount_cents, min_order_cents,
+                budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                first_order_only, starts_at, ends_at, is_active, created_by, created_at
+         FROM public.promotions
+         WHERE UPPER(code) = $1
+         LIMIT 1`,
+        [normalized]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        code: String(r.code),
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        fundedBy: String(r.funded_by) as PromotionCampaignContract["fundedBy"],
+        platformShareBps: Number(r.platform_share_bps ?? 10000),
+        discountType: String(r.discount_type) as PromotionCampaignContract["discountType"],
+        discountValue: Number(r.discount_value),
+        maxDiscountCents:
+          r.max_discount_cents !== null && r.max_discount_cents !== undefined
+            ? Number(r.max_discount_cents)
+            : Number(r.discount_value),
+        minOrderCents: Number(r.min_order_cents),
+        budgetLimitCents: Number(r.budget_limit_cents),
+        budgetConsumedCents: Number(r.budget_consumed_cents),
+        maxUsesPerUser: Number(r.max_uses_per_user),
+        firstOrderOnly: Boolean(r.first_order_only),
+        startsAtIso: new Date(String(r.starts_at)).toISOString(),
+        endsAtIso: new Date(String(r.ends_at)).toISOString(),
+        isActive: Boolean(r.is_active),
+        createdBy: r.created_by ? restoreLogicalId(String(r.created_by)) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async createPromotion(
+      promo: PromotionCampaignContract
+    ): Promise<PromotionCampaignContract> {
+      const promoUuid = rememberLogicalId(promo.id);
+      const storeUuid = promo.storeId ? toDeterministicUuid(promo.storeId) : null;
+      const creatorUuid = promo.createdBy ? toDeterministicUuid(promo.createdBy) : null;
+      if (creatorUuid) {
+        await ensureProfileExists(creatorUuid);
+      }
+
+      const res = await pool.query(
+        `INSERT INTO public.promotions (
+           id, code, store_id, funded_by, platform_share_bps, discount_type,
+           discount_value, max_discount_cents, min_order_cents,
+           budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+           first_order_only, starts_at, ends_at, is_active, created_by, is_test_data
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6,
+           $7, $8, $9,
+           $10, $11, $12,
+           $13, $14, $15, $16, $17, $18
+         )
+         ON CONFLICT (code) DO UPDATE SET
+           store_id = EXCLUDED.store_id,
+           funded_by = EXCLUDED.funded_by,
+           platform_share_bps = EXCLUDED.platform_share_bps,
+           discount_type = EXCLUDED.discount_type,
+           discount_value = EXCLUDED.discount_value,
+           max_discount_cents = EXCLUDED.max_discount_cents,
+           min_order_cents = EXCLUDED.min_order_cents,
+           budget_limit_cents = EXCLUDED.budget_limit_cents,
+           budget_consumed_cents = EXCLUDED.budget_consumed_cents,
+           max_uses_per_user = EXCLUDED.max_uses_per_user,
+           first_order_only = EXCLUDED.first_order_only,
+           starts_at = EXCLUDED.starts_at,
+           ends_at = EXCLUDED.ends_at,
+           is_active = EXCLUDED.is_active
+         RETURNING id, code, store_id, funded_by, platform_share_bps, discount_type,
+                   discount_value, max_discount_cents, min_order_cents,
+                   budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                   first_order_only, starts_at, ends_at, is_active, created_by, created_at`,
+        [
+          promoUuid,
+          promo.code.trim().toUpperCase(),
+          storeUuid,
+          promo.fundedBy,
+          promo.platformShareBps,
+          promo.discountType,
+          promo.discountValue,
+          promo.maxDiscountCents,
+          promo.minOrderCents,
+          promo.budgetLimitCents,
+          promo.budgetConsumedCents,
+          promo.maxUsesPerUser,
+          promo.firstOrderOnly,
+          promo.startsAtIso,
+          promo.endsAtIso,
+          promo.isActive,
+          creatorUuid,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        code: String(r.code),
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        fundedBy: String(r.funded_by) as PromotionCampaignContract["fundedBy"],
+        platformShareBps: Number(r.platform_share_bps ?? 10000),
+        discountType: String(r.discount_type) as PromotionCampaignContract["discountType"],
+        discountValue: Number(r.discount_value),
+        maxDiscountCents:
+          r.max_discount_cents !== null && r.max_discount_cents !== undefined
+            ? Number(r.max_discount_cents)
+            : Number(r.discount_value),
+        minOrderCents: Number(r.min_order_cents),
+        budgetLimitCents: Number(r.budget_limit_cents),
+        budgetConsumedCents: Number(r.budget_consumed_cents),
+        maxUsesPerUser: Number(r.max_uses_per_user),
+        firstOrderOnly: Boolean(r.first_order_only),
+        startsAtIso: new Date(String(r.starts_at)).toISOString(),
+        endsAtIso: new Date(String(r.ends_at)).toISOString(),
+        isActive: Boolean(r.is_active),
+        createdBy: r.created_by ? restoreLogicalId(String(r.created_by)) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async redeemPromotionAtomically(params: {
+      promotionCode: string;
+      storeId: string;
+      customerId: string;
+      orderId?: string | null;
+      grossMerchandiseCents: number;
+      idempotencyKey: string;
+    }): Promise<{
+      promotion: PromotionCampaignContract;
+      redemption: PromotionRedemptionContract;
+    }> {
+      const normalizedCode = params.promotionCode.trim().toUpperCase();
+      const customerUuid = toDeterministicUuid(params.customerId);
+      const storeUuid = toDeterministicUuid(params.storeId);
+      const orderUuid = params.orderId ? toDeterministicUuid(params.orderId) : null;
+      await ensureProfileExists(customerUuid);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // 1. Check idempotency key first
+        const existingRedemptionRes = await client.query(
+          `SELECT id, promotion_id, order_id, customer_id, status,
+                  discount_applied_cents, platform_subsidy_cents, merchant_subsidy_cents,
+                  idempotency_key, created_at
+           FROM public.promotion_redemptions
+           WHERE idempotency_key = $1
+           LIMIT 1`,
+          [params.idempotencyKey]
+        );
+        if ((existingRedemptionRes.rowCount ?? 0) > 0) {
+          const redRow = existingRedemptionRes.rows[0] as Record<string, unknown>;
+          const promoRes = await client.query(
+            `SELECT id, code, store_id, funded_by, platform_share_bps, discount_type,
+                    discount_value, max_discount_cents, min_order_cents,
+                    budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                    first_order_only, starts_at, ends_at, is_active, created_by, created_at
+             FROM public.promotions
+             WHERE id = $1
+             LIMIT 1`,
+            [redRow.promotion_id]
+          );
+          await client.query("COMMIT");
+          const pRow = promoRes.rows[0] as Record<string, unknown>;
+          return {
+            promotion: {
+              id: restoreLogicalId(String(pRow.id)),
+              code: String(pRow.code),
+              storeId: pRow.store_id ? restoreLogicalId(String(pRow.store_id)) : null,
+              fundedBy: String(pRow.funded_by) as PromotionCampaignContract["fundedBy"],
+              platformShareBps: Number(pRow.platform_share_bps ?? 10000),
+              discountType: String(
+                pRow.discount_type
+              ) as PromotionCampaignContract["discountType"],
+              discountValue: Number(pRow.discount_value),
+              maxDiscountCents:
+                pRow.max_discount_cents !== null && pRow.max_discount_cents !== undefined
+                  ? Number(pRow.max_discount_cents)
+                  : Number(pRow.discount_value),
+              minOrderCents: Number(pRow.min_order_cents),
+              budgetLimitCents: Number(pRow.budget_limit_cents),
+              budgetConsumedCents: Number(pRow.budget_consumed_cents),
+              maxUsesPerUser: Number(pRow.max_uses_per_user),
+              firstOrderOnly: Boolean(pRow.first_order_only),
+              startsAtIso: new Date(String(pRow.starts_at)).toISOString(),
+              endsAtIso: new Date(String(pRow.ends_at)).toISOString(),
+              isActive: Boolean(pRow.is_active),
+              createdBy: pRow.created_by ? restoreLogicalId(String(pRow.created_by)) : null,
+              createdAtIso: new Date(String(pRow.created_at)).toISOString(),
+            },
+            redemption: {
+              id: restoreLogicalId(String(redRow.id)),
+              promotionId: restoreLogicalId(String(redRow.promotion_id)),
+              orderId: redRow.order_id ? restoreLogicalId(String(redRow.order_id)) : null,
+              customerId: restoreLogicalId(String(redRow.customer_id)),
+              status: String(redRow.status) as PromotionRedemptionContract["status"],
+              discountAppliedCents: Number(redRow.discount_applied_cents),
+              platformSubsidyCents: Number(redRow.platform_subsidy_cents),
+              merchantSubsidyCents: Number(redRow.merchant_subsidy_cents),
+              idempotencyKey: redRow.idempotency_key ? String(redRow.idempotency_key) : null,
+              createdAtIso: new Date(String(redRow.created_at)).toISOString(),
+            },
+          };
+        }
+
+        // 2. Lock the promotion row FOR UPDATE so concurrent requests serialize atomically
+        const promoRes = await client.query(
+          `SELECT id, code, store_id, funded_by, platform_share_bps, discount_type,
+                  discount_value, max_discount_cents, min_order_cents,
+                  budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                  first_order_only, starts_at, ends_at, is_active, created_by, created_at
+           FROM public.promotions
+           WHERE UPPER(code) = $1
+           FOR UPDATE`,
+          [normalizedCode]
+        );
+        if (promoRes.rowCount === 0) {
+          throw new Error(`PROMO_NOT_FOUND: Promotion code ${normalizedCode} not found.`);
+        }
+        const pRow = promoRes.rows[0] as Record<string, unknown>;
+        const lockedPromotion: PromotionCampaignContract = {
+          id: restoreLogicalId(String(pRow.id)),
+          code: String(pRow.code),
+          storeId: pRow.store_id ? restoreLogicalId(String(pRow.store_id)) : null,
+          fundedBy: String(pRow.funded_by) as PromotionCampaignContract["fundedBy"],
+          platformShareBps: Number(pRow.platform_share_bps ?? 10000),
+          discountType: String(
+            pRow.discount_type
+          ) as PromotionCampaignContract["discountType"],
+          discountValue: Number(pRow.discount_value),
+          maxDiscountCents:
+            pRow.max_discount_cents !== null && pRow.max_discount_cents !== undefined
+              ? Number(pRow.max_discount_cents)
+              : Number(pRow.discount_value),
+          minOrderCents: Number(pRow.min_order_cents),
+          budgetLimitCents: Number(pRow.budget_limit_cents),
+          budgetConsumedCents: Number(pRow.budget_consumed_cents),
+          maxUsesPerUser: Number(pRow.max_uses_per_user),
+          firstOrderOnly: Boolean(pRow.first_order_only),
+          startsAtIso: new Date(String(pRow.starts_at)).toISOString(),
+          endsAtIso: new Date(String(pRow.ends_at)).toISOString(),
+          isActive: Boolean(pRow.is_active),
+          createdBy: pRow.created_by ? restoreLogicalId(String(pRow.created_by)) : null,
+          createdAtIso: new Date(String(pRow.created_at)).toISOString(),
+        };
+
+        // 3. Count prior redemptions by this customer and prior orders
+        const [priorRedemptionsRes, priorOrdersRes] = await Promise.all([
+          client.query(
+            `SELECT COUNT(*)::int AS cnt
+             FROM public.promotion_redemptions
+             WHERE promotion_id = $1
+               AND customer_id = $2
+               AND status IN ('RESERVED', 'REDEEMED')`,
+            [pRow.id, customerUuid]
+          ),
+          client.query(
+            `SELECT COUNT(*)::int AS cnt
+             FROM public.orders
+             WHERE customer_id = $1
+               AND order_status NOT IN ('CANCELLED', 'REFUNDED')`,
+            [customerUuid]
+          ),
+        ]);
+        const customerPriorRedemptionsForPromo = Number(
+          (priorRedemptionsRes.rows[0] as { cnt: number })?.cnt ?? 0
+        );
+        const customerPriorOrdersCount = Number(
+          (priorOrdersRes.rows[0] as { cnt: number })?.cnt ?? 0
+        );
+
+        // 4. Evaluate M19 domain rules & subsidy split
+        const evaluation = evaluatePromotionEligibilityAndSubsidy({
+          promotion: lockedPromotion,
+          storeId: lockedPromotion.storeId ? lockedPromotion.storeId : restoreLogicalId(storeUuid),
+          grossMerchandiseCents: params.grossMerchandiseCents,
+          customerPriorRedemptionsForPromo,
+          customerPriorOrdersCount,
+        });
+        if (!evaluation.eligible) {
+          throw new Error(
+            `${evaluation.reasonCode}: Promotion ${normalizedCode} rejected (${evaluation.reasonCode}).`
+          );
+        }
+
+        // 5. Execute atomic conditional budget guard in PostgreSQL
+        const updateRes = await client.query(
+          `UPDATE public.promotions
+           SET budget_consumed_cents = budget_consumed_cents + $2
+           WHERE id = $1
+             AND is_active = true
+             AND budget_consumed_cents + $2 <= budget_limit_cents
+           RETURNING id, code, store_id, funded_by, platform_share_bps, discount_type,
+                     discount_value, max_discount_cents, min_order_cents,
+                     budget_limit_cents, budget_consumed_cents, max_uses_per_user,
+                     first_order_only, starts_at, ends_at, is_active, created_by, created_at`,
+          [pRow.id, evaluation.discountCents]
+        );
+        if (updateRes.rowCount === 0) {
+          throw new Error(
+            `PROMO_BUDGET_EXHAUSTED: Promotion ${normalizedCode} atomic budget guard rejected redemption.`
+          );
+        }
+        const updatedRow = updateRes.rows[0] as Record<string, unknown>;
+
+        // 6. Insert promotion redemption record
+        const redemptionId = crypto.randomUUID();
+        const redemptionStatus: PromotionRedemptionContract["status"] = orderUuid
+          ? "REDEEMED"
+          : "RESERVED";
+        const insertRedRes = await client.query(
+          `INSERT INTO public.promotion_redemptions (
+             id, promotion_id, order_id, customer_id, status,
+             discount_applied_cents, platform_subsidy_cents, merchant_subsidy_cents,
+             idempotency_key, is_test_data
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING id, promotion_id, order_id, customer_id, status,
+                     discount_applied_cents, platform_subsidy_cents, merchant_subsidy_cents,
+                     idempotency_key, created_at`,
+          [
+            redemptionId,
+            pRow.id,
+            orderUuid,
+            customerUuid,
+            redemptionStatus,
+            evaluation.discountCents,
+            evaluation.platformSubsidyCents,
+            evaluation.merchantSubsidyCents,
+            params.idempotencyKey,
+            isTestData,
+          ]
+        );
+        const rRow = insertRedRes.rows[0] as Record<string, unknown>;
+
+        await client.query("COMMIT");
+
+        return {
+          promotion: {
+            id: restoreLogicalId(String(updatedRow.id)),
+            code: String(updatedRow.code),
+            storeId: updatedRow.store_id ? restoreLogicalId(String(updatedRow.store_id)) : null,
+            fundedBy: String(
+              updatedRow.funded_by
+            ) as PromotionCampaignContract["fundedBy"],
+            platformShareBps: Number(updatedRow.platform_share_bps ?? 10000),
+            discountType: String(
+              updatedRow.discount_type
+            ) as PromotionCampaignContract["discountType"],
+            discountValue: Number(updatedRow.discount_value),
+            maxDiscountCents:
+              updatedRow.max_discount_cents !== null &&
+              updatedRow.max_discount_cents !== undefined
+                ? Number(updatedRow.max_discount_cents)
+                : Number(updatedRow.discount_value),
+            minOrderCents: Number(updatedRow.min_order_cents),
+            budgetLimitCents: Number(updatedRow.budget_limit_cents),
+            budgetConsumedCents: Number(updatedRow.budget_consumed_cents),
+            maxUsesPerUser: Number(updatedRow.max_uses_per_user),
+            firstOrderOnly: Boolean(updatedRow.first_order_only),
+            startsAtIso: new Date(String(updatedRow.starts_at)).toISOString(),
+            endsAtIso: new Date(String(updatedRow.ends_at)).toISOString(),
+            isActive: Boolean(updatedRow.is_active),
+            createdBy: updatedRow.created_by
+              ? restoreLogicalId(String(updatedRow.created_by))
+              : null,
+            createdAtIso: new Date(String(updatedRow.created_at)).toISOString(),
+          },
+          redemption: {
+            id: restoreLogicalId(String(rRow.id)),
+            promotionId: restoreLogicalId(String(rRow.promotion_id)),
+            orderId: rRow.order_id ? restoreLogicalId(String(rRow.order_id)) : null,
+            customerId: restoreLogicalId(String(rRow.customer_id)),
+            status: String(rRow.status) as PromotionRedemptionContract["status"],
+            discountAppliedCents: Number(rRow.discount_applied_cents),
+            platformSubsidyCents: Number(rRow.platform_subsidy_cents),
+            merchantSubsidyCents: Number(rRow.merchant_subsidy_cents),
+            idempotencyKey: rRow.idempotency_key ? String(rRow.idempotency_key) : null,
+            createdAtIso: new Date(String(rRow.created_at)).toISOString(),
+          },
+        };
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
+    async getMarketingBackofficeOverview(): Promise<MarketingBackofficeOverviewContract> {
+      const [policyRes, promotions, redemptionsRes, reviewsRes] = await Promise.all([
+        pool.query(
+          `SELECT feature_sponsored_ads_enabled, feature_subscriptions_enabled
+           FROM public.platform_policies
+           WHERE policy_key = 'DEFAULT_BR_MARKETPLACE'
+           LIMIT 1`
+        ),
+        this.listPromotions!(),
+        pool.query(
+          `SELECT id, promotion_id, order_id, customer_id, status,
+                  discount_applied_cents, platform_subsidy_cents, merchant_subsidy_cents,
+                  idempotency_key, created_at
+           FROM public.promotion_redemptions
+           ORDER BY created_at DESC
+           LIMIT 100`
+        ),
+        pool.query(
+          `SELECT id, order_id, store_id, customer_id, rating, comment,
+                  partner_reply, partner_replied_at, moderation_status,
+                  moderated_by, moderated_at, moderation_reason, created_at
+           FROM public.order_reviews
+           ORDER BY created_at DESC
+           LIMIT 100`
+        ),
+      ]);
+
+      const pol = (policyRes.rows[0] ?? {}) as Record<string, unknown>;
+      return {
+        featureSponsoredAdsEnabled: Boolean(pol.feature_sponsored_ads_enabled ?? false),
+        featureSubscriptionsEnabled: Boolean(pol.feature_subscriptions_enabled ?? false),
+        promotions,
+        redemptions: redemptionsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          promotionId: restoreLogicalId(String(r.promotion_id)),
+          orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+          customerId: restoreLogicalId(String(r.customer_id)),
+          status: String(r.status) as PromotionRedemptionContract["status"],
+          discountAppliedCents: Number(r.discount_applied_cents),
+          platformSubsidyCents: Number(r.platform_subsidy_cents ?? 0),
+          merchantSubsidyCents: Number(r.merchant_subsidy_cents ?? 0),
+          idempotencyKey: r.idempotency_key ? String(r.idempotency_key) : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })),
+        reviews: reviewsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          orderId: restoreLogicalId(String(r.order_id)),
+          storeId: restoreLogicalId(String(r.store_id)),
+          customerId: restoreLogicalId(String(r.customer_id)),
+          rating: Number(r.rating),
+          comment: r.comment ? String(r.comment) : null,
+          partnerReply: r.partner_reply ? String(r.partner_reply) : null,
+          partnerRepliedAtIso: r.partner_replied_at
+            ? new Date(String(r.partner_replied_at)).toISOString()
+            : null,
+          moderationStatus: String(
+            r.moderation_status
+          ) as OrderReviewContract["moderationStatus"],
+          moderatedBy: r.moderated_by ? restoreLogicalId(String(r.moderated_by)) : null,
+          moderatedAtIso: r.moderated_at
+            ? new Date(String(r.moderated_at)).toISOString()
+            : null,
+          moderationReason: r.moderation_reason ? String(r.moderation_reason) : null,
           createdAtIso: new Date(String(r.created_at)).toISOString(),
         })),
       };

@@ -37,6 +37,11 @@ import {
   type CommercialProposalStatus,
   type CommissionRuleVersionContract,
   type MerchantContractRecordContract,
+  type OrderReviewContract,
+  type PromotionCampaignContract,
+  type PromotionDiscountType,
+  type PromotionFundedBy,
+  type PromotionRedemptionContract,
 } from "@ideliveryfood/contracts";
 
 export type OrderStatus =
@@ -651,7 +656,8 @@ export function calculateServerQuoteAndSplit(params: {
   fulfillmentModality: FulfillmentModality;
   deliveryFeeCents: number;
   discountCents: number;
-  discountFundedBy: "PLATFORM" | "MERCHANT" | "NONE";
+  discountFundedBy: "PLATFORM" | "MERCHANT" | "STORE" | "SHARED" | "NONE";
+  platformSubsidyShareBps?: number;
   minOrderCents: number;
   policy?: PlatformPolicyConfig;
 }): QuoteAndSplitCalculation {
@@ -702,10 +708,16 @@ export function calculateServerQuoteAndSplit(params: {
         : policy.pickupCommissionBps;
 
   const platformCommissionCents = Math.round((grossMerchandiseCents * commissionBps) / 10000);
-  const merchantDiscountDeduction =
-    params.discountFundedBy === "MERCHANT" ? discountCents : 0;
+  const shareBps =
+    params.discountFundedBy === "PLATFORM"
+      ? 10000
+      : params.discountFundedBy === "SHARED"
+        ? (params.platformSubsidyShareBps ?? 5000)
+        : 0;
   const platformPromoSubsidyCents =
-    params.discountFundedBy === "PLATFORM" ? discountCents : 0;
+    params.discountFundedBy === "NONE" ? 0 : Math.round((discountCents * shareBps) / 10000);
+  const merchantDiscountDeduction =
+    params.discountFundedBy === "NONE" ? 0 : discountCents - platformPromoSubsidyCents;
 
   const courierEarningsCents =
     params.fulfillmentModality === "PLATFORM_DELIVERY" ? effectiveDeliveryFeeCents : 0;
@@ -778,7 +790,8 @@ export function createOrderFromServerQuote(params: {
   quote: ServerQuoteRecordContract;
   actorCustomerId: string;
   isStoreCurrentlyOpen: boolean;
-  discountFundedBy: "PLATFORM" | "MERCHANT" | "NONE";
+  discountFundedBy: "PLATFORM" | "MERCHANT" | "STORE" | "SHARED" | "NONE";
+  platformSubsidyShareBps?: number;
   customerNotes?: string | null;
   idempotencyKey: string;
   now?: Date;
@@ -817,6 +830,9 @@ export function createOrderFromServerQuote(params: {
     deliveryFeeCents: params.quote.deliveryFeeCents,
     discountCents: params.quote.discountCents,
     discountFundedBy: params.discountFundedBy,
+    ...(params.platformSubsidyShareBps !== undefined
+      ? { platformSubsidyShareBps: params.platformSubsidyShareBps }
+      : {}),
     minOrderCents: 0,
   });
 
@@ -1747,7 +1763,8 @@ export function evaluateAdminGovernanceDecision(params: {
 export function buildBalancedOrderCaptureJournal(params: {
   journalId: string;
   order: OrderRecordContract;
-  discountFundedBy: "PLATFORM" | "MERCHANT" | "NONE";
+  discountFundedBy: "PLATFORM" | "MERCHANT" | "STORE" | "SHARED" | "NONE";
+  platformSubsidyShareBps?: number;
   postedBy: string;
   now?: Date;
 }): LedgerJournalPostContract {
@@ -1761,11 +1778,22 @@ export function buildBalancedOrderCaptureJournal(params: {
     });
   }
 
-  if (params.discountFundedBy === "PLATFORM" && params.order.discountCents > 0) {
+  const shareBps =
+    params.discountFundedBy === "PLATFORM"
+      ? 10000
+      : params.discountFundedBy === "SHARED"
+        ? (params.platformSubsidyShareBps ?? 5000)
+        : 0;
+  const platformSubsidyCents =
+    params.discountFundedBy === "NONE"
+      ? 0
+      : Math.round((params.order.discountCents * shareBps) / 10000);
+
+  if (platformSubsidyCents > 0) {
     entries.push({
       accountCode: "PLATFORM_PROMO_SUBSIDY_EXPENSE",
       direction: "DEBIT",
-      amountCents: params.order.discountCents,
+      amountCents: platformSubsidyCents,
     });
   }
 
@@ -2705,5 +2733,237 @@ export function assertCommercialSegregationFromFinance(params: {
     );
   }
 }
+
+// ============================================================================
+// M19: Marketing, Promotions, Atomic Budget Guard & Verified Reviews (Fase P)
+// ============================================================================
+
+export interface PromotionEvaluationResult {
+  eligible: boolean;
+  reasonCode: string;
+  discountCents: number;
+  platformSubsidyCents: number;
+  merchantSubsidyCents: number;
+  fundedBy: PromotionFundedBy;
+  platformShareBps: number;
+}
+
+/**
+ * Evaluates coupon eligibility (store scope, validity window, min order, first-order-only,
+ * per-user cap, and remaining campaign budget) and computes the exact subsidy split
+ * (`PLATFORM`, `STORE`/`MERCHANT`, or `SHARED`) in integer BRL cents (M19).
+ */
+export function evaluatePromotionEligibilityAndSubsidy(params: {
+  promotion: PromotionCampaignContract;
+  storeId: string;
+  grossMerchandiseCents: number;
+  customerPriorOrdersCount: number;
+  customerPriorRedemptionsForPromo: number;
+  now?: Date;
+}): PromotionEvaluationResult {
+  assertIntegerCents(params.grossMerchandiseCents, "grossMerchandiseCents");
+  const now = params.now ?? new Date();
+  const promo = params.promotion;
+
+  const fail = (reasonCode: string): PromotionEvaluationResult => ({
+    eligible: false,
+    reasonCode,
+    discountCents: 0,
+    platformSubsidyCents: 0,
+    merchantSubsidyCents: 0,
+    fundedBy: promo.fundedBy,
+    platformShareBps: promo.platformShareBps,
+  });
+
+  if (!promo.isActive) {
+    return fail("PROMO_INACTIVE");
+  }
+  const nowMs = now.getTime();
+  if (nowMs < new Date(promo.startsAtIso).getTime() || nowMs > new Date(promo.endsAtIso).getTime()) {
+    return fail("PROMO_OUTSIDE_VALIDITY_WINDOW");
+  }
+  if (promo.storeId !== null && promo.storeId !== params.storeId) {
+    return fail("PROMO_STORE_MISMATCH");
+  }
+  if (params.grossMerchandiseCents < promo.minOrderCents) {
+    return fail("PROMO_BELOW_MIN_ORDER");
+  }
+  if (promo.firstOrderOnly && params.customerPriorOrdersCount > 0) {
+    return fail("PROMO_FIRST_ORDER_ONLY");
+  }
+  if (params.customerPriorRedemptionsForPromo >= promo.maxUsesPerUser) {
+    return fail("PROMO_USER_LIMIT_EXCEEDED");
+  }
+
+  const rawDiscountCents =
+    promo.discountType === "FIXED_CENTS"
+      ? promo.discountValue
+      : Math.round((params.grossMerchandiseCents * promo.discountValue) / 10000);
+  const discountCents = Math.min(
+    rawDiscountCents,
+    promo.maxDiscountCents,
+    params.grossMerchandiseCents
+  );
+
+  if (discountCents <= 0) {
+    return fail("PROMO_ZERO_DISCOUNT");
+  }
+  if (promo.budgetConsumedCents + discountCents > promo.budgetLimitCents) {
+    return fail("PROMO_BUDGET_EXHAUSTED");
+  }
+
+  const shareBps =
+    promo.fundedBy === "PLATFORM"
+      ? 10000
+      : promo.fundedBy === "SHARED"
+        ? promo.platformShareBps
+        : 0;
+  const platformSubsidyCents = Math.round((discountCents * shareBps) / 10000);
+  const merchantSubsidyCents = discountCents - platformSubsidyCents;
+
+  return {
+    eligible: true,
+    reasonCode: "PROMO_ELIGIBLE",
+    discountCents,
+    platformSubsidyCents,
+    merchantSubsidyCents,
+    fundedBy: promo.fundedBy,
+    platformShareBps: shareBps,
+  };
+}
+
+/**
+ * Validates and creates a verified customer order review (M19).
+ * Only the customer who owns a `DELIVERED` or `COMPLETED` order can submit a review,
+ * and at most 1 review per order is allowed.
+ */
+export function evaluateVerifiedOrderReviewCreation(params: {
+  id: string;
+  order: OrderRecordContract;
+  actorCustomerId: string;
+  existingReviewForOrder: OrderReviewContract | null;
+  rating: number;
+  comment?: string | null;
+  now?: Date;
+}): OrderReviewContract {
+  if (params.order.customerId !== params.actorCustomerId) {
+    throw new Error(
+      `REVIEW_NOT_ORDER_OWNER: Customer ${params.actorCustomerId} does not own order ${params.order.id}.`
+    );
+  }
+  if (params.order.orderStatus !== "DELIVERED" && params.order.orderStatus !== "COMPLETED") {
+    throw new Error(
+      `REVIEW_ORDER_NOT_DELIVERED: Order ${params.order.id} is in status ${params.order.orderStatus}; only DELIVERED or COMPLETED orders can be reviewed.`
+    );
+  }
+  if (params.existingReviewForOrder !== null) {
+    throw new Error(
+      `REVIEW_ALREADY_SUBMITTED: Order ${params.order.id} already has a verified review.`
+    );
+  }
+  if (!Number.isInteger(params.rating) || params.rating < 1 || params.rating > 5) {
+    throw new Error("REVIEW_INVALID_RATING: rating must be an integer between 1 and 5.");
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    id: params.id,
+    orderId: params.order.id,
+    storeId: params.order.storeId,
+    customerId: params.actorCustomerId,
+    rating: params.rating,
+    comment: params.comment && params.comment.trim().length > 0 ? params.comment.trim() : null,
+    partnerReply: null,
+    partnerRepliedAtIso: null,
+    moderationStatus: "PUBLISHED",
+    moderatedBy: null,
+    moderatedAtIso: null,
+    moderationReason: null,
+    createdAtIso: nowIso,
+  };
+}
+
+/**
+ * Records a partner's official reply to a verified customer review without altering
+ * the customer's rating or original comment (M19).
+ */
+export function evaluatePartnerReviewReply(params: {
+  review: OrderReviewContract;
+  replyText: string;
+  now?: Date;
+}): OrderReviewContract {
+  if (!params.replyText || params.replyText.trim().length < 3) {
+    throw new Error("REVIEW_REPLY_TOO_SHORT: Partner reply must be at least 3 characters.");
+  }
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.review,
+    partnerReply: params.replyText.trim(),
+    partnerRepliedAtIso: nowIso,
+  };
+}
+
+/**
+ * Moderates a verified customer review (M19). Requires authorized staff role and
+ * mandatory justification (`>= 10` characters). Never mutates the customer's original rating or comment.
+ */
+export function evaluateAdminReviewModeration(params: {
+  review: OrderReviewContract;
+  targetModerationStatus: "PUBLISHED" | "HIDDEN_BY_MODERATION";
+  moderatorStaffId: string;
+  actorStaffRoles: readonly string[];
+  moderationReason: string;
+  now?: Date;
+}): OrderReviewContract {
+  const allowedRoles = new Set([
+    "marketing",
+    "growth_marketing",
+    "support",
+    "operations",
+    "risk_compliance",
+    "tech_admin",
+  ]);
+  const isAuthorized = params.actorStaffRoles.some((r) => allowedRoles.has(r));
+  if (!isAuthorized) {
+    throw new Error(
+      "REVIEW_MODERATION_FORBIDDEN: Staff role is not authorized to moderate order reviews."
+    );
+  }
+  if (!params.moderationReason || params.moderationReason.trim().length < 10) {
+    throw new Error(
+      "REVIEW_MODERATION_REASON_REQUIRED: A moderation justification of at least 10 characters is required."
+    );
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.review,
+    moderationStatus: params.targetModerationStatus,
+    moderatedBy: params.moderatorStaffId,
+    moderatedAtIso: nowIso,
+    moderationReason: params.moderationReason.trim(),
+  };
+}
+
+/**
+ * Computes a store's real average rating and published review count from verified reviews (M19).
+ */
+export function calculatePublishedStoreRatingSummary(
+  reviews: readonly OrderReviewContract[]
+): {
+  publishedReviewsCount: number;
+  averageRating: number;
+} {
+  const published = reviews.filter((r) => r.moderationStatus === "PUBLISHED");
+  if (published.length === 0) {
+    return { publishedReviewsCount: 0, averageRating: 0 };
+  }
+  const sum = published.reduce((acc, r) => acc + r.rating, 0);
+  return {
+    publishedReviewsCount: published.length,
+    averageRating: Math.round((sum / published.length) * 100) / 100,
+  };
+}
+
 
 

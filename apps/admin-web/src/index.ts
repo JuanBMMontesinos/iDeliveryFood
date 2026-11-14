@@ -22,10 +22,15 @@ import {
   type CommercialLeadContract,
   type CommercialProposalContract,
   type CommissionRuleVersionContract,
+  type MarketingBackofficeOverviewContract,
   type MerchantContractRecordContract,
+  type OrderReviewContract,
+  type PromotionCampaignContract,
+  type PromotionRedemptionContract,
 } from "@ideliveryfood/contracts";
 import {
   buildBalancedOrderCaptureJournal,
+  calculatePublishedStoreRatingSummary,
   evaluateAdminGovernanceDecision,
   evaluateFleetOperatorAccess,
   evaluatePspReconciliationRun,
@@ -156,7 +161,12 @@ export function buildAdminRoleNavigationModules(
   if (roles.has("commercial") || roles.has("operations") || roles.has("tech_admin")) {
     modules.push("COMMERCIAL_CONTRACTS");
   }
-  if (roles.has("growth_marketing") || roles.has("commercial") || roles.has("tech_admin")) {
+  if (
+    roles.has("marketing") ||
+    roles.has("growth_marketing") ||
+    roles.has("commercial") ||
+    roles.has("tech_admin")
+  ) {
     modules.push("GROWTH_PROMOTIONS");
   }
   if (roles.has("risk_compliance") || roles.has("tech_admin")) {
@@ -663,6 +673,77 @@ export function buildCommercialBackofficeConsoleModel(params: {
   };
 }
 
+// ============================================================================
+// M19: Marketing, Promotions, Atomic Budget & Verified Reviews Console Model
+// ============================================================================
+
+export interface MarketingBackofficeConsoleModel {
+  authorized: boolean;
+  budgetGuardNotice: string;
+  reviewModerationNotice: string;
+  promotions: readonly PromotionCampaignContract[];
+  redemptions: readonly PromotionRedemptionContract[];
+  reviews: readonly OrderReviewContract[];
+  publishedReviewsCount: number;
+  publishedAverageRating: number;
+}
+
+export function buildMarketingBackofficeConsoleModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  overview: MarketingBackofficeOverviewContract;
+  locale?: SupportedLocale;
+}): MarketingBackofficeConsoleModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const decision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: [
+      "marketing",
+      "growth_marketing",
+      "commercial",
+      "operations",
+      "tech_admin",
+    ],
+    requireMfaAal2: false,
+  });
+
+  const budgetGuardNotice = translateMessage(
+    "marketing.budget.atomic_guard_notice",
+    locale
+  );
+  const reviewModerationNotice = translateMessage(
+    "marketing.feature_flags.disabled_notice",
+    locale
+  );
+
+  if (!decision.allowed) {
+    return {
+      authorized: false,
+      budgetGuardNotice,
+      reviewModerationNotice,
+      promotions: [],
+      redemptions: [],
+      reviews: [],
+      publishedReviewsCount: 0,
+      publishedAverageRating: 0,
+    };
+  }
+
+  const ratingSummary = calculatePublishedStoreRatingSummary(
+    params.overview.reviews
+  );
+
+  return {
+    authorized: true,
+    budgetGuardNotice,
+    reviewModerationNotice,
+    promotions: params.overview.promotions,
+    redemptions: params.overview.redemptions,
+    reviews: params.overview.reviews,
+    publishedReviewsCount: ratingSummary.publishedReviewsCount,
+    publishedAverageRating: ratingSummary.averageRating,
+  };
+}
+
 export * from "./app/layout.js";
 export * from "./app/admin/page.js";
 export * from "./app/finance/page.js";
@@ -670,5 +751,6 @@ export * from "./app/logistics/page.js";
 export * from "./app/fleets/page.js";
 export * from "./app/support/page.js";
 export * from "./app/commercial/page.js";
+export * from "./app/marketing/page.js";
 export * from "./server.js";
 

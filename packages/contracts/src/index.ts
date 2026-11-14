@@ -722,7 +722,55 @@ export interface OrderReviewContract {
   partnerReply: string | null;
   partnerRepliedAtIso: string | null;
   moderationStatus: "PUBLISHED" | "HIDDEN_BY_MODERATION";
+  moderatedBy?: string | null;
+  moderatedAtIso?: string | null;
+  moderationReason?: string | null;
   createdAtIso: string;
+}
+
+export type PromotionFundedBy = "PLATFORM" | "STORE" | "MERCHANT" | "SHARED";
+export type PromotionDiscountType = "FIXED_CENTS" | "PERCENTAGE_BPS";
+
+export interface PromotionCampaignContract {
+  id: string;
+  code: string;
+  storeId: string | null;
+  fundedBy: PromotionFundedBy;
+  platformShareBps: number;
+  firstOrderOnly: boolean;
+  discountType: PromotionDiscountType;
+  discountValue: number;
+  maxDiscountCents: number;
+  minOrderCents: number;
+  budgetLimitCents: number;
+  budgetConsumedCents: number;
+  maxUsesPerUser: number;
+  startsAtIso: string;
+  endsAtIso: string;
+  isActive: boolean;
+  createdBy: string | null;
+  createdAtIso: string;
+}
+
+export interface PromotionRedemptionContract {
+  id: string;
+  promotionId: string;
+  orderId: string | null;
+  customerId: string;
+  discountAppliedCents: number;
+  platformSubsidyCents: number;
+  merchantSubsidyCents: number;
+  status: "RESERVED" | "REDEEMED" | "REVERSED";
+  idempotencyKey?: string | null;
+  createdAtIso: string;
+}
+
+export interface MarketingBackofficeOverviewContract {
+  featureSponsoredAdsEnabled: boolean;
+  featureSubscriptionsEnabled: boolean;
+  promotions: PromotionCampaignContract[];
+  redemptions: PromotionRedemptionContract[];
+  reviews: OrderReviewContract[];
 }
 
 export type SupportCaseStatus =
@@ -1171,7 +1219,10 @@ export const I18N_MESSAGES = {
     "support.action.escalated_finance_notice": "Refund of {amount} exceeds support threshold ({limit}); escalated to PENDING_FINANCE (requires finance MFA aal2).",
     "commercial.console.title": "Commercial & Partner Onboarding Console — Leads, Proposals & Versioned Contracts",
     "commercial.legal_template.pending_notice": "LEGAL NOTICE: Standard contract clauses in PENDING_LEGAL_REVIEW status require formal legal sign-off before production enforcement.",
-    "commercial.segregation.finance_blocked_notice": "Role Segregation: Commercial staff manage leads, proposals, and commission rules, and are strictly blocked from operational settlements and bank accounts."
+    "commercial.segregation.finance_blocked_notice": "Role Segregation: Commercial staff manage leads, proposals, and commission rules, and are strictly blocked from operational settlements and bank accounts.",
+    "marketing.console.title": "Growth, Promotions, Atomic Budget & Verified Reviews Moderation Console (M19)",
+    "marketing.feature_flags.disabled_notice": "Platform Policy Guard: Sponsored Ads (feature_sponsored_ads_enabled=false) and Subscriptions (feature_subscriptions_enabled=false) are disabled by default policy.",
+    "marketing.budget.atomic_guard_notice": "Atomic PostgreSQL Budget Guard: Concurrent coupon redemptions never exceed budget_limit_cents."
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1252,7 +1303,10 @@ export const I18N_MESSAGES = {
     "support.action.escalated_finance_notice": "Reembolso de {amount} excede a alçada de suporte ({limit}); escalonado para PENDING_FINANCE (exige finance com MFA aal2).",
     "commercial.console.title": "Console Comercial e Onboarding de Parceiros — Leads, Propostas e Contratos Versionados",
     "commercial.legal_template.pending_notice": "AVISO JURÍDICO: Cláusulas contratuais padrão em status PENDING_LEGAL_REVIEW dependem de validação jurídica formal antes de vigência produtiva.",
-    "commercial.segregation.finance_blocked_notice": "Segregação de Papéis: O papel comercial gerencia leads, propostas e regras de comissão, sendo estritamente bloqueado de repasses operacionais e contas bancárias."
+    "commercial.segregation.finance_blocked_notice": "Segregação de Papéis: O papel comercial gerencia leads, propostas e regras de comissão, sendo estritamente bloqueado de repasses operacionais e contas bancárias.",
+    "marketing.console.title": "Console de Marketing, Promoções, Orçamento Atômico e Moderação de Avaliações (M19)",
+    "marketing.feature_flags.disabled_notice": "Guarda de Política da Plataforma: Mídia Patrocinada (feature_sponsored_ads_enabled=false) e Clube de Assinatura (feature_subscriptions_enabled=false) estão desabilitados por padrão.",
+    "marketing.budget.atomic_guard_notice": "Guarda Atômica de Orçamento PostgreSQL: Resgates concorrentes de cupons nunca ultrapassam budget_limit_cents."
   }
 } as const;
 

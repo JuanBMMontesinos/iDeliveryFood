@@ -26,6 +26,7 @@ import {
   loadCommercialBackofficePageData,
   renderCommercialBackofficePageHtml,
 } from "./app/commercial/page.js";
+import { renderMarketingBackofficePage } from "./app/marketing/page.js";
 
 export interface AdminWebServerOptions {
   apiBaseUrl: string;
@@ -190,6 +191,23 @@ export function createAdminWebServer(
         });
         const html = renderCommercialBackofficePageHtml(data);
         res.statusCode = data.status;
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(html);
+        return;
+      }
+
+      if (
+        pathname === "/marketing" ||
+        pathname === "/marketing/promotions" ||
+        pathname === "/marketing/reviews"
+      ) {
+        const html = await renderMarketingBackofficePage({
+          apiBaseUrl: options.apiBaseUrl,
+          locale,
+          getAccessToken: () => accessToken,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        });
+        res.statusCode = html.includes('role="alert"') && html.includes("banner-err") ? 403 : 200;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.end(html);
         return;
