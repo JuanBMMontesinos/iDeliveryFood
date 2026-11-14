@@ -18,6 +18,11 @@ import {
   type SupportCaseContract,
   type SupportMessageContract,
   type SupportedLocale,
+  type CommercialBackofficeOverviewContract,
+  type CommercialLeadContract,
+  type CommercialProposalContract,
+  type CommissionRuleVersionContract,
+  type MerchantContractRecordContract,
 } from "@ideliveryfood/contracts";
 import {
   buildBalancedOrderCaptureJournal,
@@ -586,11 +591,84 @@ export function buildSupportBackofficeConsoleModel(params: {
   };
 }
 
+// ============================================================================
+// M18: Commercial Leads, Proposals, Contracts & Onboarding Console Model
+// ============================================================================
+
+export interface CommercialBackofficeConsoleModel {
+  authorized: boolean;
+  canMutateFinanceOrBankAccounts: boolean;
+  legalTemplateNotice: string;
+  segregationNotice: string;
+  leads: readonly CommercialLeadContract[];
+  proposals: readonly CommercialProposalContract[];
+  contracts: readonly MerchantContractRecordContract[];
+  commissionRuleVersions: readonly CommissionRuleVersionContract[];
+  activeCommissionRulesCount: number;
+}
+
+export function buildCommercialBackofficeConsoleModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  overview: CommercialBackofficeOverviewContract;
+  locale?: SupportedLocale;
+}): CommercialBackofficeConsoleModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const decision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["commercial", "operations", "tech_admin"],
+    requireMfaAal2: false,
+  });
+
+  const financeDecision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["finance", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  const legalTemplateNotice = translateMessage(
+    "commercial.legal_template.pending_notice",
+    locale
+  );
+  const segregationNotice = translateMessage(
+    "commercial.segregation.finance_blocked_notice",
+    locale
+  );
+
+  if (!decision.allowed) {
+    return {
+      authorized: false,
+      canMutateFinanceOrBankAccounts: false,
+      legalTemplateNotice,
+      segregationNotice,
+      leads: [],
+      proposals: [],
+      contracts: [],
+      commissionRuleVersions: [],
+      activeCommissionRulesCount: 0,
+    };
+  }
+
+  return {
+    authorized: true,
+    canMutateFinanceOrBankAccounts: financeDecision.allowed,
+    legalTemplateNotice,
+    segregationNotice,
+    leads: params.overview.leads,
+    proposals: params.overview.proposals,
+    contracts: params.overview.contracts,
+    commissionRuleVersions: params.overview.commissionRuleVersions,
+    activeCommissionRulesCount: params.overview.commissionRuleVersions.filter(
+      (r) => r.effectiveUntilIso === null
+    ).length,
+  };
+}
+
 export * from "./app/layout.js";
 export * from "./app/admin/page.js";
 export * from "./app/finance/page.js";
 export * from "./app/logistics/page.js";
 export * from "./app/fleets/page.js";
 export * from "./app/support/page.js";
+export * from "./app/commercial/page.js";
 export * from "./server.js";
 

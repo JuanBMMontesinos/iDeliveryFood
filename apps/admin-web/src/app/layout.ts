@@ -57,9 +57,9 @@ const MODULE_LINKS: Record<
     labelPtBr: "Financeiro e Razão (M13)",
   },
   COMMERCIAL_CONTRACTS: {
-    href: "/admin",
-    labelEn: "Commercial & Tenants",
-    labelPtBr: "Comercial e Tenants",
+    href: "/commercial",
+    labelEn: "Commercial & Contracts (M18)",
+    labelPtBr: "Comercial e Contratos (M18)",
   },
   GROWTH_PROMOTIONS: {
     href: "/admin",

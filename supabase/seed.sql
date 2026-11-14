@@ -1267,4 +1267,54 @@ ON CONFLICT (id) DO UPDATE SET
   is_internal_only = EXCLUDED.is_internal_only,
   is_test_data = true;
 
+-- Fase O (M18): Commercial Proposals & Versioned Commission Rules
+INSERT INTO public.commercial_proposals (
+  id, lead_id, organization_id, proposal_version,
+  platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+  service_fee_bps, payout_cycle_days, legal_template_status, status,
+  proposed_by_staff_id, valid_until, notes, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001729',
+  '00000000-0000-4000-8000-000000001720',
+  NULL,
+  1,
+  2100,
+  1100,
+  900,
+  500,
+  7,
+  'PENDING_LEGAL_REVIEW',
+  'SENT',
+  '00000000-0000-4000-8000-000000000090',
+  '2027-03-31T23:59:59Z',
+  'Introductory commercial proposal for Napoli Bela Vista (21% platform delivery, 11% merchant delivery, 9% pickup).',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  platform_delivery_commission_bps = EXCLUDED.platform_delivery_commission_bps,
+  is_test_data = true;
+
+INSERT INTO public.commission_rule_versions (
+  id, organization_id, contract_id, version_number,
+  platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+  service_fee_bps, effective_from, effective_until, created_by_staff_id, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001730',
+  '00000000-0000-4000-8000-000000000101',
+  '00000000-0000-4000-8000-000000001401',
+  1,
+  2300,
+  1200,
+  1000,
+  500,
+  '2026-11-01T00:00:00Z',
+  NULL,
+  '00000000-0000-4000-8000-000000000090',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  platform_delivery_commission_bps = EXCLUDED.platform_delivery_commission_bps,
+  is_test_data = true;
+
 COMMIT;

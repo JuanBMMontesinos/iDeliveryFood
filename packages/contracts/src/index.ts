@@ -819,12 +819,92 @@ export interface MerchantContractRecordContract {
   platformDeliveryCommissionBps: number;
   merchantDeliveryCommissionBps: number;
   pickupCommissionBps: number;
+  serviceFeeBps?: number;
   payoutCycleDays: number;
   legalTemplateStatus: "PENDING_LEGAL_REVIEW" | "APPROVED_TEMPLATE";
   effectiveFromIso: string;
   effectiveUntilIso: string | null;
   approvedBy: string | null;
+  acceptedByPartnerOwnerId?: string | null;
+  acceptedAtIso?: string | null;
   createdAtIso: string;
+}
+
+export type CommercialLeadStatus =
+  | "NEW"
+  | "QUALIFYING"
+  | "PROPOSAL_SENT"
+  | "NEGOTIATION"
+  | "CONVERTED"
+  | "LOST"
+  | "ARCHIVED";
+
+export interface CommercialLeadContract {
+  id: string;
+  legalName: string;
+  tradeName: string;
+  taxId: string;
+  contactEmail: string;
+  contactPhone: string;
+  city: string;
+  stateCode: string;
+  cuisineCategory: string;
+  legalBasis: string;
+  status: CommercialLeadStatus;
+  ownerStaffId: string | null;
+  convertedOrganizationId: string | null;
+  notes: string | null;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export type CommercialProposalStatus =
+  | "DRAFT"
+  | "SENT"
+  | "NEGOTIATION"
+  | "ACCEPTED"
+  | "REJECTED"
+  | "EXPIRED";
+
+export interface CommercialProposalContract {
+  id: string;
+  leadId: string;
+  organizationId: string | null;
+  proposalVersion: number;
+  platformDeliveryCommissionBps: number;
+  merchantDeliveryCommissionBps: number;
+  pickupCommissionBps: number;
+  serviceFeeBps: number;
+  payoutCycleDays: 1 | 7 | 14 | 30;
+  legalTemplateStatus: "PENDING_LEGAL_REVIEW" | "APPROVED_TEMPLATE";
+  status: CommercialProposalStatus;
+  proposedByStaffId: string;
+  validUntilIso: string;
+  notes: string | null;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface CommissionRuleVersionContract {
+  id: string;
+  organizationId: string;
+  contractId: string;
+  versionNumber: number;
+  platformDeliveryCommissionBps: number;
+  merchantDeliveryCommissionBps: number;
+  pickupCommissionBps: number;
+  serviceFeeBps: number;
+  effectiveFromIso: string;
+  effectiveUntilIso: string | null;
+  createdByStaffId: string | null;
+  createdAtIso: string;
+}
+
+export interface CommercialBackofficeOverviewContract {
+  leads: CommercialLeadContract[];
+  proposals: CommercialProposalContract[];
+  contracts: MerchantContractRecordContract[];
+  commissionRuleVersions: CommissionRuleVersionContract[];
 }
 
 export interface PartnerFinanceSummaryContract {
@@ -1088,7 +1168,10 @@ export const I18N_MESSAGES = {
     "support.console.title": "Support & Customer Service Console — SLA Queue & Refund Thresholds",
     "support.case.internal_note_badge": "INTERNAL STAFF NOTE — Never visible to external actors",
     "support.action.auto_approved_notice": "Refund of {amount} auto-approved within support threshold ({limit}).",
-    "support.action.escalated_finance_notice": "Refund of {amount} exceeds support threshold ({limit}); escalated to PENDING_FINANCE (requires finance MFA aal2)."
+    "support.action.escalated_finance_notice": "Refund of {amount} exceeds support threshold ({limit}); escalated to PENDING_FINANCE (requires finance MFA aal2).",
+    "commercial.console.title": "Commercial & Partner Onboarding Console — Leads, Proposals & Versioned Contracts",
+    "commercial.legal_template.pending_notice": "LEGAL NOTICE: Standard contract clauses in PENDING_LEGAL_REVIEW status require formal legal sign-off before production enforcement.",
+    "commercial.segregation.finance_blocked_notice": "Role Segregation: Commercial staff manage leads, proposals, and commission rules, and are strictly blocked from operational settlements and bank accounts."
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1166,7 +1249,10 @@ export const I18N_MESSAGES = {
     "support.console.title": "Console de Atendimento e Suporte — Fila SLA e Alçadas de Reembolso",
     "support.case.internal_note_badge": "NOTA INTERNA DA EQUIPE — Invisível para atores externos",
     "support.action.auto_approved_notice": "Reembolso de {amount} aprovado automaticamente dentro da alçada de suporte ({limit}).",
-    "support.action.escalated_finance_notice": "Reembolso de {amount} excede a alçada de suporte ({limit}); escalonado para PENDING_FINANCE (exige finance com MFA aal2)."
+    "support.action.escalated_finance_notice": "Reembolso de {amount} excede a alçada de suporte ({limit}); escalonado para PENDING_FINANCE (exige finance com MFA aal2).",
+    "commercial.console.title": "Console Comercial e Onboarding de Parceiros — Leads, Propostas e Contratos Versionados",
+    "commercial.legal_template.pending_notice": "AVISO JURÍDICO: Cláusulas contratuais padrão em status PENDING_LEGAL_REVIEW dependem de validação jurídica formal antes de vigência produtiva.",
+    "commercial.segregation.finance_blocked_notice": "Segregação de Papéis: O papel comercial gerencia leads, propostas e regras de comissão, sendo estritamente bloqueado de repasses operacionais e contas bancárias."
   }
 } as const;
 

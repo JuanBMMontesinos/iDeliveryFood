@@ -31,6 +31,12 @@ import {
   type StoreOrdersQueueResponseContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type CommercialLeadContract,
+  type CommercialLeadStatus,
+  type CommercialProposalContract,
+  type CommercialProposalStatus,
+  type CommissionRuleVersionContract,
+  type MerchantContractRecordContract,
 } from "@ideliveryfood/contracts";
 
 export type OrderStatus =
@@ -2445,4 +2451,259 @@ export function decideEscalatedSupportActionRequest(params: {
     decisionNotes: params.decisionNotes.trim(),
   };
 }
+
+// ============================================================================
+// M18: Comercial, Leads, Propostas, Contratos Versionados e Onboarding (Fase O)
+// ============================================================================
+
+const COMMERCIAL_LEAD_TRANSITIONS: Record<
+  CommercialLeadStatus,
+  readonly CommercialLeadStatus[]
+> = {
+  NEW: ["QUALIFYING", "PROPOSAL_SENT", "LOST", "ARCHIVED"],
+  QUALIFYING: ["PROPOSAL_SENT", "NEGOTIATION", "LOST", "ARCHIVED"],
+  PROPOSAL_SENT: ["NEGOTIATION", "CONVERTED", "LOST", "ARCHIVED"],
+  NEGOTIATION: ["PROPOSAL_SENT", "CONVERTED", "LOST", "ARCHIVED"],
+  CONVERTED: ["ARCHIVED"],
+  LOST: ["QUALIFYING", "ARCHIVED"],
+  ARCHIVED: ["QUALIFYING"],
+};
+
+/**
+ * Transitions a commercial lead (`commercial_leads`) through its pipeline state machine (M18).
+ */
+export function transitionCommercialLeadStatus(params: {
+  lead: CommercialLeadContract;
+  targetStatus: CommercialLeadStatus;
+  convertedOrganizationId?: string | null;
+  notes?: string | null;
+  now?: Date;
+}): CommercialLeadContract {
+  const allowed = COMMERCIAL_LEAD_TRANSITIONS[params.lead.status] ?? [];
+  if (!allowed.includes(params.targetStatus)) {
+    throw new Error(
+      `COMMERCIAL_LEAD_INVALID_TRANSITION: Cannot transition lead ${params.lead.id} from ${params.lead.status} to ${params.targetStatus}.`
+    );
+  }
+  if (
+    params.targetStatus === "CONVERTED" &&
+    !params.convertedOrganizationId &&
+    !params.lead.convertedOrganizationId
+  ) {
+    throw new Error(
+      "COMMERCIAL_LEAD_ORGANIZATION_REQUIRED: convertedOrganizationId is required when transitioning lead to CONVERTED."
+    );
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.lead,
+    status: params.targetStatus,
+    convertedOrganizationId:
+      params.convertedOrganizationId !== undefined
+        ? params.convertedOrganizationId
+        : params.lead.convertedOrganizationId,
+    notes: params.notes !== undefined ? params.notes : params.lead.notes,
+    updatedAtIso: nowIso,
+  };
+}
+
+/**
+ * Validates basis-point boundaries and payout cycles and constructs a versioned
+ * commercial proposal (`commercial_proposals`) (M18).
+ */
+export function validateAndBuildCommercialProposal(params: {
+  id: string;
+  leadId: string;
+  organizationId?: string | null;
+  proposalVersion: number;
+  platformDeliveryCommissionBps: number;
+  merchantDeliveryCommissionBps: number;
+  pickupCommissionBps: number;
+  serviceFeeBps: number;
+  payoutCycleDays: 1 | 7 | 14 | 30;
+  legalTemplateStatus?: "PENDING_LEGAL_REVIEW" | "APPROVED_TEMPLATE";
+  notes?: string | null;
+  status?: CommercialProposalStatus;
+  validUntilIso: string;
+  proposedByStaffId: string;
+  now?: Date;
+}): CommercialProposalContract {
+  if (!Number.isInteger(params.proposalVersion) || params.proposalVersion < 1) {
+    throw new Error("COMMERCIAL_PROPOSAL_INVALID_NUMBER: proposalVersion must be an integer >= 1.");
+  }
+
+  const bpsFields: Array<[string, number, number]> = [
+    ["platformDeliveryCommissionBps", params.platformDeliveryCommissionBps, 5000],
+    ["merchantDeliveryCommissionBps", params.merchantDeliveryCommissionBps, 5000],
+    ["pickupCommissionBps", params.pickupCommissionBps, 5000],
+    ["serviceFeeBps", params.serviceFeeBps, 2000],
+  ];
+  for (const [name, value, max] of bpsFields) {
+    if (!Number.isInteger(value) || value < 0 || value > max) {
+      throw new Error(
+        `COMMERCIAL_PROPOSAL_INVALID_BPS: ${name} must be an integer between 0 and ${max} bps.`
+      );
+    }
+  }
+
+  if (![1, 7, 14, 30].includes(params.payoutCycleDays)) {
+    throw new Error(
+      "COMMERCIAL_PROPOSAL_INVALID_PAYOUT_CYCLE: payoutCycleDays must be one of 1, 7, 14, or 30."
+    );
+  }
+  if (!params.validUntilIso) {
+    throw new Error("COMMERCIAL_PROPOSAL_VALID_UNTIL_REQUIRED: validUntilIso is required.");
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    id: params.id,
+    leadId: params.leadId,
+    organizationId: params.organizationId ?? null,
+    proposalVersion: params.proposalVersion,
+    platformDeliveryCommissionBps: params.platformDeliveryCommissionBps,
+    merchantDeliveryCommissionBps: params.merchantDeliveryCommissionBps,
+    pickupCommissionBps: params.pickupCommissionBps,
+    serviceFeeBps: params.serviceFeeBps,
+    payoutCycleDays: params.payoutCycleDays,
+    legalTemplateStatus: params.legalTemplateStatus ?? "PENDING_LEGAL_REVIEW",
+    status: params.status ?? "SENT",
+    proposedByStaffId: params.proposedByStaffId,
+    validUntilIso: params.validUntilIso,
+    notes: params.notes !== undefined ? params.notes : null,
+    createdAtIso: nowIso,
+    updatedAtIso: nowIso,
+  };
+}
+
+/**
+ * Builds a versioned `MerchantContractRecordContract` and `CommissionRuleVersionContract`
+ * from an accepted/converted commercial proposal (M18).
+ */
+export function buildVersionedContractAndCommissionRule(params: {
+  proposal: CommercialProposalContract;
+  organizationId: string;
+  contractId: string;
+  commissionRuleId: string;
+  previousContractVersion?: number;
+  createdByStaffId: string;
+  effectiveFromIso?: string;
+  now?: Date;
+}): {
+  updatedProposal: CommercialProposalContract;
+  contract: MerchantContractRecordContract;
+  commissionRule: CommissionRuleVersionContract;
+} {
+  if (params.proposal.status === "REJECTED" || params.proposal.status === "EXPIRED") {
+    throw new Error(
+      `COMMERCIAL_PROPOSAL_CANNOT_CONVERT: Proposal ${params.proposal.id} has status ${params.proposal.status}.`
+    );
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  const effectiveFromIso = params.effectiveFromIso ?? nowIso;
+  const nextVersion = (params.previousContractVersion ?? 0) + 1;
+
+  const contract: MerchantContractRecordContract = {
+    id: params.contractId,
+    organizationId: params.organizationId,
+    versionNumber: nextVersion,
+    platformDeliveryCommissionBps: params.proposal.platformDeliveryCommissionBps,
+    merchantDeliveryCommissionBps: params.proposal.merchantDeliveryCommissionBps,
+    pickupCommissionBps: params.proposal.pickupCommissionBps,
+    serviceFeeBps: params.proposal.serviceFeeBps,
+    payoutCycleDays: params.proposal.payoutCycleDays,
+    legalTemplateStatus: params.proposal.legalTemplateStatus,
+    effectiveFromIso,
+    effectiveUntilIso: null,
+    approvedBy: params.createdByStaffId,
+    acceptedByPartnerOwnerId: null,
+    acceptedAtIso: null,
+    createdAtIso: nowIso,
+  };
+
+  const commissionRule: CommissionRuleVersionContract = {
+    id: params.commissionRuleId,
+    organizationId: params.organizationId,
+    contractId: params.contractId,
+    versionNumber: nextVersion,
+    platformDeliveryCommissionBps: params.proposal.platformDeliveryCommissionBps,
+    merchantDeliveryCommissionBps: params.proposal.merchantDeliveryCommissionBps,
+    pickupCommissionBps: params.proposal.pickupCommissionBps,
+    serviceFeeBps: params.proposal.serviceFeeBps,
+    effectiveFromIso,
+    effectiveUntilIso: null,
+    createdByStaffId: params.createdByStaffId,
+    createdAtIso: nowIso,
+  };
+
+  const updatedProposal: CommercialProposalContract = {
+    ...params.proposal,
+    organizationId: params.organizationId,
+    status: "ACCEPTED",
+    updatedAtIso: nowIso,
+  };
+
+  return {
+    updatedProposal,
+    contract,
+    commissionRule,
+  };
+}
+
+/**
+ * Verifies that only a `partner_owner` of the contract's organization can formally accept
+ * the versioned merchant contract (`merchant_contracts`) (M18).
+ */
+export function evaluatePartnerContractAcceptance(params: {
+  contract: MerchantContractRecordContract;
+  actorId: string;
+  actorOrganizationMemberships: ReadonlyArray<{
+    organizationId: string;
+    role: string;
+  }>;
+  now?: Date;
+}): MerchantContractRecordContract {
+  const isOwner = params.actorOrganizationMemberships.some(
+    (m) => m.organizationId === params.contract.organizationId && m.role === "partner_owner"
+  );
+  if (!isOwner) {
+    throw new Error(
+      `PARTNER_OWNER_REQUIRED_FOR_CONTRACT_ACCEPTANCE: Actor ${params.actorId} is not a partner_owner of organization ${params.contract.organizationId}.`
+    );
+  }
+  if (params.contract.effectiveUntilIso !== null) {
+    throw new Error(
+      `CONTRACT_NOT_ACCEPTABLE: Contract ${params.contract.id} is already superseded.`
+    );
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.contract,
+    acceptedByPartnerOwnerId: params.actorId,
+    acceptedAtIso: nowIso,
+  };
+}
+
+/**
+ * Enforces strict RBAC segregation between `commercial` staff and financial operations (M18/M13).
+ * A staff actor with `commercial` role (and without `finance` or `tech_admin`) is forbidden from
+ * executing settlements, approving bank account changes, or deciding financial refunds.
+ */
+export function assertCommercialSegregationFromFinance(params: {
+  actorStaffRoles: readonly string[];
+  operation: "SETTLEMENT_EXECUTION" | "BANK_ACCOUNT_GOVERNANCE" | "FINANCE_REFUND_APPROVAL";
+}): void {
+  const hasFinanceOrTechAdmin = params.actorStaffRoles.some(
+    (r) => r === "finance" || r === "tech_admin"
+  );
+  if (!hasFinanceOrTechAdmin) {
+    throw new Error(
+      `COMMERCIAL_FINANCE_SEGREGATION_VIOLATION: Staff with roles [${params.actorStaffRoles.join(", ")}] cannot perform ${params.operation}.`
+    );
+  }
+}
+
 

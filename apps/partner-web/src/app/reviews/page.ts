@@ -79,12 +79,21 @@ export function renderPartnerEngagementHtml(
   const contractHtml = contract
     ? `
     <div class="card" data-testid="partner-contract-section">
-      <h2 style="margin-top:0;">${isPt ? "Contrato Comercial Vigente (M13)" : "Active Commercial Contract (M13)"}</h2>
-      <p><strong>${isPt ? "Versão do Plano:" : "Contract Version:"}</strong> <code>v${contract.versionNumber}</code> (${escapeHtml(contract.legalTemplateStatus)})</p>
+      <h2 style="margin-top:0;">${isPt ? "Contrato Comercial Vigente (M13 / M18)" : "Active Commercial Contract (M13 / M18)"}</h2>
+      <p><strong>${isPt ? "Versão do Plano:" : "Contract Version:"}</strong> <code>v${contract.versionNumber}</code> (<span class="badge">${escapeHtml(contract.legalTemplateStatus)}</span>)</p>
       <p><strong>${isPt ? "Comissão Entrega Plataforma (bps):" : "Platform Delivery Commission (bps):"}</strong> ${contract.platformDeliveryCommissionBps} bps (${(contract.platformDeliveryCommissionBps / 100).toFixed(2)}%)</p>
       <p><strong>${isPt ? "Comissão Entrega Própria (bps):" : "Merchant Delivery Commission (bps):"}</strong> ${contract.merchantDeliveryCommissionBps} bps (${(contract.merchantDeliveryCommissionBps / 100).toFixed(2)}%)</p>
       <p><strong>${isPt ? "Comissão Retirada (bps):" : "Pickup Commission (bps):"}</strong> ${contract.pickupCommissionBps} bps (${(contract.pickupCommissionBps / 100).toFixed(2)}%)</p>
+      <p><strong>${isPt ? "Taxa de Serviço (bps):" : "Service Fee (bps):"}</strong> ${contract.serviceFeeBps ?? 500} bps (${((contract.serviceFeeBps ?? 500) / 100).toFixed(2)}%)</p>
       <p><strong>${isPt ? "Ciclo de Liquidação:" : "Payout Cycle:"}</strong> D+${contract.payoutCycleDays}</p>
+      <p data-testid="partner-contract-acceptance-status">
+        <strong>${isPt ? "Status de Aceite (partner_owner):" : "Partner Owner Acceptance Status:"}</strong>
+        ${
+          contract.acceptedByPartnerOwnerId
+            ? `<span class="badge">${isPt ? "Aceito formalmente por" : "Formally accepted by"} <code>${escapeHtml(contract.acceptedByPartnerOwnerId)}</code> (${escapeHtml(contract.acceptedAtIso ?? "")})</span>`
+            : `<span class="badge">${isPt ? "Aguardando aceite formal do partner_owner" : "Pending formal acceptance by partner_owner"}</span>`
+        }
+      </p>
     </div>
   `
     : "";

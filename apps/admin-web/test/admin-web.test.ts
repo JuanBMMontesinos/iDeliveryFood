@@ -505,5 +505,31 @@ describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16,
     assert.match(html, /INTERNAL_STAFF_NOTE/);
     assert.match(html, /INTERNAL_ONLY/);
   });
+
+  it("renders M18 Commercial, Leads, Proposals & Versioned Contracts Console (/commercial) with live Supabase data and finance segregation", async () => {
+    const res = await fetch(`${adminBaseUrl}/commercial?locale=en`, {
+      headers: { Authorization: `Bearer ${opsStaffTokenAal2}` },
+    });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(
+      html,
+      /Commercial &amp; Partner Onboarding Console — Leads, Proposals &amp; Versioned Contracts/
+    );
+    assert.match(html, /Napoli Bela Vista/);
+    assert.match(html, /PENDING_LEGAL_REVIEW/);
+    assert.match(html, /21\.00% \(2100 bps\)/);
+    assert.match(html, /23\.00% \(2300 bps\)/);
+    assert.match(
+      html,
+      /Role Segregation: Commercial staff manage leads, proposals, and commission rules/
+    );
+
+    // Finance-only staff Roberto is blocked from /commercial (HTTP 403)
+    const deniedFinance = await fetch(`${adminBaseUrl}/commercial?locale=en`, {
+      headers: { Authorization: `Bearer ${financeStaffTokenAal2}` },
+    });
+    assert.equal(deniedFinance.status, 403);
+  });
 });
 

@@ -59,6 +59,10 @@ import {
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
+  type CommercialBackofficeOverviewContract,
+  type CommercialLeadContract,
+  type CommercialProposalContract,
+  type CommissionRuleVersionContract,
 } from "@ideliveryfood/contracts";
 import type { ApiDataRepository, AuditLogWriteRecord } from "./index.js";
 
@@ -2869,8 +2873,9 @@ export function createSupabasePostgresRepository(params: {
       const orgUuid = toDeterministicUuid(organizationId);
       const res = await pool.query(
         `SELECT id, organization_id, version_number, platform_delivery_commission_bps,
-                merchant_delivery_commission_bps, pickup_commission_bps, payout_cycle_days,
-                legal_template_status, effective_from, effective_until, approved_by, created_at
+                merchant_delivery_commission_bps, pickup_commission_bps, service_fee_bps,
+                payout_cycle_days, legal_template_status, effective_from, effective_until,
+                approved_by, accepted_by_partner_owner_id, accepted_at, created_at
          FROM public.merchant_contracts
          WHERE organization_id = $1
          ORDER BY version_number DESC
@@ -2886,6 +2891,7 @@ export function createSupabasePostgresRepository(params: {
         platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
         merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
         pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps ?? 500),
         payoutCycleDays: Number(r.payout_cycle_days),
         legalTemplateStatus: String(
           r.legal_template_status
@@ -2895,6 +2901,10 @@ export function createSupabasePostgresRepository(params: {
           ? new Date(String(r.effective_until)).toISOString()
           : null,
         approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+        acceptedByPartnerOwnerId: r.accepted_by_partner_owner_id
+          ? restoreLogicalId(String(r.accepted_by_partner_owner_id))
+          : null,
+        acceptedAtIso: r.accepted_at ? new Date(String(r.accepted_at)).toISOString() : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
       };
     },
@@ -3916,6 +3926,693 @@ export function createSupabasePostgresRepository(params: {
           decidedAtIso: ar.decided_at ? new Date(String(ar.decided_at)).toISOString() : null,
           decisionNotes: ar.decision_notes ? String(ar.decision_notes) : null,
           createdAtIso: new Date(String(ar.created_at)).toISOString(),
+        })),
+      };
+    },
+
+    // =========================================================================
+    // Fase O (M18): Commercial Leads, Proposals, Contracts & Commission Rules
+    // =========================================================================
+
+    async listCommercialLeads(statusFilter?: string): Promise<CommercialLeadContract[]> {
+      const values: unknown[] = [];
+      let whereSql = "";
+      if (statusFilter && statusFilter.trim().length > 0) {
+        values.push(statusFilter.trim().toUpperCase());
+        whereSql = "WHERE status = $1";
+      }
+      const res = await pool.query(
+        `SELECT id, legal_name, trade_name, tax_id, contact_email, contact_phone,
+                city, state_code, cuisine_category, legal_basis, status,
+                owner_staff_id, converted_organization_id, notes, created_at, updated_at
+         FROM public.commercial_leads
+         ${whereSql}
+         ORDER BY updated_at DESC, created_at DESC`,
+        values
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        legalName: String(r.legal_name),
+        tradeName: String(r.trade_name),
+        taxId: String(r.tax_id),
+        contactEmail: String(r.contact_email),
+        contactPhone: String(r.contact_phone),
+        city: String(r.city ?? "São Paulo"),
+        stateCode: String(r.state_code ?? "SP"),
+        cuisineCategory: String(r.cuisine_category ?? "RESTAURANT"),
+        legalBasis: String(r.legal_basis),
+        status: String(r.status) as CommercialLeadContract["status"],
+        ownerStaffId: r.owner_staff_id ? restoreLogicalId(String(r.owner_staff_id)) : null,
+        convertedOrganizationId: r.converted_organization_id
+          ? restoreLogicalId(String(r.converted_organization_id))
+          : null,
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at ?? r.created_at)).toISOString(),
+      }));
+    },
+
+    async getCommercialLeadById(leadId: string): Promise<CommercialLeadContract | null> {
+      const leadUuid = toDeterministicUuid(leadId);
+      const res = await pool.query(
+        `SELECT id, legal_name, trade_name, tax_id, contact_email, contact_phone,
+                city, state_code, cuisine_category, legal_basis, status,
+                owner_staff_id, converted_organization_id, notes, created_at, updated_at
+         FROM public.commercial_leads
+         WHERE id = $1
+         LIMIT 1`,
+        [leadUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        legalName: String(r.legal_name),
+        tradeName: String(r.trade_name),
+        taxId: String(r.tax_id),
+        contactEmail: String(r.contact_email),
+        contactPhone: String(r.contact_phone),
+        city: String(r.city ?? "São Paulo"),
+        stateCode: String(r.state_code ?? "SP"),
+        cuisineCategory: String(r.cuisine_category ?? "RESTAURANT"),
+        legalBasis: String(r.legal_basis),
+        status: String(r.status) as CommercialLeadContract["status"],
+        ownerStaffId: r.owner_staff_id ? restoreLogicalId(String(r.owner_staff_id)) : null,
+        convertedOrganizationId: r.converted_organization_id
+          ? restoreLogicalId(String(r.converted_organization_id))
+          : null,
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at ?? r.created_at)).toISOString(),
+      };
+    },
+
+    async createCommercialLead(lead: CommercialLeadContract): Promise<CommercialLeadContract> {
+      const leadUuid = rememberLogicalId(lead.id);
+      const ownerUuid = lead.ownerStaffId ? toDeterministicUuid(lead.ownerStaffId) : null;
+      if (ownerUuid) {
+        await ensureProfileExists(ownerUuid);
+      }
+
+      const res = await pool.query(
+        `INSERT INTO public.commercial_leads (
+           id, legal_name, trade_name, tax_id, contact_email, contact_phone,
+           city, state_code, cuisine_category, legal_basis, status,
+           owner_staff_id, converted_organization_id, notes, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id, legal_name, trade_name, tax_id, contact_email, contact_phone,
+                   city, state_code, cuisine_category, legal_basis, status,
+                   owner_staff_id, converted_organization_id, notes, created_at, updated_at`,
+        [
+          leadUuid,
+          lead.legalName,
+          lead.tradeName,
+          lead.taxId,
+          lead.contactEmail,
+          lead.contactPhone,
+          lead.city,
+          lead.stateCode,
+          lead.cuisineCategory,
+          lead.legalBasis,
+          lead.status,
+          ownerUuid,
+          lead.convertedOrganizationId ? toDeterministicUuid(lead.convertedOrganizationId) : null,
+          lead.notes,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        legalName: String(r.legal_name),
+        tradeName: String(r.trade_name),
+        taxId: String(r.tax_id),
+        contactEmail: String(r.contact_email),
+        contactPhone: String(r.contact_phone),
+        city: String(r.city ?? "São Paulo"),
+        stateCode: String(r.state_code ?? "SP"),
+        cuisineCategory: String(r.cuisine_category ?? "RESTAURANT"),
+        legalBasis: String(r.legal_basis),
+        status: String(r.status) as CommercialLeadContract["status"],
+        ownerStaffId: r.owner_staff_id ? restoreLogicalId(String(r.owner_staff_id)) : null,
+        convertedOrganizationId: r.converted_organization_id
+          ? restoreLogicalId(String(r.converted_organization_id))
+          : null,
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at ?? r.created_at)).toISOString(),
+      };
+    },
+
+    async updateCommercialLeadStatus(lead: CommercialLeadContract): Promise<CommercialLeadContract> {
+      const leadUuid = toDeterministicUuid(lead.id);
+      const convOrgUuid = lead.convertedOrganizationId
+        ? toDeterministicUuid(lead.convertedOrganizationId)
+        : null;
+      const res = await pool.query(
+        `UPDATE public.commercial_leads
+         SET status = $2,
+             converted_organization_id = COALESCE($3, converted_organization_id),
+             notes = $4,
+             updated_at = $5
+         WHERE id = $1
+         RETURNING id, legal_name, trade_name, tax_id, contact_email, contact_phone,
+                   city, state_code, cuisine_category, legal_basis, status,
+                   owner_staff_id, converted_organization_id, notes, created_at, updated_at`,
+        [leadUuid, lead.status, convOrgUuid, lead.notes, lead.updatedAtIso]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        legalName: String(r.legal_name),
+        tradeName: String(r.trade_name),
+        taxId: String(r.tax_id),
+        contactEmail: String(r.contact_email),
+        contactPhone: String(r.contact_phone),
+        city: String(r.city ?? "São Paulo"),
+        stateCode: String(r.state_code ?? "SP"),
+        cuisineCategory: String(r.cuisine_category ?? "RESTAURANT"),
+        legalBasis: String(r.legal_basis),
+        status: String(r.status) as CommercialLeadContract["status"],
+        ownerStaffId: r.owner_staff_id ? restoreLogicalId(String(r.owner_staff_id)) : null,
+        convertedOrganizationId: r.converted_organization_id
+          ? restoreLogicalId(String(r.converted_organization_id))
+          : null,
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at ?? r.created_at)).toISOString(),
+      };
+    },
+
+    async createCommercialProposal(
+      proposal: CommercialProposalContract
+    ): Promise<CommercialProposalContract> {
+      const propUuid = rememberLogicalId(proposal.id);
+      const leadUuid = toDeterministicUuid(proposal.leadId);
+      const orgUuid = proposal.organizationId ? toDeterministicUuid(proposal.organizationId) : null;
+      const staffUuid = toDeterministicUuid(proposal.proposedByStaffId);
+      await ensureProfileExists(staffUuid);
+
+      const res = await pool.query(
+        `INSERT INTO public.commercial_proposals (
+           id, lead_id, organization_id, proposal_version,
+           platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+           service_fee_bps, payout_cycle_days, legal_template_status, status,
+           proposed_by_staff_id, valid_until, notes, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id, lead_id, organization_id, proposal_version,
+                   platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+                   service_fee_bps, payout_cycle_days, legal_template_status, status,
+                   proposed_by_staff_id, valid_until, notes, created_at, updated_at`,
+        [
+          propUuid,
+          leadUuid,
+          orgUuid,
+          proposal.proposalVersion,
+          proposal.platformDeliveryCommissionBps,
+          proposal.merchantDeliveryCommissionBps,
+          proposal.pickupCommissionBps,
+          proposal.serviceFeeBps,
+          proposal.payoutCycleDays,
+          proposal.legalTemplateStatus,
+          proposal.status,
+          staffUuid,
+          proposal.validUntilIso,
+          proposal.notes,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        leadId: restoreLogicalId(String(r.lead_id)),
+        organizationId: r.organization_id ? restoreLogicalId(String(r.organization_id)) : null,
+        proposalVersion: Number(r.proposal_version),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps),
+        payoutCycleDays: Number(r.payout_cycle_days) as CommercialProposalContract["payoutCycleDays"],
+        legalTemplateStatus: String(
+          r.legal_template_status
+        ) as CommercialProposalContract["legalTemplateStatus"],
+        status: String(r.status) as CommercialProposalContract["status"],
+        proposedByStaffId: restoreLogicalId(String(r.proposed_by_staff_id)),
+        validUntilIso: new Date(String(r.valid_until)).toISOString(),
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+      };
+    },
+
+    async getCommercialProposalById(
+      proposalId: string
+    ): Promise<CommercialProposalContract | null> {
+      const propUuid = toDeterministicUuid(proposalId);
+      const res = await pool.query(
+        `SELECT id, lead_id, organization_id, proposal_version,
+                platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+                service_fee_bps, payout_cycle_days, legal_template_status, status,
+                proposed_by_staff_id, valid_until, notes, created_at, updated_at
+         FROM public.commercial_proposals
+         WHERE id = $1
+         LIMIT 1`,
+        [propUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        leadId: restoreLogicalId(String(r.lead_id)),
+        organizationId: r.organization_id ? restoreLogicalId(String(r.organization_id)) : null,
+        proposalVersion: Number(r.proposal_version),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps),
+        payoutCycleDays: Number(r.payout_cycle_days) as CommercialProposalContract["payoutCycleDays"],
+        legalTemplateStatus: String(
+          r.legal_template_status
+        ) as CommercialProposalContract["legalTemplateStatus"],
+        status: String(r.status) as CommercialProposalContract["status"],
+        proposedByStaffId: restoreLogicalId(String(r.proposed_by_staff_id)),
+        validUntilIso: new Date(String(r.valid_until)).toISOString(),
+        notes: r.notes ? String(r.notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+      };
+    },
+
+    async convertCommercialLeadAndProposal(params: {
+      lead: CommercialLeadContract;
+      proposal: CommercialProposalContract;
+      contract: MerchantContractRecordContract;
+      commissionRule: CommissionRuleVersionContract;
+      organizationId: string;
+      organizationSlug: string;
+      storeId: string;
+      storeSlug: string;
+      partnerOwnerUserId?: string | null;
+    }): Promise<{
+      organizationId: string;
+      storeId: string;
+      lead: CommercialLeadContract;
+      proposal: CommercialProposalContract;
+      contract: MerchantContractRecordContract;
+      commissionRule: CommissionRuleVersionContract;
+    }> {
+      const orgUuid = rememberLogicalId(params.organizationId);
+      const storeUuid = rememberLogicalId(params.storeId);
+      const contractUuid = rememberLogicalId(params.contract.id);
+      const ruleUuid = rememberLogicalId(params.commissionRule.id);
+      const leadUuid = toDeterministicUuid(params.lead.id);
+      const propUuid = toDeterministicUuid(params.proposal.id);
+      const staffUuid = params.contract.approvedBy
+        ? toDeterministicUuid(params.contract.approvedBy)
+        : null;
+      const partnerOwnerUuid = params.partnerOwnerUserId
+        ? toDeterministicUuid(params.partnerOwnerUserId)
+        : null;
+
+      if (staffUuid) {
+        await ensureProfileExists(staffUuid);
+      }
+      if (partnerOwnerUuid) {
+        await ensureProfileExists(partnerOwnerUuid);
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        await client.query(
+          `INSERT INTO public.organizations (
+             id, slug, legal_name, trade_name, tax_id, status, is_multi_unit_enabled, is_test_data
+           ) VALUES ($1, $2, $3, $4, $5, 'ACTIVE', false, $6)
+           ON CONFLICT (id) DO UPDATE SET
+             legal_name = EXCLUDED.legal_name,
+             trade_name = EXCLUDED.trade_name,
+             status = 'ACTIVE'`,
+          [
+            orgUuid,
+            params.organizationSlug,
+            params.lead.legalName,
+            params.lead.tradeName,
+            params.lead.taxId,
+            isTestData,
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO public.stores (
+             id, organization_id, slug, name, description_en, description_pt_br, cuisine_category,
+             status, is_published, is_paused, timezone, address_line, city, state_code, postal_code,
+             latitude, longitude, min_order_cents, prep_time_min_minutes, prep_time_max_minutes,
+             supported_modalities, is_test_data
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7,
+             'DRAFT', false, false, 'America/Sao_Paulo', 'Av. Paulista, 1000', $8, $9, '01310-100',
+             -23.561414, -46.655881, 2500, 20, 35,
+             ARRAY['PLATFORM_DELIVERY'::public.fulfillment_modality, 'PICKUP'::public.fulfillment_modality], $10
+           )
+           ON CONFLICT (id) DO UPDATE SET
+             organization_id = EXCLUDED.organization_id,
+             name = EXCLUDED.name`,
+          [
+            storeUuid,
+            orgUuid,
+            params.storeSlug,
+            params.lead.tradeName,
+            `${params.lead.tradeName} onboarded via M18 commercial conversion.`,
+            `${params.lead.tradeName} integrado via conversão comercial M18.`,
+            params.lead.cuisineCategory,
+            params.lead.city,
+            params.lead.stateCode,
+            isTestData,
+          ]
+        );
+
+        if (partnerOwnerUuid) {
+          const memberId = toDeterministicUuid(`org_member_${orgUuid}_${partnerOwnerUuid}`);
+          await client.query(
+            `INSERT INTO public.organization_members (
+               id, organization_id, store_id, user_id, role, is_active, granted_by, is_test_data
+             ) VALUES ($1, $2, NULL, $3, 'partner_owner', true, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET
+               role = 'partner_owner',
+               is_active = true`,
+            [memberId, orgUuid, partnerOwnerUuid, staffUuid, isTestData]
+          );
+        }
+
+        // Supersede previous active contract/commission versions for this organization
+        await client.query(
+          `UPDATE public.merchant_contracts
+           SET effective_until = $2
+           WHERE organization_id = $1 AND effective_until IS NULL`,
+          [orgUuid, params.contract.effectiveFromIso]
+        );
+        await client.query(
+          `UPDATE public.commission_rule_versions
+           SET effective_until = $2
+           WHERE organization_id = $1 AND effective_until IS NULL`,
+          [orgUuid, params.commissionRule.effectiveFromIso]
+        );
+
+        await client.query(
+          `INSERT INTO public.merchant_contracts (
+             id, organization_id, version_number,
+             platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+             service_fee_bps, payout_cycle_days, legal_template_status,
+             effective_from, effective_until, approved_by, is_test_data
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12)`,
+          [
+            contractUuid,
+            orgUuid,
+            params.contract.versionNumber,
+            params.contract.platformDeliveryCommissionBps,
+            params.contract.merchantDeliveryCommissionBps,
+            params.contract.pickupCommissionBps,
+            params.contract.serviceFeeBps ?? 500,
+            params.contract.payoutCycleDays,
+            params.contract.legalTemplateStatus,
+            params.contract.effectiveFromIso,
+            staffUuid,
+            isTestData,
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO public.commission_rule_versions (
+             id, organization_id, contract_id, version_number,
+             platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+             service_fee_bps, effective_from, effective_until, created_by_staff_id, is_test_data
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11)`,
+          [
+            ruleUuid,
+            orgUuid,
+            contractUuid,
+            params.commissionRule.versionNumber,
+            params.commissionRule.platformDeliveryCommissionBps,
+            params.commissionRule.merchantDeliveryCommissionBps,
+            params.commissionRule.pickupCommissionBps,
+            params.commissionRule.serviceFeeBps,
+            params.commissionRule.effectiveFromIso,
+            staffUuid,
+            isTestData,
+          ]
+        );
+
+        await client.query(
+          `UPDATE public.commercial_proposals
+           SET organization_id = $2,
+               status = 'ACCEPTED',
+               updated_at = $3
+           WHERE id = $1`,
+          [propUuid, orgUuid, params.proposal.updatedAtIso]
+        );
+
+        await client.query(
+          `UPDATE public.commercial_leads
+           SET status = 'CONVERTED',
+               converted_organization_id = $2,
+               updated_at = $3
+           WHERE id = $1`,
+          [leadUuid, orgUuid, params.lead.updatedAtIso]
+        );
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      return {
+        organizationId: params.organizationId,
+        storeId: params.storeId,
+        lead: params.lead,
+        proposal: params.proposal,
+        contract: params.contract,
+        commissionRule: params.commissionRule,
+      };
+    },
+
+    async getMerchantContractById(
+      contractId: string
+    ): Promise<MerchantContractRecordContract | null> {
+      const contractUuid = toDeterministicUuid(contractId);
+      const res = await pool.query(
+        `SELECT id, organization_id, version_number, platform_delivery_commission_bps,
+                merchant_delivery_commission_bps, pickup_commission_bps, service_fee_bps,
+                payout_cycle_days, legal_template_status, effective_from, effective_until,
+                approved_by, accepted_by_partner_owner_id, accepted_at, created_at
+         FROM public.merchant_contracts
+         WHERE id = $1
+         LIMIT 1`,
+        [contractUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        organizationId: restoreLogicalId(String(r.organization_id)),
+        versionNumber: Number(r.version_number),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps ?? 500),
+        payoutCycleDays: Number(r.payout_cycle_days),
+        legalTemplateStatus: String(
+          r.legal_template_status
+        ) as MerchantContractRecordContract["legalTemplateStatus"],
+        effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+        effectiveUntilIso: r.effective_until
+          ? new Date(String(r.effective_until)).toISOString()
+          : null,
+        approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+        acceptedByPartnerOwnerId: r.accepted_by_partner_owner_id
+          ? restoreLogicalId(String(r.accepted_by_partner_owner_id))
+          : null,
+        acceptedAtIso: r.accepted_at ? new Date(String(r.accepted_at)).toISOString() : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async acceptMerchantContractByPartnerOwner(
+      contract: MerchantContractRecordContract
+    ): Promise<MerchantContractRecordContract> {
+      const contractUuid = toDeterministicUuid(contract.id);
+      const ownerUuid = contract.acceptedByPartnerOwnerId
+        ? toDeterministicUuid(contract.acceptedByPartnerOwnerId)
+        : null;
+      if (ownerUuid) {
+        await ensureProfileExists(ownerUuid);
+      }
+
+      const res = await pool.query(
+        `UPDATE public.merchant_contracts
+         SET accepted_by_partner_owner_id = $2,
+             accepted_at = $3
+         WHERE id = $1
+         RETURNING id, organization_id, version_number, platform_delivery_commission_bps,
+                   merchant_delivery_commission_bps, pickup_commission_bps, service_fee_bps,
+                   payout_cycle_days, legal_template_status, effective_from, effective_until,
+                   approved_by, accepted_by_partner_owner_id, accepted_at, created_at`,
+        [contractUuid, ownerUuid, contract.acceptedAtIso ?? new Date().toISOString()]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        organizationId: restoreLogicalId(String(r.organization_id)),
+        versionNumber: Number(r.version_number),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps ?? 500),
+        payoutCycleDays: Number(r.payout_cycle_days),
+        legalTemplateStatus: String(
+          r.legal_template_status
+        ) as MerchantContractRecordContract["legalTemplateStatus"],
+        effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+        effectiveUntilIso: r.effective_until
+          ? new Date(String(r.effective_until)).toISOString()
+          : null,
+        approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+        acceptedByPartnerOwnerId: r.accepted_by_partner_owner_id
+          ? restoreLogicalId(String(r.accepted_by_partner_owner_id))
+          : null,
+        acceptedAtIso: r.accepted_at ? new Date(String(r.accepted_at)).toISOString() : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async listCommissionRuleVersions(
+      organizationId: string
+    ): Promise<CommissionRuleVersionContract[]> {
+      const orgUuid = toDeterministicUuid(organizationId);
+      const res = await pool.query(
+        `SELECT id, organization_id, contract_id, version_number,
+                platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+                service_fee_bps, effective_from, effective_until, created_by_staff_id, created_at
+         FROM public.commission_rule_versions
+         WHERE organization_id = $1
+         ORDER BY version_number DESC, effective_from DESC`,
+        [orgUuid]
+      );
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        organizationId: restoreLogicalId(String(r.organization_id)),
+        contractId: restoreLogicalId(String(r.contract_id)),
+        versionNumber: Number(r.version_number),
+        platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+        merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+        pickupCommissionBps: Number(r.pickup_commission_bps),
+        serviceFeeBps: Number(r.service_fee_bps),
+        effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+        effectiveUntilIso: r.effective_until
+          ? new Date(String(r.effective_until)).toISOString()
+          : null,
+        createdByStaffId: r.created_by_staff_id
+          ? restoreLogicalId(String(r.created_by_staff_id))
+          : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      }));
+    },
+
+    async getCommercialBackofficeOverview(): Promise<CommercialBackofficeOverviewContract> {
+      const [leads, proposalsRes, contractsRes, rulesRes] = await Promise.all([
+        this.listCommercialLeads!(),
+        pool.query(
+          `SELECT id, lead_id, organization_id, proposal_version,
+                  platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+                  service_fee_bps, payout_cycle_days, legal_template_status, status,
+                  proposed_by_staff_id, valid_until, notes, created_at, updated_at
+           FROM public.commercial_proposals
+           ORDER BY updated_at DESC, created_at DESC`
+        ),
+        pool.query(
+          `SELECT id, organization_id, version_number, platform_delivery_commission_bps,
+                  merchant_delivery_commission_bps, pickup_commission_bps, service_fee_bps,
+                  payout_cycle_days, legal_template_status, effective_from, effective_until,
+                  approved_by, accepted_by_partner_owner_id, accepted_at, created_at
+           FROM public.merchant_contracts
+           ORDER BY created_at DESC`
+        ),
+        pool.query(
+          `SELECT id, organization_id, contract_id, version_number,
+                  platform_delivery_commission_bps, merchant_delivery_commission_bps, pickup_commission_bps,
+                  service_fee_bps, effective_from, effective_until, created_by_staff_id, created_at
+           FROM public.commission_rule_versions
+           ORDER BY created_at DESC`
+        ),
+      ]);
+
+      return {
+        leads,
+        proposals: proposalsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          leadId: restoreLogicalId(String(r.lead_id)),
+          organizationId: r.organization_id ? restoreLogicalId(String(r.organization_id)) : null,
+          proposalVersion: Number(r.proposal_version),
+          platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+          merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+          pickupCommissionBps: Number(r.pickup_commission_bps),
+          serviceFeeBps: Number(r.service_fee_bps),
+          payoutCycleDays: Number(
+            r.payout_cycle_days
+          ) as CommercialProposalContract["payoutCycleDays"],
+          legalTemplateStatus: String(
+            r.legal_template_status
+          ) as CommercialProposalContract["legalTemplateStatus"],
+          status: String(r.status) as CommercialProposalContract["status"],
+          proposedByStaffId: restoreLogicalId(String(r.proposed_by_staff_id)),
+          validUntilIso: new Date(String(r.valid_until)).toISOString(),
+          notes: r.notes ? String(r.notes) : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+          updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+        })),
+        contracts: contractsRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          organizationId: restoreLogicalId(String(r.organization_id)),
+          versionNumber: Number(r.version_number),
+          platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+          merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+          pickupCommissionBps: Number(r.pickup_commission_bps),
+          serviceFeeBps: Number(r.service_fee_bps ?? 500),
+          payoutCycleDays: Number(r.payout_cycle_days),
+          legalTemplateStatus: String(
+            r.legal_template_status
+          ) as MerchantContractRecordContract["legalTemplateStatus"],
+          effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+          effectiveUntilIso: r.effective_until
+            ? new Date(String(r.effective_until)).toISOString()
+            : null,
+          approvedBy: r.approved_by ? restoreLogicalId(String(r.approved_by)) : null,
+          acceptedByPartnerOwnerId: r.accepted_by_partner_owner_id
+            ? restoreLogicalId(String(r.accepted_by_partner_owner_id))
+            : null,
+          acceptedAtIso: r.accepted_at ? new Date(String(r.accepted_at)).toISOString() : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+        })),
+        commissionRuleVersions: rulesRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          organizationId: restoreLogicalId(String(r.organization_id)),
+          contractId: restoreLogicalId(String(r.contract_id)),
+          versionNumber: Number(r.version_number),
+          platformDeliveryCommissionBps: Number(r.platform_delivery_commission_bps),
+          merchantDeliveryCommissionBps: Number(r.merchant_delivery_commission_bps),
+          pickupCommissionBps: Number(r.pickup_commission_bps),
+          serviceFeeBps: Number(r.service_fee_bps),
+          effectiveFromIso: new Date(String(r.effective_from)).toISOString(),
+          effectiveUntilIso: r.effective_until
+            ? new Date(String(r.effective_until)).toISOString()
+            : null,
+          createdByStaffId: r.created_by_staff_id
+            ? restoreLogicalId(String(r.created_by_staff_id))
+            : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
         })),
       };
     },

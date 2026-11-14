@@ -26,10 +26,15 @@ import {
   executeOrderCommand,
   filterSupportCaseViewForActor,
   hashDeliveryConfirmationCode,
+  transitionCommercialLeadStatus,
   transitionSupportCaseStatus,
+  validateAndBuildCommercialProposal,
   validateAndBuildQuoteItems,
   verifyAndProcessPspWebhook,
   verifyDeliveryConfirmationCode,
+  assertCommercialSegregationFromFinance,
+  buildVersionedContractAndCommissionRule,
+  evaluatePartnerContractAcceptance,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -936,5 +941,140 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     });
     assert.equal(financeApproved.status, "APPROVED");
     assert.equal(financeApproved.decidedBy, "staff_finance_02");
+  });
+
+  it("enforces Fase O (M18) commercial lead transitions, proposal validation, versioned contracts + commission rules, partner_owner acceptance, and finance segregation", () => {
+    const now = new Date("2026-11-14T15:00:00.000Z");
+
+    // 1. Lead transitions
+    const initialLead = {
+      id: "lead_01",
+      legalName: "Padaria Bela Vista Ltda",
+      tradeName: "Padaria Bela Vista",
+      taxId: "33445566000188",
+      contactEmail: "roberto@belavista.example.com",
+      contactPhone: "+5511977776666",
+      city: "São Paulo",
+      stateCode: "SP",
+      cuisineCategory: "Bakery & Cafe",
+      legalBasis: "LEGITIMATE_INTEREST_B2B",
+      status: "NEW" as const,
+      ownerStaffId: "staff_commercial_01",
+      convertedOrganizationId: null,
+      notes: "High foot-traffic bakery",
+      createdAtIso: now.toISOString(),
+      updatedAtIso: now.toISOString(),
+    };
+
+    const qualifying = transitionCommercialLeadStatus({
+      lead: initialLead,
+      targetStatus: "QUALIFYING",
+      now,
+    });
+    assert.equal(qualifying.status, "QUALIFYING");
+
+    const proposalSent = transitionCommercialLeadStatus({
+      lead: qualifying,
+      targetStatus: "PROPOSAL_SENT",
+      now,
+    });
+    assert.equal(proposalSent.status, "PROPOSAL_SENT");
+
+    // Cannot convert without convertedOrganizationId
+    assert.throws(
+      () =>
+        transitionCommercialLeadStatus({
+          lead: proposalSent,
+          targetStatus: "CONVERTED",
+          now,
+        }),
+      /COMMERCIAL_LEAD_ORGANIZATION_REQUIRED/
+    );
+
+    const converted = transitionCommercialLeadStatus({
+      lead: proposalSent,
+      targetStatus: "CONVERTED",
+      convertedOrganizationId: "org_new_01",
+      now,
+    });
+    assert.equal(converted.status, "CONVERTED");
+    assert.equal(converted.convertedOrganizationId, "org_new_01");
+
+    // 2. Proposal validation & versioned contract + commission rule generation
+    const proposal = validateAndBuildCommercialProposal({
+      id: "prop_01",
+      leadId: "lead_01",
+      proposalVersion: 1,
+      platformDeliveryCommissionBps: 1150,
+      merchantDeliveryCommissionBps: 550,
+      pickupCommissionBps: 350,
+      serviceFeeBps: 500,
+      payoutCycleDays: 7,
+      notes: "Standard Bakery Partner Tier v1 (11.5% Marketplace, 7-day settlement)",
+      validUntilIso: "2026-12-31T23:59:59.000Z",
+      proposedByStaffId: "staff_commercial_01",
+      now,
+    });
+    assert.equal(proposal.status, "SENT");
+    assert.equal(proposal.legalTemplateStatus, "PENDING_LEGAL_REVIEW");
+
+    const { updatedProposal, contract, commissionRule } = buildVersionedContractAndCommissionRule({
+      proposal,
+      organizationId: "org_new_01",
+      contractId: "contract_01",
+      commissionRuleId: "crule_01",
+      previousContractVersion: 0,
+      createdByStaffId: "staff_commercial_01",
+      now,
+    });
+    assert.equal(updatedProposal.status, "ACCEPTED");
+    assert.equal(updatedProposal.organizationId, "org_new_01");
+    assert.equal(contract.versionNumber, 1);
+    assert.equal(contract.platformDeliveryCommissionBps, 1150);
+    assert.equal(contract.serviceFeeBps, 500);
+    assert.equal(contract.acceptedByPartnerOwnerId, null);
+    assert.equal(commissionRule.versionNumber, 1);
+    assert.equal(commissionRule.contractId, "contract_01");
+
+    // 3. Partner contract acceptance requires partner_owner of that organization
+    assert.throws(
+      () =>
+        evaluatePartnerContractAcceptance({
+          contract,
+          actorId: "user_operator",
+          actorOrganizationMemberships: [
+            { organizationId: "org_new_01", role: "partner_operator" },
+          ],
+          now,
+        }),
+      /PARTNER_OWNER_REQUIRED_FOR_CONTRACT_ACCEPTANCE/
+    );
+
+    const acceptedContract = evaluatePartnerContractAcceptance({
+      contract,
+      actorId: "user_owner",
+      actorOrganizationMemberships: [
+        { organizationId: "org_new_01", role: "partner_owner" },
+      ],
+      now,
+    });
+    assert.equal(acceptedContract.acceptedByPartnerOwnerId, "user_owner");
+    assert.equal(acceptedContract.acceptedAtIso, now.toISOString());
+
+    // 4. Commercial staff is strictly segregated from finance execution
+    assert.throws(
+      () =>
+        assertCommercialSegregationFromFinance({
+          actorStaffRoles: ["commercial"],
+          operation: "SETTLEMENT_EXECUTION",
+        }),
+      /COMMERCIAL_FINANCE_SEGREGATION_VIOLATION/
+    );
+    assert.doesNotThrow(() =>
+      assertCommercialSegregationFromFinance({
+        actorStaffRoles: ["finance"],
+        operation: "SETTLEMENT_EXECUTION",
+      })
+    );
   });
 });

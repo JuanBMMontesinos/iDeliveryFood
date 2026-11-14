@@ -60,6 +60,12 @@ import {
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
+  type CommercialBackofficeOverviewContract,
+  type CommercialLeadContract,
+  type CommercialLeadStatus,
+  type CommercialProposalContract,
+  type CommercialProposalStatus,
+  type CommissionRuleVersionContract,
 } from "@ideliveryfood/contracts";
 
 export interface ApiClientOptions {
@@ -1006,6 +1012,133 @@ export class IDeliveryApiClient {
         decision: params.decision,
         decisionNotes: params.decisionNotes,
       },
+    });
+  }
+
+  public async getCommercialBackofficeOverview(): Promise<{
+    data: CommercialBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/commercial/overview",
+      method: "GET",
+    });
+  }
+
+  public async listCommercialLeads(params?: {
+    status?: CommercialLeadStatus;
+  }): Promise<{ data: CommercialLeadContract[] }> {
+    const qs = params?.status
+      ? `?status=${encodeURIComponent(params.status)}`
+      : "";
+    return this.request({
+      path: `/commercial/leads${qs}`,
+      method: "GET",
+    });
+  }
+
+  public async createCommercialLead(params: {
+    id?: string;
+    legalName: string;
+    tradeName: string;
+    taxId: string;
+    contactEmail: string;
+    contactPhone?: string;
+    city?: string;
+    stateCode?: string;
+    cuisineCategory?: string;
+    legalBasis?: string;
+    notes?: string | null;
+  }): Promise<{ data: CommercialLeadContract }> {
+    return this.request({
+      path: "/commercial/leads",
+      method: "POST",
+      body: params as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async transitionCommercialLeadStatus(params: {
+    leadId: string;
+    status: CommercialLeadStatus;
+    convertedOrganizationId?: string | null;
+    notes?: string | null;
+  }): Promise<{ data: CommercialLeadContract }> {
+    return this.request({
+      path: `/commercial/leads/${encodeURIComponent(params.leadId)}/status`,
+      method: "POST",
+      body: {
+        status: params.status,
+        ...(params.convertedOrganizationId !== undefined
+          ? { convertedOrganizationId: params.convertedOrganizationId }
+          : {}),
+        ...(params.notes !== undefined ? { notes: params.notes } : {}),
+      },
+    });
+  }
+
+  public async createCommercialProposal(params: {
+    id?: string;
+    leadId: string;
+    proposalVersion?: number;
+    platformDeliveryCommissionBps: number;
+    merchantDeliveryCommissionBps: number;
+    pickupCommissionBps: number;
+    serviceFeeBps?: number;
+    payoutCycleDays?: 1 | 7 | 14 | 30;
+    legalTemplateStatus?: "PENDING_LEGAL_REVIEW" | "APPROVED_TEMPLATE";
+    status?: CommercialProposalStatus;
+    validUntilIso?: string;
+    notes?: string | null;
+  }): Promise<{ data: CommercialProposalContract }> {
+    const { leadId, ...rest } = params;
+    return this.request({
+      path: `/commercial/leads/${encodeURIComponent(leadId)}/proposals`,
+      method: "POST",
+      body: rest as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async convertCommercialProposal(params: {
+    proposalId: string;
+    organizationId?: string;
+    organizationSlug?: string;
+    storeId?: string;
+    storeSlug?: string;
+    contractId?: string;
+    commissionRuleId?: string;
+    partnerOwnerUserId?: string | null;
+  }): Promise<{
+    data: {
+      organizationId: string;
+      storeId: string;
+      lead: CommercialLeadContract;
+      proposal: CommercialProposalContract;
+      contract: MerchantContractRecordContract;
+      commissionRule: CommissionRuleVersionContract;
+    };
+  }> {
+    const { proposalId, ...rest } = params;
+    return this.request({
+      path: `/commercial/proposals/${encodeURIComponent(proposalId)}/convert`,
+      method: "POST",
+      body: rest as unknown as Record<string, unknown>,
+    });
+  }
+
+  public async acceptMerchantContract(
+    contractId: string
+  ): Promise<{ data: MerchantContractRecordContract }> {
+    return this.request({
+      path: `/commercial/contracts/${encodeURIComponent(contractId)}/accept`,
+      method: "POST",
+    });
+  }
+
+  public async listOrganizationCommissionRules(
+    organizationId: string
+  ): Promise<{ data: CommissionRuleVersionContract[] }> {
+    return this.request({
+      path: `/partner/organizations/${encodeURIComponent(organizationId)}/commission-rules`,
+      method: "GET",
     });
   }
 }

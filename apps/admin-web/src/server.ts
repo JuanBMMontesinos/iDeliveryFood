@@ -22,6 +22,10 @@ import {
   loadSupportBackofficePageData,
   renderSupportBackofficePageHtml,
 } from "./app/support/page.js";
+import {
+  loadCommercialBackofficePageData,
+  renderCommercialBackofficePageHtml,
+} from "./app/commercial/page.js";
 
 export interface AdminWebServerOptions {
   apiBaseUrl: string;
@@ -166,6 +170,25 @@ export function createAdminWebServer(
           ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         });
         const html = renderSupportBackofficePageHtml(data);
+        res.statusCode = data.status;
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(html);
+        return;
+      }
+
+      if (
+        pathname === "/commercial" ||
+        pathname === "/commercial/leads" ||
+        pathname === "/commercial/proposals" ||
+        pathname === "/commercial/contracts"
+      ) {
+        const data = await loadCommercialBackofficePageData({
+          apiBaseUrl: options.apiBaseUrl,
+          accessToken,
+          locale,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        });
+        const html = renderCommercialBackofficePageHtml(data);
         res.statusCode = data.status;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.end(html);

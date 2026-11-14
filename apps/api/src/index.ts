@@ -74,11 +74,19 @@ import {
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
+  type CommercialBackofficeOverviewContract,
+  type CommercialLeadContract,
+  type CommercialLeadStatus,
+  type CommercialProposalContract,
+  type CommercialProposalStatus,
+  type CommissionRuleVersionContract,
 } from "@ideliveryfood/contracts";
 import {
+  DEFAULT_BR_PLATFORM_POLICY,
   acceptDeliveryOfferTransactional,
   assertExternalProviderReady,
   buildKitchenOrderQueue,
+  buildVersionedContractAndCommissionRule,
   calculateServerQuoteAndSplit,
   computeSupportSlaDueAt,
   createBankAccountChangeRequest,
@@ -87,6 +95,7 @@ import {
   evaluateAccountDeletionRequest,
   evaluateAdminGovernanceDecision,
   evaluateCourierLocationSample,
+  evaluatePartnerContractAcceptance,
   evaluatePspReconciliationRun,
   evaluateRefundRequest,
   evaluateServiceAreaEligibility,
@@ -97,7 +106,9 @@ import {
   executeOrderCommand,
   filterSupportCaseViewForActor,
   hashDeliveryConfirmationCode,
+  transitionCommercialLeadStatus,
   transitionSupportCaseStatus,
+  validateAndBuildCommercialProposal,
   validateAndBuildQuoteItems,
   validateStoreSettingsPatch,
   verifyAndProcessPspWebhook,
@@ -432,6 +443,36 @@ export interface ApiDataRepository {
   getSupportActionRequestById?(requestId: string): Promise<SupportActionRequestContract | null>;
   updateSupportActionRequestDecision?(req: SupportActionRequestContract): Promise<SupportActionRequestContract>;
   getSupportBackofficeOverview?(): Promise<SupportBackofficeOverviewContract>;
+  listCommercialLeads?(statusFilter?: string): Promise<CommercialLeadContract[]>;
+  getCommercialLeadById?(leadId: string): Promise<CommercialLeadContract | null>;
+  createCommercialLead?(lead: CommercialLeadContract): Promise<CommercialLeadContract>;
+  updateCommercialLeadStatus?(lead: CommercialLeadContract): Promise<CommercialLeadContract>;
+  createCommercialProposal?(proposal: CommercialProposalContract): Promise<CommercialProposalContract>;
+  getCommercialProposalById?(proposalId: string): Promise<CommercialProposalContract | null>;
+  convertCommercialLeadAndProposal?(params: {
+    lead: CommercialLeadContract;
+    proposal: CommercialProposalContract;
+    contract: MerchantContractRecordContract;
+    commissionRule: CommissionRuleVersionContract;
+    organizationId: string;
+    organizationSlug: string;
+    storeId: string;
+    storeSlug: string;
+    partnerOwnerUserId?: string | null;
+  }): Promise<{
+    organizationId: string;
+    storeId: string;
+    lead: CommercialLeadContract;
+    proposal: CommercialProposalContract;
+    contract: MerchantContractRecordContract;
+    commissionRule: CommissionRuleVersionContract;
+  }>;
+  getMerchantContractById?(contractId: string): Promise<MerchantContractRecordContract | null>;
+  acceptMerchantContractByPartnerOwner?(
+    contract: MerchantContractRecordContract
+  ): Promise<MerchantContractRecordContract>;
+  listCommissionRuleVersions?(organizationId: string): Promise<CommissionRuleVersionContract[]>;
+  getCommercialBackofficeOverview?(): Promise<CommercialBackofficeOverviewContract>;
 }
 
 /**
@@ -1578,6 +1619,30 @@ export function createApiServer(deps: {
           snapshots = validated.snapshots;
         }
 
+        let activePolicy = DEFAULT_BR_PLATFORM_POLICY;
+        if (deps.repository.getMerchantContract) {
+          const storeMeta = await deps.repository.getStoreById(storeId, locale);
+          if (storeMeta?.organizationId) {
+            const orgContract = await deps.repository.getMerchantContract(
+              storeMeta.organizationId
+            );
+            if (orgContract && orgContract.effectiveUntilIso === null) {
+              activePolicy = {
+                platformDeliveryCommissionBps:
+                  orgContract.platformDeliveryCommissionBps,
+                merchantDeliveryCommissionBps:
+                  orgContract.merchantDeliveryCommissionBps,
+                pickupCommissionBps: orgContract.pickupCommissionBps,
+                serviceFeeBps:
+                  orgContract.serviceFeeBps ??
+                  DEFAULT_BR_PLATFORM_POLICY.serviceFeeBps,
+                serviceFeeCapCents:
+                  DEFAULT_BR_PLATFORM_POLICY.serviceFeeCapCents,
+              };
+            }
+          }
+        }
+
         const calc = calculateServerQuoteAndSplit({
           items: quoteInputs,
           fulfillmentModality,
@@ -1587,6 +1652,7 @@ export function createApiServer(deps: {
             (body.discountFundedBy as "PLATFORM" | "MERCHANT" | "NONE") ??
             "NONE",
           minOrderCents: Number(body.minOrderCents ?? 0),
+          policy: activePolicy,
         });
 
         const now = new Date();
@@ -5827,6 +5893,520 @@ export function createApiServer(deps: {
           sendError(res, statusCode, code, msg, correlationId);
           return;
         }
+      }
+
+      // =======================================================================
+      // 20. Fase O (M18): Commercial Leads, Proposals, Contracts & Onboarding
+      // =======================================================================
+
+      // 20a. GET /v1/commercial/overview
+      if (method === "GET" && pathname === "/v1/commercial/overview") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(res, 403, authz.reasonCode, "Staff commercial/operations role required.", correlationId);
+          return;
+        }
+        if (!deps.repository.getCommercialBackofficeOverview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+        const overview = await deps.repository.getCommercialBackofficeOverview();
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 20b. GET /v1/commercial/leads & POST /v1/commercial/leads
+      if (pathname === "/v1/commercial/leads" && (method === "GET" || method === "POST")) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(res, 403, authz.reasonCode, "Staff commercial/operations role required.", correlationId);
+          return;
+        }
+        if (!deps.repository.listCommercialLeads || !deps.repository.createCommercialLead) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+
+        if (method === "GET") {
+          const statusFilter = parsedUrl.searchParams.get("status") ?? undefined;
+          const leads = await deps.repository.listCommercialLeads(statusFilter);
+          sendJson(res, 200, correlationId, { data: leads });
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const legalName = String(body.legalName ?? "").trim();
+        const tradeName = String(body.tradeName ?? "").trim();
+        const taxId = String(body.taxId ?? "").replace(/\D+/g, "");
+        const contactEmail = String(body.contactEmail ?? "").trim();
+        const contactPhone = String(body.contactPhone ?? "").trim();
+
+        if (!legalName || !tradeName || taxId.length < 11 || !contactEmail) {
+          sendError(
+            res,
+            400,
+            "COMMERCIAL_LEAD_INVALID_FIELDS",
+            "legalName, tradeName, taxId (>= 11 digits), and contactEmail are required.",
+            correlationId
+          );
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const createdLead = await deps.repository.createCommercialLead({
+          id: body.id ? String(body.id) : crypto.randomUUID(),
+          legalName,
+          tradeName,
+          taxId,
+          contactEmail,
+          contactPhone: contactPhone || "+5511900000000",
+          city: String(body.city ?? "São Paulo"),
+          stateCode: String(body.stateCode ?? "SP"),
+          cuisineCategory: String(body.cuisineCategory ?? "RESTAURANT"),
+          legalBasis: String(body.legalBasis ?? "PARTNER_INBOUND_APPLICATION"),
+          status: "NEW",
+          ownerStaffId: actor.id,
+          convertedOrganizationId: null,
+          notes: body.notes ? String(body.notes) : null,
+          createdAtIso: nowIso,
+          updatedAtIso: nowIso,
+        });
+
+        await deps.repository.appendAuditLog({
+          id: crypto.randomUUID(),
+          actorId: actor.id,
+          action: "COMMERCIAL_LEAD_CREATED",
+          targetType: "COMMERCIAL_LEAD",
+          targetId: createdLead.id,
+          correlationId,
+          reason: `Created commercial lead for ${createdLead.tradeName}`,
+          redactedPayload: {
+            tradeName: createdLead.tradeName,
+            city: createdLead.city,
+            stateCode: createdLead.stateCode,
+            status: createdLead.status,
+          },
+          createdAt: nowIso,
+        });
+
+        sendJson(res, 201, correlationId, { data: createdLead });
+        return;
+      }
+
+      // 20c. POST /v1/commercial/leads/:leadId/status
+      const leadStatusMatch = pathname.match(/^\/v1\/commercial\/leads\/([^/]+)\/status$/);
+      if (method === "POST" && leadStatusMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(res, 403, authz.reasonCode, "Staff commercial/operations role required.", correlationId);
+          return;
+        }
+        const leadId = leadStatusMatch[1] ?? "";
+        if (!deps.repository.getCommercialLeadById || !deps.repository.updateCommercialLeadStatus) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+
+        const existingLead = await deps.repository.getCommercialLeadById(leadId);
+        if (!existingLead) {
+          sendError(res, 404, "COMMERCIAL_LEAD_NOT_FOUND", `Lead ${leadId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const targetStatus = String(body.status ?? "").toUpperCase() as CommercialLeadStatus;
+        try {
+          const transitioned = transitionCommercialLeadStatus({
+            lead: existingLead,
+            targetStatus,
+            ...(body.convertedOrganizationId !== undefined
+              ? {
+                  convertedOrganizationId: body.convertedOrganizationId
+                    ? String(body.convertedOrganizationId)
+                    : null,
+                }
+              : {}),
+            ...(body.notes !== undefined
+              ? { notes: body.notes ? String(body.notes) : null }
+              : {}),
+          });
+          const savedLead = await deps.repository.updateCommercialLeadStatus(transitioned);
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "COMMERCIAL_LEAD_STATUS_CHANGED",
+            targetType: "COMMERCIAL_LEAD",
+            targetId: savedLead.id,
+            correlationId,
+            reason: `Transitioned lead ${existingLead.status} -> ${savedLead.status}`,
+            redactedPayload: {
+              previousStatus: existingLead.status,
+              newStatus: savedLead.status,
+            },
+            createdAt: savedLead.updatedAtIso,
+          });
+
+          sendJson(res, 200, correlationId, { data: savedLead });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Invalid lead transition";
+          sendError(res, 400, msg.split(":")[0] ?? "COMMERCIAL_LEAD_TRANSITION_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 20d. POST /v1/commercial/leads/:leadId/proposals
+      const leadProposalMatch = pathname.match(/^\/v1\/commercial\/leads\/([^/]+)\/proposals$/);
+      if (method === "POST" && leadProposalMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(res, 403, authz.reasonCode, "Staff commercial/operations role required.", correlationId);
+          return;
+        }
+        const leadId = leadProposalMatch[1] ?? "";
+        if (
+          !deps.repository.getCommercialLeadById ||
+          !deps.repository.createCommercialProposal ||
+          !deps.repository.updateCommercialLeadStatus
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+
+        const existingLead = await deps.repository.getCommercialLeadById(leadId);
+        if (!existingLead) {
+          sendError(res, 404, "COMMERCIAL_LEAD_NOT_FOUND", `Lead ${leadId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const proposal = validateAndBuildCommercialProposal({
+            id: body.id ? String(body.id) : crypto.randomUUID(),
+            leadId: existingLead.id,
+            organizationId: existingLead.convertedOrganizationId,
+            proposalVersion: Number(body.proposalVersion ?? 1),
+            platformDeliveryCommissionBps: Number(body.platformDeliveryCommissionBps ?? 2100),
+            merchantDeliveryCommissionBps: Number(body.merchantDeliveryCommissionBps ?? 1100),
+            pickupCommissionBps: Number(body.pickupCommissionBps ?? 900),
+            serviceFeeBps: Number(body.serviceFeeBps ?? 500),
+            payoutCycleDays: Number(body.payoutCycleDays ?? 7) as 1 | 7 | 14 | 30,
+            legalTemplateStatus:
+              body.legalTemplateStatus === "APPROVED_TEMPLATE"
+                ? "APPROVED_TEMPLATE"
+                : "PENDING_LEGAL_REVIEW",
+            status: (body.status as CommercialProposalStatus | undefined) ?? "SENT",
+            validUntilIso: String(
+              body.validUntilIso ??
+                new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+            ),
+            notes: body.notes ? String(body.notes) : null,
+            proposedByStaffId: actor.id,
+          });
+
+          const savedProposal = await deps.repository.createCommercialProposal(proposal);
+
+          if (existingLead.status === "NEW" || existingLead.status === "QUALIFYING") {
+            const updatedLead = transitionCommercialLeadStatus({
+              lead: existingLead,
+              targetStatus: "PROPOSAL_SENT",
+            });
+            await deps.repository.updateCommercialLeadStatus(updatedLead);
+          }
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "COMMERCIAL_PROPOSAL_CREATED",
+            targetType: "COMMERCIAL_PROPOSAL",
+            targetId: savedProposal.id,
+            correlationId,
+            reason: `Created commercial proposal v${savedProposal.proposalVersion} for lead ${existingLead.tradeName}`,
+            redactedPayload: {
+              leadId: existingLead.id,
+              proposalVersion: savedProposal.proposalVersion,
+              platformDeliveryCommissionBps: savedProposal.platformDeliveryCommissionBps,
+              merchantDeliveryCommissionBps: savedProposal.merchantDeliveryCommissionBps,
+              pickupCommissionBps: savedProposal.pickupCommissionBps,
+              serviceFeeBps: savedProposal.serviceFeeBps,
+              payoutCycleDays: savedProposal.payoutCycleDays,
+            },
+            createdAt: savedProposal.createdAtIso,
+          });
+
+          sendJson(res, 201, correlationId, { data: savedProposal });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Invalid proposal payload";
+          sendError(res, 400, msg.split(":")[0] ?? "COMMERCIAL_PROPOSAL_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 20e. POST /v1/commercial/proposals/:proposalId/convert
+      const proposalConvertMatch = pathname.match(/^\/v1\/commercial\/proposals\/([^/]+)\/convert$/);
+      if (method === "POST" && proposalConvertMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const authz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "operations", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!authz.allowed) {
+          sendError(res, 403, authz.reasonCode, "Staff commercial/operations role required.", correlationId);
+          return;
+        }
+        const proposalId = proposalConvertMatch[1] ?? "";
+        if (
+          !deps.repository.getCommercialProposalById ||
+          !deps.repository.getCommercialLeadById ||
+          !deps.repository.convertCommercialLeadAndProposal
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+
+        const existingProposal = await deps.repository.getCommercialProposalById(proposalId);
+        if (!existingProposal) {
+          sendError(res, 404, "COMMERCIAL_PROPOSAL_NOT_FOUND", `Proposal ${proposalId} not found.`, correlationId);
+          return;
+        }
+        const existingLead = await deps.repository.getCommercialLeadById(existingProposal.leadId);
+        if (!existingLead) {
+          sendError(res, 404, "COMMERCIAL_LEAD_NOT_FOUND", `Lead ${existingProposal.leadId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const organizationId = body.organizationId
+          ? String(body.organizationId)
+          : (existingLead.convertedOrganizationId ?? crypto.randomUUID());
+        const storeId = body.storeId ? String(body.storeId) : crypto.randomUUID();
+        const slugSuffix = organizationId.slice(0, 8).toLowerCase();
+        const baseSlug = existingLead.tradeName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
+        const organizationSlug = body.organizationSlug
+          ? String(body.organizationSlug)
+          : `${baseSlug}-${slugSuffix}`;
+        const storeSlug = body.storeSlug
+          ? String(body.storeSlug)
+          : `${baseSlug}-unit-${slugSuffix}`;
+
+        let previousContractVersion = 0;
+        if (deps.repository.getMerchantContract) {
+          const prev = await deps.repository.getMerchantContract(organizationId);
+          if (prev) {
+            previousContractVersion = prev.versionNumber;
+          }
+        }
+
+        try {
+          const { updatedProposal, contract, commissionRule } =
+            buildVersionedContractAndCommissionRule({
+              proposal: existingProposal,
+              organizationId,
+              contractId: body.contractId ? String(body.contractId) : crypto.randomUUID(),
+              commissionRuleId: body.commissionRuleId
+                ? String(body.commissionRuleId)
+                : crypto.randomUUID(),
+              previousContractVersion,
+              createdByStaffId: actor.id,
+            });
+
+          const leadReadyForConvert =
+            existingLead.status === "NEW" || existingLead.status === "QUALIFYING"
+              ? transitionCommercialLeadStatus({
+                  lead: existingLead,
+                  targetStatus: "PROPOSAL_SENT",
+                })
+              : existingLead;
+
+          const convertedLead =
+            leadReadyForConvert.status === "CONVERTED"
+              ? leadReadyForConvert
+              : transitionCommercialLeadStatus({
+                  lead: leadReadyForConvert,
+                  targetStatus: "CONVERTED",
+                  convertedOrganizationId: organizationId,
+                });
+
+          const converted = await deps.repository.convertCommercialLeadAndProposal({
+            lead: convertedLead,
+            proposal: updatedProposal,
+            contract,
+            commissionRule,
+            organizationId,
+            organizationSlug,
+            storeId,
+            storeSlug,
+            partnerOwnerUserId: body.partnerOwnerUserId ? String(body.partnerOwnerUserId) : null,
+          });
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "COMMERCIAL_PROPOSAL_CONVERTED_TO_ONBOARDING",
+            targetType: "MERCHANT_CONTRACT",
+            targetId: converted.contract.id,
+            correlationId,
+            reason: `Converted proposal ${existingProposal.id} into organization ${organizationId} and contract v${converted.contract.versionNumber}`,
+            redactedPayload: {
+              leadId: existingLead.id,
+              proposalId: existingProposal.id,
+              organizationId,
+              storeId,
+              contractId: converted.contract.id,
+              commissionRuleId: converted.commissionRule.id,
+              versionNumber: converted.contract.versionNumber,
+            },
+            createdAt: converted.contract.createdAtIso,
+          });
+
+          sendJson(res, 201, correlationId, { data: converted });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unable to convert commercial proposal";
+          sendError(res, 400, msg.split(":")[0] ?? "COMMERCIAL_CONVERT_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 20f. POST /v1/commercial/contracts/:contractId/accept
+      const contractAcceptMatch = pathname.match(/^\/v1\/commercial\/contracts\/([^/]+)\/accept$/);
+      if (method === "POST" && contractAcceptMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const contractId = contractAcceptMatch[1] ?? "";
+        if (
+          !deps.repository.getMerchantContractById ||
+          !deps.repository.acceptMerchantContractByPartnerOwner
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+
+        const existingContract = await deps.repository.getMerchantContractById(contractId);
+        if (!existingContract) {
+          sendError(res, 404, "MERCHANT_CONTRACT_NOT_FOUND", `Contract ${contractId} not found.`, correlationId);
+          return;
+        }
+
+        try {
+          const accepted = evaluatePartnerContractAcceptance({
+            contract: existingContract,
+            actorId: actor.id,
+            actorOrganizationMemberships: actor.organizationMemberships.map((m) => ({
+              organizationId: m.organizationId,
+              role: m.role,
+            })),
+          });
+          const savedContract = await deps.repository.acceptMerchantContractByPartnerOwner(accepted);
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "MERCHANT_CONTRACT_ACCEPTED_BY_OWNER",
+            targetType: "MERCHANT_CONTRACT",
+            targetId: savedContract.id,
+            correlationId,
+            reason: `Partner owner accepted contract v${savedContract.versionNumber}`,
+            redactedPayload: {
+              organizationId: savedContract.organizationId,
+              versionNumber: savedContract.versionNumber,
+              acceptedByPartnerOwnerId: savedContract.acceptedByPartnerOwnerId,
+              acceptedAtIso: savedContract.acceptedAtIso,
+            },
+            createdAt: savedContract.acceptedAtIso ?? new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, { data: savedContract });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Contract acceptance forbidden";
+          const code = msg.split(":")[0] ?? "CONTRACT_ACCEPTANCE_ERROR";
+          const statusCode = code.includes("PARTNER_OWNER_REQUIRED") ? 403 : 400;
+          sendError(res, statusCode, code, msg, correlationId);
+          return;
+        }
+      }
+
+      // 20g. GET /v1/partner/organizations/:organizationId/commission-rules
+      const orgCommRulesMatch = pathname.match(
+        /^\/v1\/partner\/organizations\/([^/]+)\/commission-rules$/
+      );
+      if (method === "GET" && orgCommRulesMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const organizationId = orgCommRulesMatch[1] ?? "";
+        const partnerDecision = authorizePartnerScope({
+          actor,
+          organizationId,
+          allowedRoles: ["partner_owner", "partner_finance"],
+        });
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["commercial", "finance", "risk_compliance", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!partnerDecision.allowed && !staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            partnerDecision.reasonCode,
+            "Access restricted to partner_owner/partner_finance or authorized staff.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.listCommissionRuleVersions) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Commercial repository not configured.", correlationId);
+          return;
+        }
+        const rules = await deps.repository.listCommissionRuleVersions(organizationId);
+        sendJson(res, 200, correlationId, { data: rules });
+        return;
       }
 
       sendError(
