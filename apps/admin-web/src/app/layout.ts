@@ -47,9 +47,9 @@ const MODULE_LINKS: Record<
     labelPtBr: "Logística e Despacho (M14)",
   },
   SUPPORT_AND_DISPUTES: {
-    href: "/admin/audit",
-    labelEn: "Audit & Support Trail",
-    labelPtBr: "Auditoria e Suporte",
+    href: "/support",
+    labelEn: "Support & Disputes (M17)",
+    labelPtBr: "Suporte e Disputas (M17)",
   },
   FINANCE_LEDGER_AND_SETTLEMENTS: {
     href: "/finance",

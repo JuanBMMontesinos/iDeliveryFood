@@ -10,7 +10,9 @@ import {
   canTransitionOrderStatus,
   canTransitionPaymentStatus,
   computePspWebhookSignature,
+  computeSupportSlaDueAt,
   createOrderFromServerQuote,
+  decideEscalatedSupportActionRequest,
   evaluateAccountDeletionRequest,
   evaluateCourierLocationSample,
   evaluateFleetOperatorAccess,
@@ -20,8 +22,11 @@ import {
   evaluateSettlementPayoutExecution,
   evaluateSingleStoreCartAddition,
   evaluateStoreAvailability,
+  evaluateSupportActionRequest,
   executeOrderCommand,
+  filterSupportCaseViewForActor,
   hashDeliveryConfirmationCode,
+  transitionSupportCaseStatus,
   validateAndBuildQuoteItems,
   verifyAndProcessPspWebhook,
   verifyDeliveryConfirmationCode,
@@ -755,5 +760,181 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     });
     assert.equal(independentAccess.allowed, false);
     assert.equal(independentAccess.reasonCode, "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER");
+  });
+
+  it("enforces M17 support SLA calculation, internal note stripping, auto-refund ceiling, and finance aal2 Segregation of Duties", () => {
+    const now = new Date("2026-11-14T12:00:00Z");
+
+    // 1. SLA calculation upgrades ROUTE_INCIDENT to CRITICAL_IN_ROUTE (15 min)
+    const slaCritical = computeSupportSlaDueAt({
+      priority: "MEDIUM",
+      category: "ROUTE_INCIDENT",
+      createdAt: now,
+    });
+    assert.equal(slaCritical.effectivePriority, "CRITICAL_IN_ROUTE");
+    assert.equal(slaCritical.slaMinutes, 15);
+    assert.equal(slaCritical.slaDueAtIso, "2026-11-14T12:15:00.000Z");
+
+    // 2. State machine transitions & internal note filtering
+    const baseCase = {
+      id: "case_001",
+      caseNumber: 5001,
+      orderId: "ord_1001",
+      deliveryTaskId: "task_1201",
+      organizationId: "org_101",
+      storeId: "store_201",
+      requesterId: "cust_001",
+      requesterRole: "CUSTOMER" as const,
+      assignedStaffId: null,
+      category: "MISSING_ITEM",
+      priority: "HIGH" as const,
+      status: "OPEN" as const,
+      subject: "Missing item in my order",
+      slaDueAtIso: "2026-11-14T13:00:00.000Z",
+      resolvedAtIso: null,
+      createdAtIso: now.toISOString(),
+      updatedAtIso: now.toISOString(),
+    };
+
+    const inProgressCase = transitionSupportCaseStatus({
+      supportCase: baseCase,
+      targetStatus: "IN_PROGRESS",
+      assignedStaffId: "staff_support_01",
+      now,
+    });
+    assert.equal(inProgressCase.status, "IN_PROGRESS");
+    assert.equal(inProgressCase.assignedStaffId, "staff_support_01");
+
+    assert.throws(
+      () =>
+        transitionSupportCaseStatus({
+          supportCase: inProgressCase,
+          targetStatus: "OPEN",
+          now,
+        }),
+      /SUPPORT_CASE_INVALID_TRANSITION/
+    );
+
+    const messages = [
+      {
+        id: "msg_public",
+        caseId: "case_001",
+        senderId: "cust_001",
+        body: "My fries were missing.",
+        isInternalNote: false,
+        createdAtIso: now.toISOString(),
+      },
+      {
+        id: "msg_internal",
+        caseId: "case_001",
+        senderId: "staff_support_01",
+        body: "INTERNAL: Checked kitchen camera, fries were forgotten.",
+        isInternalNote: true,
+        createdAtIso: now.toISOString(),
+      },
+    ];
+    const attachments = [
+      {
+        id: "att_public",
+        caseId: "case_001",
+        messageId: "msg_public",
+        uploadedBy: "cust_001",
+        storageBucket: "support-attachments",
+        objectPath: "cases/case_001/bag.jpg",
+        mimeType: "image/jpeg",
+        byteSize: 42000,
+        sha256Hex: "abc",
+        isInternalOnly: false,
+        createdAtIso: now.toISOString(),
+      },
+      {
+        id: "att_internal",
+        caseId: "case_001",
+        messageId: "msg_internal",
+        uploadedBy: "staff_support_01",
+        storageBucket: "support-attachments",
+        objectPath: "cases/case_001/audit.pdf",
+        mimeType: "application/pdf",
+        byteSize: 84000,
+        sha256Hex: "def",
+        isInternalOnly: true,
+        createdAtIso: now.toISOString(),
+      },
+    ];
+
+    const customerView = filterSupportCaseViewForActor({
+      supportCase: inProgressCase,
+      messages,
+      attachments,
+      actionRequests: [],
+      isStaffActor: false,
+    });
+    assert.equal(customerView.messages.length, 1);
+    assert.equal(customerView.messages[0]?.id, "msg_public");
+    assert.equal(customerView.attachments.length, 1);
+    assert.equal(customerView.attachments[0]?.id, "att_public");
+
+    // 3. Support refund within threshold (<= 1500 cents) auto-approves
+    const withinThreshold = evaluateSupportActionRequest({
+      id: "act_1",
+      caseId: "case_001",
+      orderId: "ord_1001",
+      requestedByStaffId: "staff_support_01",
+      actionType: "PARTIAL_REFUND",
+      amountCents: 1200,
+      orderCapturedCents: 5476,
+      alreadyRefundedCents: 0,
+      autoApproveLimitCents: 1500,
+      reason: "Missing fries compensation within L1 threshold",
+      now,
+    });
+    assert.equal(withinThreshold.autoApproved, true);
+    assert.equal(withinThreshold.actionRequest.status, "APPROVED");
+    assert.equal(withinThreshold.nextCaseStatus, "RESOLVED");
+
+    // 4. Support refund above threshold (> 1500 cents) escalates to PENDING_FINANCE
+    const escalated = evaluateSupportActionRequest({
+      id: "act_2",
+      caseId: "case_001",
+      orderId: "ord_1001",
+      requestedByStaffId: "staff_support_01",
+      actionType: "PARTIAL_REFUND",
+      amountCents: 3500,
+      orderCapturedCents: 5476,
+      alreadyRefundedCents: 0,
+      autoApproveLimitCents: 1500,
+      reason: "Major missing item above L1 threshold",
+      now,
+    });
+    assert.equal(escalated.autoApproved, false);
+    assert.equal(escalated.actionRequest.status, "PENDING_FINANCE");
+    assert.equal(escalated.nextCaseStatus, "ESCALATED_FINANCE");
+
+    // 5. Finance decision requires aal2 and distinct staff actor (Segregation of Duties)
+    assert.throws(
+      () =>
+        decideEscalatedSupportActionRequest({
+          request: escalated.actionRequest,
+          decision: "APPROVED",
+          decidedByStaffId: "staff_support_01",
+          actorStaffRoles: ["finance"],
+          actorAal: "aal2",
+          decisionNotes: "Self-approval attempt",
+          now,
+        }),
+      /SEGREGATION_OF_DUTIES_VIOLATION/
+    );
+
+    const financeApproved = decideEscalatedSupportActionRequest({
+      request: escalated.actionRequest,
+      decision: "APPROVED",
+      decidedByStaffId: "staff_finance_02",
+      actorStaffRoles: ["finance"],
+      actorAal: "aal2",
+      decisionNotes: "Approved after verifying merchant ticket",
+      now,
+    });
+    assert.equal(financeApproved.status, "APPROVED");
+    assert.equal(financeApproved.decidedBy, "staff_finance_02");
   });
 });

@@ -50,7 +50,13 @@ import {
   type StoreOrdersQueueResponseContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportActionRequestContract,
+  type SupportAttachmentContract,
+  type SupportBackofficeOverviewContract,
   type SupportCaseContract,
+  type SupportCaseDetailResponseContract,
+  type SupportCaseStatus,
+  type SupportMessageContract,
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
@@ -875,6 +881,131 @@ export class IDeliveryApiClient {
     return this.request({
       path: "/fleets/overview",
       method: "GET",
+    });
+  }
+
+  public async getSupportBackofficeOverview(): Promise<{
+    data: SupportBackofficeOverviewContract;
+  }> {
+    return this.request({
+      path: "/support/overview",
+      method: "GET",
+    });
+  }
+
+  public async listSupportCases(params?: {
+    status?: SupportCaseStatus;
+  }): Promise<{ data: SupportCaseContract[] }> {
+    const qs = params?.status
+      ? `?status=${encodeURIComponent(params.status)}`
+      : "";
+    return this.request({
+      path: `/support/cases${qs}`,
+      method: "GET",
+    });
+  }
+
+  public async getSupportCaseDetail(
+    caseId: string
+  ): Promise<{ data: SupportCaseDetailResponseContract }> {
+    return this.request({
+      path: `/support/cases/${encodeURIComponent(caseId)}`,
+      method: "GET",
+    });
+  }
+
+  public async postSupportCaseMessage(params: {
+    caseId: string;
+    body: string;
+    isInternalNote?: boolean;
+    attachments?: ReadonlyArray<{
+      objectPath: string;
+      mimeType: string;
+      byteSize: number;
+      sha256Hex?: string;
+      isInternalOnly?: boolean;
+    }>;
+  }): Promise<{
+    data: {
+      message: SupportMessageContract;
+      attachments: SupportAttachmentContract[];
+    };
+  }> {
+    return this.request({
+      path: `/support/cases/${encodeURIComponent(params.caseId)}/messages`,
+      method: "POST",
+      body: {
+        body: params.body,
+        isInternalNote: params.isInternalNote ?? false,
+        attachments: params.attachments ?? [],
+      },
+    });
+  }
+
+  public async transitionSupportCaseStatus(params: {
+    caseId: string;
+    status: Exclude<SupportCaseStatus, "WAITING_USER">;
+    assignedStaffId?: string | null;
+    reason?: string;
+  }): Promise<{ data: SupportCaseContract }> {
+    return this.request({
+      path: `/support/cases/${encodeURIComponent(params.caseId)}/status`,
+      method: "POST",
+      body: {
+        status: params.status,
+        ...(params.assignedStaffId !== undefined
+          ? { assignedStaffId: params.assignedStaffId }
+          : {}),
+        ...(params.reason !== undefined ? { reason: params.reason } : {}),
+      },
+    });
+  }
+
+  public async createSupportActionRequest(params: {
+    caseId: string;
+    orderId?: string;
+    actionType: SupportActionRequestContract["actionType"];
+    amountCents: number;
+    reason: string;
+  }): Promise<{
+    data: {
+      actionRequest: SupportActionRequestContract;
+      autoApproved: boolean;
+      autoApproveLimitCents: number;
+      supportCase: SupportCaseContract | null;
+      refund: RefundRecordContract | null;
+    };
+  }> {
+    return this.request({
+      path: `/support/cases/${encodeURIComponent(params.caseId)}/action-requests`,
+      method: "POST",
+      body: {
+        ...(params.orderId ? { orderId: params.orderId } : {}),
+        actionType: params.actionType,
+        amountCents: params.amountCents,
+        reason: params.reason,
+      },
+    });
+  }
+
+  public async decideSupportActionRequest(params: {
+    requestId: string;
+    decision: "APPROVED" | "REJECTED";
+    decisionNotes: string;
+  }): Promise<{
+    data: {
+      actionRequest: SupportActionRequestContract;
+      supportCase: SupportCaseContract | null;
+      refund: RefundRecordContract | null;
+    };
+  }> {
+    return this.request({
+      path: `/support/action-requests/${encodeURIComponent(params.requestId)}/decide`,
+      method: "POST",
+      body: {
+        decision: params.decision,
+        decisionNotes: params.decisionNotes,
+      },
     });
   }
 }

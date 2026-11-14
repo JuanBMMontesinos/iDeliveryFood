@@ -1173,4 +1173,98 @@ ON CONFLICT (id) DO UPDATE SET
   decision = EXCLUDED.decision,
   is_test_data = true;
 
+-- Fase N (M17): Internal support notes, escalated case, pending finance action request, and support_attachments
+INSERT INTO public.support_messages (
+  id, case_id, sender_id, body, is_internal_note, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001725',
+  '00000000-0000-4000-8000-000000001501',
+  '00000000-0000-4000-8000-000000000090',
+  'INTERNAL L1 NOTE: Verified GPS trace and store prep timestamp; eligible for courtesy R$ 5,00 refund.',
+  true,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  body = EXCLUDED.body,
+  is_internal_note = EXCLUDED.is_internal_note,
+  is_test_data = true;
+
+INSERT INTO public.support_cases (
+  id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id, requester_role,
+  assigned_staff_id, category, priority, status, subject, sla_due_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001502',
+  5002,
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000001201',
+  '00000000-0000-4000-8000-000000000101',
+  '00000000-0000-4000-8000-000000000201',
+  '00000000-0000-4000-8000-000000000001',
+  'CUSTOMER',
+  '00000000-0000-4000-8000-000000000090',
+  'MISSING_ITEM',
+  'HIGH',
+  'ESCALATED_FINANCE',
+  'Missing double smash patty on order #1001',
+  '2026-11-15T18:00:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  priority = EXCLUDED.priority,
+  is_test_data = true;
+
+INSERT INTO public.support_action_requests (
+  id, case_id, order_id, requested_by, action_type, amount_cents, reason, status, decided_by, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001726',
+  '00000000-0000-4000-8000-000000001502',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000090',
+  'PARTIAL_REFUND',
+  3500,
+  'Refund exceeds L1 auto-approval limit (R$ 15,00); escalated to finance officer.',
+  'PENDING_FINANCE',
+  NULL,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  amount_cents = EXCLUDED.amount_cents,
+  is_test_data = true;
+
+INSERT INTO public.support_attachments (
+  id, case_id, message_id, uploaded_by, storage_bucket, object_path, mime_type, byte_size, sha256_hex, is_internal_only, is_test_data
+) VALUES
+(
+  '00000000-0000-4000-8000-000000001727',
+  '00000000-0000-4000-8000-000000001501',
+  '00000000-0000-4000-8000-000000001718',
+  '00000000-0000-4000-8000-000000000001',
+  'support-attachments',
+  'cases/00000000-0000-4000-8000-000000001501/intercom-photo.jpg',
+  'image/jpeg',
+  184320,
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  false,
+  true
+),
+(
+  '00000000-0000-4000-8000-000000001728',
+  '00000000-0000-4000-8000-000000001501',
+  '00000000-0000-4000-8000-000000001725',
+  '00000000-0000-4000-8000-000000000090',
+  'support-attachments',
+  'cases/00000000-0000-4000-8000-000000001501/internal-telemetry-audit.pdf',
+  'application/pdf',
+  92160,
+  'a1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123',
+  true,
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  object_path = EXCLUDED.object_path,
+  is_internal_only = EXCLUDED.is_internal_only,
+  is_test_data = true;
+
 COMMIT;

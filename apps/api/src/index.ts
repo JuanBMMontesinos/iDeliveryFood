@@ -63,7 +63,14 @@ import {
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportActionRequestContract,
+  type SupportAttachmentContract,
+  type SupportBackofficeOverviewContract,
   type SupportCaseContract,
+  type SupportCaseDetailResponseContract,
+  type SupportCaseStatus,
+  type SupportMessageContract,
+  type SupportPriority,
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
@@ -73,8 +80,10 @@ import {
   assertExternalProviderReady,
   buildKitchenOrderQueue,
   calculateServerQuoteAndSplit,
+  computeSupportSlaDueAt,
   createBankAccountChangeRequest,
   createOrderFromServerQuote,
+  decideEscalatedSupportActionRequest,
   evaluateAccountDeletionRequest,
   evaluateAdminGovernanceDecision,
   evaluateCourierLocationSample,
@@ -84,14 +93,18 @@ import {
   evaluateSettlementPayoutExecution,
   evaluateStaffScopeGrant,
   evaluateStoreAvailability,
+  evaluateSupportActionRequest,
   executeOrderCommand,
+  filterSupportCaseViewForActor,
   hashDeliveryConfirmationCode,
+  transitionSupportCaseStatus,
   validateAndBuildQuoteItems,
   validateStoreSettingsPatch,
   verifyAndProcessPspWebhook,
   verifyDeliveryConfirmationCode,
   type OrderCommandType,
   type QuoteItemInput,
+  type SupportActionType,
 } from "@ideliveryfood/domain";
 import {
   resolveRequestActor,
@@ -394,6 +407,31 @@ export interface ApiDataRepository {
   getFinanceBackofficeOverview?(): Promise<FinanceBackofficeOverviewContract>;
   getLogisticsBackofficeOverview?(): Promise<LogisticsBackofficeOverviewContract>;
   getFleetsBackofficeOverview?(): Promise<FleetsBackofficeOverviewContract>;
+  listSupportCasesForActor?(params: {
+    actorId: string;
+    isStaffActor: boolean;
+    storeIds: readonly string[];
+    statusFilter?: string;
+  }): Promise<SupportCaseContract[]>;
+  getSupportCaseDetail?(caseId: string): Promise<SupportCaseDetailResponseContract | null>;
+  updateSupportCaseStatus?(params: {
+    caseId: string;
+    status: SupportCaseStatus;
+    assignedStaffId?: string | null;
+    resolvedAtIso?: string | null;
+  }): Promise<SupportCaseContract | null>;
+  createSupportMessage?(params: {
+    message: SupportMessageContract;
+    attachments?: SupportAttachmentContract[];
+  }): Promise<{
+    message: SupportMessageContract;
+    attachments: SupportAttachmentContract[];
+  }>;
+  getSupportAutoRefundLimitCents?(): Promise<number>;
+  createSupportActionRequest?(req: SupportActionRequestContract): Promise<SupportActionRequestContract>;
+  getSupportActionRequestById?(requestId: string): Promise<SupportActionRequestContract | null>;
+  updateSupportActionRequestDecision?(req: SupportActionRequestContract): Promise<SupportActionRequestContract>;
+  getSupportBackofficeOverview?(): Promise<SupportBackofficeOverviewContract>;
 }
 
 /**
@@ -5003,6 +5041,792 @@ export function createApiServer(deps: {
             };
         sendJson(res, 200, correlationId, { data: fleetsOverview });
         return;
+      }
+
+      // 41. Fase N: GET /v1/support/overview (M17 — Support Backoffice Console requiring support/operations/finance/risk_compliance/tech_admin)
+      if (method === "GET" && pathname === "/v1/support/overview") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "support",
+            "support_l1",
+            "support_l2",
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ],
+          requireMfaAal2: false,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Support Backoffice Console requires an authorized support, operations, finance, or tech_admin staff role.",
+            correlationId
+          );
+          return;
+        }
+        const overview = deps.repository.getSupportBackofficeOverview
+          ? await deps.repository.getSupportBackofficeOverview()
+          : {
+              autoRefundLimitCents: 1500,
+              cases: [],
+              messages: [],
+              attachments: [],
+              actionRequests: [],
+            };
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 42. Fase N: GET /v1/support/cases & POST /v1/support/cases (M17 — Scoped case list & SLA-calculated case creation)
+      if (pathname === "/v1/support/cases") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+
+        const isStaffActor = actor.staffScopes.some((s) =>
+          [
+            "support",
+            "support_l1",
+            "support_l2",
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ].includes(s.role)
+        );
+
+        if (method === "GET") {
+          const statusFilter = parsedUrl.searchParams.get("status") ?? undefined;
+          const storeIds = actor.organizationMemberships
+            .map((m) => m.storeId)
+            .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+          const cases = deps.repository.listSupportCasesForActor
+            ? await deps.repository.listSupportCasesForActor({
+                actorId: actor.id,
+                isStaffActor,
+                storeIds,
+                ...(statusFilter ? { statusFilter } : {}),
+              })
+            : [];
+          sendJson(res, 200, correlationId, { data: cases });
+          return;
+        }
+
+        if (method === "POST") {
+          const { json: body } = await readRawAndJsonBody(req);
+          const subject = String(body.subject ?? "").trim();
+          if (subject.length < 3) {
+            sendError(
+              res,
+              400,
+              "VALIDATION_ERROR",
+              "Support case subject of at least 3 characters is required.",
+              correlationId
+            );
+            return;
+          }
+
+          const category = String(body.category ?? "ORDER_ISSUE").trim().toUpperCase();
+          const rawPriority = String(body.priority ?? "MEDIUM").trim().toUpperCase();
+          const requestedPriority = (
+            ["LOW", "MEDIUM", "HIGH", "CRITICAL_IN_ROUTE"].includes(rawPriority)
+              ? rawPriority
+              : rawPriority === "CRITICAL"
+                ? "CRITICAL_IN_ROUTE"
+                : "MEDIUM"
+          ) as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL_IN_ROUTE";
+
+          const sla = computeSupportSlaDueAt({
+            priority: requestedPriority,
+            category,
+          });
+
+          const rawRequesterRole = String(body.requesterRole ?? "").toUpperCase();
+          const requesterRole: "CUSTOMER" | "PARTNER" | "COURIER" =
+            rawRequesterRole === "PARTNER" || rawRequesterRole === "COURIER"
+              ? rawRequesterRole
+              : actor.organizationMemberships.length > 0
+                ? "PARTNER"
+                : "CUSTOMER";
+
+          const orderId = body.orderId ? String(body.orderId) : null;
+          const deliveryTaskId = body.deliveryTaskId ? String(body.deliveryTaskId) : null;
+          let organizationId = body.organizationId ? String(body.organizationId) : null;
+          let storeId = body.storeId ? String(body.storeId) : null;
+
+          if (orderId && (!organizationId || !storeId)) {
+            const linkedOrder = await deps.repository.getOrderById(orderId);
+            if (linkedOrder) {
+              organizationId = organizationId ?? linkedOrder.organizationId;
+              storeId = storeId ?? linkedOrder.storeId;
+            }
+          }
+
+          if (!deps.repository.createSupportCase) {
+            sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+            return;
+          }
+
+          const nowIso = new Date().toISOString();
+          const createdCase = await deps.repository.createSupportCase({
+            id: crypto.randomUUID(),
+            orderId,
+            deliveryTaskId,
+            organizationId,
+            storeId,
+            requesterId: actor.id,
+            requesterRole,
+            assignedStaffId: null,
+            category,
+            priority: sla.effectivePriority,
+            status: "OPEN",
+            subject,
+            slaDueAtIso: sla.slaDueAtIso,
+            resolvedAtIso: null,
+            createdAtIso: nowIso,
+            updatedAtIso: nowIso,
+          });
+
+          if (body.initialMessage && String(body.initialMessage).trim().length > 0 && deps.repository.createSupportMessage) {
+            await deps.repository.createSupportMessage({
+              message: {
+                id: crypto.randomUUID(),
+                caseId: createdCase.id,
+                senderId: actor.id,
+                body: String(body.initialMessage).trim(),
+                isInternalNote: false,
+                createdAtIso: nowIso,
+              },
+            });
+          }
+
+          sendJson(res, 201, correlationId, { data: createdCase });
+          return;
+        }
+      }
+
+      // 43. Fase N: GET /v1/support/cases/:caseId (M17 — Strict actor visibility & internal note stripping)
+      const supportCaseDetailMatch = pathname.match(/^\/v1\/support\/cases\/([^/]+)$/);
+      if (method === "GET" && supportCaseDetailMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const caseId = supportCaseDetailMatch[1] ?? "";
+        if (!deps.repository.getSupportCaseDetail) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+          return;
+        }
+
+        const detail = await deps.repository.getSupportCaseDetail(caseId);
+        if (!detail) {
+          sendError(res, 404, "SUPPORT_CASE_NOT_FOUND", `Support case ${caseId} not found.`, correlationId);
+          return;
+        }
+
+        const isStaffActor = actor.staffScopes.some((s) =>
+          [
+            "support",
+            "support_l1",
+            "support_l2",
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ].includes(s.role)
+        );
+        const isRequester = detail.supportCase.requesterId === actor.id;
+        const isStoreMember = actor.organizationMemberships.some(
+          (m) =>
+            (detail.supportCase.storeId !== null && m.storeId === detail.supportCase.storeId) ||
+            (m.storeId === null &&
+              detail.supportCase.organizationId !== null &&
+              m.organizationId === detail.supportCase.organizationId)
+        );
+
+        if (!isStaffActor && !isRequester && !isStoreMember) {
+          sendError(
+            res,
+            403,
+            "SUPPORT_CASE_ACCESS_DENIED",
+            "You do not have permission to view this support case.",
+            correlationId
+          );
+          return;
+        }
+
+        const filtered = filterSupportCaseViewForActor({
+          supportCase: {
+            ...detail.supportCase,
+            deliveryTaskId: detail.supportCase.deliveryTaskId ?? null,
+            assignedStaffId: detail.supportCase.assignedStaffId ?? null,
+            resolvedAtIso: detail.supportCase.resolvedAtIso ?? null,
+            updatedAtIso: detail.supportCase.updatedAtIso ?? detail.supportCase.createdAtIso,
+            priority:
+              detail.supportCase.priority === "CRITICAL"
+                ? "CRITICAL_IN_ROUTE"
+                : detail.supportCase.priority,
+            status:
+              detail.supportCase.status === "WAITING_USER"
+                ? "WAITING_CUSTOMER"
+                : detail.supportCase.status,
+          },
+          messages: detail.messages,
+          attachments: detail.attachments,
+          actionRequests: detail.actionRequests.map((ar) => ({
+            ...ar,
+            decidedAtIso: ar.decidedAtIso ?? null,
+            decisionNotes: ar.decisionNotes ?? null,
+          })),
+          isStaffActor,
+        });
+
+        sendJson(res, 200, correlationId, { data: filtered });
+        return;
+      }
+
+      // 44. Fase N: POST /v1/support/cases/:caseId/messages (M17 — Messages, internal notes & attachments)
+      const supportMessageMatch = pathname.match(/^\/v1\/support\/cases\/([^/]+)\/messages$/);
+      if (method === "POST" && supportMessageMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const caseId = supportMessageMatch[1] ?? "";
+        if (!deps.repository.getSupportCaseDetail || !deps.repository.createSupportMessage) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+          return;
+        }
+
+        const detail = await deps.repository.getSupportCaseDetail(caseId);
+        if (!detail) {
+          sendError(res, 404, "SUPPORT_CASE_NOT_FOUND", `Support case ${caseId} not found.`, correlationId);
+          return;
+        }
+
+        const isStaffActor = actor.staffScopes.some((s) =>
+          [
+            "support",
+            "support_l1",
+            "support_l2",
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ].includes(s.role)
+        );
+        const isRequester = detail.supportCase.requesterId === actor.id;
+        const isStoreMember = actor.organizationMemberships.some(
+          (m) =>
+            (detail.supportCase.storeId !== null && m.storeId === detail.supportCase.storeId) ||
+            (m.storeId === null &&
+              detail.supportCase.organizationId !== null &&
+              m.organizationId === detail.supportCase.organizationId)
+        );
+
+        if (!isStaffActor && !isRequester && !isStoreMember) {
+          sendError(res, 403, "SUPPORT_CASE_ACCESS_DENIED", "Access denied.", correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const messageBody = String(body.body ?? "").trim();
+        if (messageBody.length === 0) {
+          sendError(res, 400, "VALIDATION_ERROR", "Message body cannot be empty.", correlationId);
+          return;
+        }
+
+        const isInternalNote = Boolean(body.isInternalNote ?? false);
+        if (isInternalNote && !isStaffActor) {
+          sendError(
+            res,
+            403,
+            "FORBIDDEN_INTERNAL_NOTE",
+            "Only internal platform staff can author internal support notes.",
+            correlationId
+          );
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const messageId = crypto.randomUUID();
+        const rawAttachments = Array.isArray(body.attachments)
+          ? (body.attachments as Array<Record<string, unknown>>)
+          : [];
+
+        const attachments: SupportAttachmentContract[] = rawAttachments.map((att) => ({
+          id: crypto.randomUUID(),
+          caseId: detail.supportCase.id,
+          messageId,
+          uploadedBy: actor.id,
+          storageBucket: "support-attachments",
+          objectPath: String(att.objectPath ?? `cases/${detail.supportCase.id}/${crypto.randomUUID()}.bin`),
+          mimeType: String(att.mimeType ?? "application/octet-stream"),
+          byteSize: Math.max(1, Number(att.byteSize ?? 1024)),
+          sha256Hex: String(
+            att.sha256Hex ??
+              crypto.createHash("sha256").update(messageBody).digest("hex")
+          ),
+          isInternalOnly: isStaffActor ? Boolean(att.isInternalOnly ?? isInternalNote) : false,
+          createdAtIso: nowIso,
+        }));
+
+        const saved = await deps.repository.createSupportMessage({
+          message: {
+            id: messageId,
+            caseId: detail.supportCase.id,
+            senderId: actor.id,
+            body: messageBody,
+            isInternalNote,
+            createdAtIso: nowIso,
+          },
+          attachments,
+        });
+
+        sendJson(res, 201, correlationId, { data: saved });
+        return;
+      }
+
+      // 45. Fase N: POST /v1/support/cases/:caseId/status (M17 — Support Case State Machine Transitions)
+      const supportStatusMatch = pathname.match(/^\/v1\/support\/cases\/([^/]+)\/status$/);
+      if (method === "POST" && supportStatusMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: [
+            "support",
+            "support_l1",
+            "support_l2",
+            "operations",
+            "finance",
+            "risk_compliance",
+            "tech_admin",
+          ],
+          requireMfaAal2: false,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Only authorized support or operations staff can transition support case status.",
+            correlationId
+          );
+          return;
+        }
+
+        const caseId = supportStatusMatch[1] ?? "";
+        if (!deps.repository.getSupportCaseDetail || !deps.repository.updateSupportCaseStatus) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+          return;
+        }
+
+        const detail = await deps.repository.getSupportCaseDetail(caseId);
+        if (!detail) {
+          sendError(res, 404, "SUPPORT_CASE_NOT_FOUND", `Support case ${caseId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const targetStatus = String(body.status ?? "") as Exclude<SupportCaseStatus, "WAITING_USER">;
+
+        try {
+          const transitioned = transitionSupportCaseStatus({
+            supportCase: {
+              ...detail.supportCase,
+              deliveryTaskId: detail.supportCase.deliveryTaskId ?? null,
+              assignedStaffId: detail.supportCase.assignedStaffId ?? null,
+              resolvedAtIso: detail.supportCase.resolvedAtIso ?? null,
+              updatedAtIso: detail.supportCase.updatedAtIso ?? detail.supportCase.createdAtIso,
+              priority:
+                detail.supportCase.priority === "CRITICAL"
+                  ? "CRITICAL_IN_ROUTE"
+                  : detail.supportCase.priority,
+              status:
+                detail.supportCase.status === "WAITING_USER"
+                  ? "WAITING_CUSTOMER"
+                  : detail.supportCase.status,
+            },
+            targetStatus,
+            assignedStaffId:
+              body.assignedStaffId !== undefined
+                ? body.assignedStaffId
+                  ? String(body.assignedStaffId)
+                  : null
+                : actor.id,
+          });
+
+          const updated = await deps.repository.updateSupportCaseStatus({
+            caseId: detail.supportCase.id,
+            status: transitioned.status,
+            assignedStaffId: transitioned.assignedStaffId,
+            resolvedAtIso: transitioned.resolvedAtIso,
+          });
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "SUPPORT_CASE_STATUS_TRANSITIONED",
+            targetType: "SUPPORT_CASE",
+            targetId: detail.supportCase.id,
+            correlationId,
+            reason: body.reason ? String(body.reason) : `Transitioned to ${transitioned.status}`,
+            redactedPayload: {
+              previousStatus: detail.supportCase.status,
+              newStatus: transitioned.status,
+              assignedStaffId: transitioned.assignedStaffId,
+            },
+            createdAt: new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, { data: updated ?? transitioned });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Invalid support case transition";
+          sendError(res, 409, msg.split(":")[0] ?? "SUPPORT_CASE_INVALID_TRANSITION", msg, correlationId);
+          return;
+        }
+      }
+
+      // 46. Fase N: POST /v1/support/cases/:caseId/action-requests (M17 — Support Refund/Compensation with Auto-Approval Threshold)
+      const supportActionReqMatch = pathname.match(
+        /^\/v1\/support\/cases\/([^/]+)\/action-requests$/
+      );
+      if (method === "POST" && supportActionReqMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const staffDecision = authorizeStaffAction({
+          actor,
+          allowedRoles: ["support", "support_l1", "support_l2", "operations", "finance", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!staffDecision.allowed) {
+          sendError(
+            res,
+            403,
+            staffDecision.reasonCode,
+            "Only authorized support, operations, finance, or tech_admin staff can request support refunds.",
+            correlationId
+          );
+          return;
+        }
+
+        const caseId = supportActionReqMatch[1] ?? "";
+        if (
+          !deps.repository.getSupportCaseDetail ||
+          !deps.repository.createSupportActionRequest ||
+          !deps.repository.updateSupportCaseStatus
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+          return;
+        }
+
+        const detail = await deps.repository.getSupportCaseDetail(caseId);
+        if (!detail) {
+          sendError(res, 404, "SUPPORT_CASE_NOT_FOUND", `Support case ${caseId} not found.`, correlationId);
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const orderId = body.orderId
+          ? String(body.orderId)
+          : (detail.supportCase.orderId ?? "");
+        if (!orderId) {
+          sendError(
+            res,
+            400,
+            "SUPPORT_ORDER_REQUIRED",
+            "An orderId is required to request a refund or compensation.",
+            correlationId
+          );
+          return;
+        }
+
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          return;
+        }
+
+        const existingRefunds = await deps.repository.listRefundsByOrder(order.id);
+        const alreadyRefundedCents = existingRefunds.reduce(
+          (sum, r) => sum + r.amountCents,
+          0
+        );
+        const autoApproveLimitCents = deps.repository.getSupportAutoRefundLimitCents
+          ? await deps.repository.getSupportAutoRefundLimitCents()
+          : 1500;
+
+        try {
+          const rawActionType = String(body.actionType ?? "PARTIAL_REFUND").toUpperCase();
+          const actionType: SupportActionType =
+            rawActionType === "FULL_REFUND" || rawActionType === "COURIER_COMPENSATION"
+              ? rawActionType
+              : "PARTIAL_REFUND";
+
+          const evaluation = evaluateSupportActionRequest({
+            id: crypto.randomUUID(),
+            caseId: detail.supportCase.id,
+            orderId: order.id,
+            requestedByStaffId: actor.id,
+            actionType,
+            amountCents: Number(body.amountCents ?? 0),
+            orderCapturedCents: order.totalCents,
+            alreadyRefundedCents,
+            autoApproveLimitCents,
+            reason: String(body.reason ?? ""),
+          });
+
+          const savedRequest = await deps.repository.createSupportActionRequest(
+            evaluation.actionRequest
+          );
+          const updatedCase = await deps.repository.updateSupportCaseStatus({
+            caseId: detail.supportCase.id,
+            status: evaluation.nextCaseStatus,
+            assignedStaffId: actor.id,
+            resolvedAtIso:
+              evaluation.nextCaseStatus === "RESOLVED"
+                ? evaluation.actionRequest.createdAtIso
+                : null,
+          });
+
+          let createdRefund: RefundRecordContract | null = null;
+          if (
+            evaluation.autoApproved &&
+            (actionType === "PARTIAL_REFUND" || actionType === "FULL_REFUND")
+          ) {
+            const totalAfter = alreadyRefundedCents + evaluation.actionRequest.amountCents;
+            const nextPaymentStatus =
+              totalAfter >= order.totalCents ? "REFUNDED" : "PARTIALLY_REFUNDED";
+            const refundToSave: RefundRecordContract = {
+              id: crypto.randomUUID(),
+              orderId: order.id,
+              paymentAttemptId: `pay_attempt_${order.id}`,
+              requestedBy: actor.id,
+              approvedBy: actor.id,
+              amountCents: evaluation.actionRequest.amountCents,
+              reason: evaluation.actionRequest.reason,
+              status: "PROCESSED",
+              idempotencyKey: `support_auto_refund_${savedRequest.id}`,
+              createdAtIso: savedRequest.createdAtIso,
+            };
+            await deps.repository.saveRefundAndUpdateOrder(refundToSave, {
+              ...order,
+              paymentStatus: nextPaymentStatus,
+              orderStatus:
+                nextPaymentStatus === "REFUNDED" ? "REFUNDED" : order.orderStatus,
+              version: order.version + 1,
+              updatedAtIso: savedRequest.createdAtIso,
+            });
+            createdRefund = refundToSave;
+          }
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: evaluation.autoApproved
+              ? "SUPPORT_ACTION_AUTO_APPROVED"
+              : "SUPPORT_ACTION_ESCALATED_FINANCE",
+            targetType: "SUPPORT_ACTION_REQUEST",
+            targetId: savedRequest.id,
+            correlationId,
+            reason: savedRequest.reason,
+            redactedPayload: {
+              caseId: detail.supportCase.id,
+              orderId: order.id,
+              actionType: savedRequest.actionType,
+              amountCents: savedRequest.amountCents,
+              autoApproveLimitCents,
+              status: savedRequest.status,
+            },
+            createdAt: savedRequest.createdAtIso,
+          });
+
+          sendJson(res, 201, correlationId, {
+            data: {
+              actionRequest: savedRequest,
+              autoApproved: evaluation.autoApproved,
+              autoApproveLimitCents,
+              supportCase: updatedCase,
+              refund: createdRefund,
+            },
+          });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Invalid support action request";
+          sendError(res, 400, msg.split(":")[0] ?? "SUPPORT_ACTION_ERROR", msg, correlationId);
+          return;
+        }
+      }
+
+      // 47. Fase N: POST /v1/support/action-requests/:requestId/decide (M17/M13 — Finance MFA aal2 + Segregation of Duties)
+      const supportActionDecideMatch = pathname.match(
+        /^\/v1\/support\/action-requests\/([^/]+)\/decide$/
+      );
+      if (method === "POST" && supportActionDecideMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const requestId = supportActionDecideMatch[1] ?? "";
+        if (
+          !deps.repository.getSupportActionRequestById ||
+          !deps.repository.updateSupportActionRequestDecision ||
+          !deps.repository.updateSupportCaseStatus
+        ) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Support repository not configured.", correlationId);
+          return;
+        }
+
+        const existingReq = await deps.repository.getSupportActionRequestById(requestId);
+        if (!existingReq) {
+          sendError(
+            res,
+            404,
+            "SUPPORT_ACTION_REQUEST_NOT_FOUND",
+            `Support action request ${requestId} not found.`,
+            correlationId
+          );
+          return;
+        }
+
+        const { json: body } = await readRawAndJsonBody(req);
+        const rawDecision = String(body.decision ?? "").toUpperCase();
+        const decision: "APPROVED" | "REJECTED" =
+          rawDecision === "REJECTED" ? "REJECTED" : "APPROVED";
+
+        try {
+          const decided = decideEscalatedSupportActionRequest({
+            request: {
+              ...existingReq,
+              decidedAtIso: existingReq.decidedAtIso ?? null,
+              decisionNotes: existingReq.decisionNotes ?? null,
+            },
+            decision,
+            decidedByStaffId: actor.id,
+            actorStaffRoles: actor.staffScopes.map((s) => s.role),
+            actorAal: actor.aal,
+            decisionNotes: String(body.decisionNotes ?? ""),
+          });
+
+          const savedDecision =
+            await deps.repository.updateSupportActionRequestDecision(decided);
+
+          let createdRefund: RefundRecordContract | null = null;
+          if (
+            savedDecision.status === "APPROVED" &&
+            (savedDecision.actionType === "PARTIAL_REFUND" ||
+              savedDecision.actionType === "FULL_REFUND")
+          ) {
+            const order = await deps.repository.getOrderById(savedDecision.orderId);
+            if (order) {
+              const existingRefunds = await deps.repository.listRefundsByOrder(order.id);
+              const alreadyRefundedCents = existingRefunds.reduce(
+                (sum, r) => sum + r.amountCents,
+                0
+              );
+              const totalAfter = alreadyRefundedCents + savedDecision.amountCents;
+              const nextPaymentStatus =
+                totalAfter >= order.totalCents ? "REFUNDED" : "PARTIALLY_REFUNDED";
+              const refundToSave: RefundRecordContract = {
+                id: crypto.randomUUID(),
+                orderId: order.id,
+                paymentAttemptId: `pay_attempt_${order.id}`,
+                requestedBy: savedDecision.requestedBy,
+                approvedBy: actor.id,
+                amountCents: savedDecision.amountCents,
+                reason: savedDecision.reason,
+                status: "PROCESSED",
+                idempotencyKey: `support_finance_refund_${savedDecision.id}`,
+                createdAtIso: savedDecision.decidedAtIso ?? new Date().toISOString(),
+              };
+              await deps.repository.saveRefundAndUpdateOrder(refundToSave, {
+                ...order,
+                paymentStatus: nextPaymentStatus,
+                orderStatus:
+                  nextPaymentStatus === "REFUNDED" ? "REFUNDED" : order.orderStatus,
+                version: order.version + 1,
+                updatedAtIso: refundToSave.createdAtIso,
+              });
+              createdRefund = refundToSave;
+            }
+          }
+
+          const nextCaseStatus: SupportCaseStatus =
+            savedDecision.status === "APPROVED" ? "RESOLVED" : "IN_PROGRESS";
+          const updatedCase = await deps.repository.updateSupportCaseStatus({
+            caseId: savedDecision.caseId,
+            status: nextCaseStatus,
+            resolvedAtIso:
+              nextCaseStatus === "RESOLVED"
+                ? (savedDecision.decidedAtIso ?? new Date().toISOString())
+                : null,
+          });
+
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: `SUPPORT_ACTION_FINANCE_${savedDecision.status}`,
+            targetType: "SUPPORT_ACTION_REQUEST",
+            targetId: savedDecision.id,
+            correlationId,
+            reason: savedDecision.decisionNotes ?? savedDecision.reason,
+            redactedPayload: {
+              caseId: savedDecision.caseId,
+              orderId: savedDecision.orderId,
+              amountCents: savedDecision.amountCents,
+              requestedBy: savedDecision.requestedBy,
+              decidedBy: savedDecision.decidedBy,
+              status: savedDecision.status,
+            },
+            createdAt: savedDecision.decidedAtIso ?? new Date().toISOString(),
+          });
+
+          sendJson(res, 200, correlationId, {
+            data: {
+              actionRequest: savedDecision,
+              supportCase: updatedCase,
+              refund: createdRefund,
+            },
+          });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unable to decide support action request";
+          const code = msg.split(":")[0] ?? "SUPPORT_DECISION_ERROR";
+          const statusCode =
+            code.includes("MFA") || code.includes("ROLE") || code.includes("SEGREGATION")
+              ? 403
+              : 400;
+          sendError(res, statusCode, code, msg, correlationId);
+          return;
+        }
       }
 
       sendError(

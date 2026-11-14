@@ -2096,3 +2096,353 @@ export function evaluateFleetOperatorAccess(params: {
   }
   return { allowed: true, reasonCode: "ALLOWED" };
 }
+
+// ============================================================================
+// M17: Customer/Partner/Courier Support, SLA, Internal Notes & Refund Thresholds
+// ============================================================================
+
+export type SupportCaseStatus =
+  | "OPEN"
+  | "IN_PROGRESS"
+  | "WAITING_CUSTOMER"
+  | "WAITING_PARTNER"
+  | "AWAITING_ACTION_APPROVAL"
+  | "ESCALATED_FINANCE"
+  | "ESCALATED_LOGISTICS"
+  | "RESOLVED"
+  | "CLOSED";
+
+export type SupportPriority = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL_IN_ROUTE";
+
+export type SupportRequesterRole = "CUSTOMER" | "PARTNER" | "COURIER";
+
+export type SupportActionType = "PARTIAL_REFUND" | "FULL_REFUND" | "COURIER_COMPENSATION";
+
+export interface SupportCaseContract {
+  id: string;
+  caseNumber: number;
+  orderId: string | null;
+  deliveryTaskId: string | null;
+  organizationId: string | null;
+  storeId: string | null;
+  requesterId: string;
+  requesterRole: SupportRequesterRole;
+  assignedStaffId: string | null;
+  category: string;
+  priority: SupportPriority;
+  status: SupportCaseStatus;
+  subject: string;
+  slaDueAtIso: string;
+  resolvedAtIso: string | null;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface SupportMessageContract {
+  id: string;
+  caseId: string;
+  senderId: string;
+  body: string;
+  isInternalNote: boolean;
+  createdAtIso: string;
+}
+
+export interface SupportAttachmentContract {
+  id: string;
+  caseId: string;
+  messageId: string | null;
+  uploadedBy: string;
+  storageBucket: string;
+  objectPath: string;
+  mimeType: string;
+  byteSize: number;
+  sha256Hex: string;
+  isInternalOnly: boolean;
+  createdAtIso: string;
+}
+
+export interface SupportActionRequestContract {
+  id: string;
+  caseId: string;
+  orderId: string;
+  requestedBy: string;
+  actionType: SupportActionType;
+  amountCents: number;
+  reason: string;
+  status: "PENDING_FINANCE" | "APPROVED" | "REJECTED";
+  decidedBy: string | null;
+  decidedAtIso: string | null;
+  decisionNotes: string | null;
+  createdAtIso: string;
+}
+
+const SUPPORT_CASE_TRANSITIONS: Record<SupportCaseStatus, readonly SupportCaseStatus[]> = {
+  OPEN: [
+    "IN_PROGRESS",
+    "WAITING_CUSTOMER",
+    "WAITING_PARTNER",
+    "AWAITING_ACTION_APPROVAL",
+    "ESCALATED_FINANCE",
+    "ESCALATED_LOGISTICS",
+    "RESOLVED",
+  ],
+  IN_PROGRESS: [
+    "WAITING_CUSTOMER",
+    "WAITING_PARTNER",
+    "AWAITING_ACTION_APPROVAL",
+    "ESCALATED_FINANCE",
+    "ESCALATED_LOGISTICS",
+    "RESOLVED",
+  ],
+  WAITING_CUSTOMER: [
+    "IN_PROGRESS",
+    "ESCALATED_FINANCE",
+    "ESCALATED_LOGISTICS",
+    "RESOLVED",
+    "CLOSED",
+  ],
+  WAITING_PARTNER: [
+    "IN_PROGRESS",
+    "ESCALATED_FINANCE",
+    "ESCALATED_LOGISTICS",
+    "RESOLVED",
+    "CLOSED",
+  ],
+  AWAITING_ACTION_APPROVAL: [
+    "IN_PROGRESS",
+    "ESCALATED_FINANCE",
+    "RESOLVED",
+  ],
+  ESCALATED_FINANCE: ["IN_PROGRESS", "RESOLVED", "CLOSED"],
+  ESCALATED_LOGISTICS: ["IN_PROGRESS", "RESOLVED", "CLOSED"],
+  RESOLVED: ["IN_PROGRESS", "CLOSED"],
+  CLOSED: [],
+};
+
+/**
+ * Computes the deterministic SLA deadline (`slaDueAtIso`) based on ticket priority and category (M17).
+ */
+export function computeSupportSlaDueAt(params: {
+  priority: SupportPriority;
+  category: string;
+  createdAt?: Date;
+}): {
+  slaMinutes: number;
+  slaDueAtIso: string;
+  effectivePriority: SupportPriority;
+} {
+  const createdAt = params.createdAt ?? new Date();
+  const normalizedCategory = params.category.trim().toUpperCase();
+
+  let effectivePriority: SupportPriority = params.priority;
+  if (normalizedCategory === "ROUTE_INCIDENT" || normalizedCategory === "ACCIDENT_IN_ROUTE") {
+    effectivePriority = "CRITICAL_IN_ROUTE";
+  } else if (
+    (normalizedCategory === "MISSING_ITEM" || normalizedCategory === "INCORRECT_CHARGE") &&
+    effectivePriority === "LOW"
+  ) {
+    effectivePriority = "HIGH";
+  }
+
+  const slaMinutesByPriority: Record<SupportPriority, number> = {
+    CRITICAL_IN_ROUTE: 15,
+    HIGH: 60,
+    MEDIUM: 240,
+    LOW: 1440,
+  };
+
+  const slaMinutes = slaMinutesByPriority[effectivePriority];
+  const slaDueAtIso = new Date(createdAt.getTime() + slaMinutes * 60 * 1000).toISOString();
+
+  return {
+    slaMinutes,
+    slaDueAtIso,
+    effectivePriority,
+  };
+}
+
+/**
+ * Validates and executes a support case status transition (M17).
+ */
+export function transitionSupportCaseStatus(params: {
+  supportCase: SupportCaseContract;
+  targetStatus: SupportCaseStatus;
+  assignedStaffId?: string | null;
+  now?: Date;
+}): SupportCaseContract {
+  const allowed = SUPPORT_CASE_TRANSITIONS[params.supportCase.status] ?? [];
+  if (!allowed.includes(params.targetStatus)) {
+    throw new Error(
+      `SUPPORT_CASE_INVALID_TRANSITION: Cannot transition support case from ${params.supportCase.status} to ${params.targetStatus}.`
+    );
+  }
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.supportCase,
+    status: params.targetStatus,
+    assignedStaffId:
+      params.assignedStaffId !== undefined
+        ? params.assignedStaffId
+        : params.supportCase.assignedStaffId,
+    resolvedAtIso:
+      params.targetStatus === "RESOLVED" ? nowIso : params.supportCase.resolvedAtIso,
+    updatedAtIso: nowIso,
+  };
+}
+
+/**
+ * Strips internal staff notes (`isInternalNote === true`), internal-only attachments,
+ * and internal finance action requests when returning a support case to a non-staff actor (M17).
+ */
+export function filterSupportCaseViewForActor(params: {
+  supportCase: SupportCaseContract;
+  messages: readonly SupportMessageContract[];
+  attachments: readonly SupportAttachmentContract[];
+  actionRequests: readonly SupportActionRequestContract[];
+  isStaffActor: boolean;
+}): {
+  supportCase: SupportCaseContract;
+  messages: SupportMessageContract[];
+  attachments: SupportAttachmentContract[];
+  actionRequests: SupportActionRequestContract[];
+} {
+  if (params.isStaffActor) {
+    return {
+      supportCase: params.supportCase,
+      messages: [...params.messages],
+      attachments: [...params.attachments],
+      actionRequests: [...params.actionRequests],
+    };
+  }
+
+  const internalMessageIds = new Set(
+    params.messages.filter((m) => m.isInternalNote).map((m) => m.id)
+  );
+
+  return {
+    supportCase: params.supportCase,
+    messages: params.messages.filter((m) => !m.isInternalNote),
+    attachments: params.attachments.filter(
+      (a) => !a.isInternalOnly && (a.messageId === null || !internalMessageIds.has(a.messageId))
+    ),
+    actionRequests: [],
+  };
+}
+
+/**
+ * Evaluates a support refund/compensation action request against the platform's automatic
+ * support threshold (`autoApproveLimitCents`). Requests within threshold auto-approve;
+ * requests exceeding threshold escalate to `PENDING_FINANCE` (`ESCALATED_FINANCE`) (M17).
+ */
+export function evaluateSupportActionRequest(params: {
+  id: string;
+  caseId: string;
+  orderId: string;
+  requestedByStaffId: string;
+  actionType: SupportActionType;
+  amountCents: number;
+  orderCapturedCents: number;
+  alreadyRefundedCents: number;
+  autoApproveLimitCents: number;
+  reason: string;
+  now?: Date;
+}): {
+  actionRequest: SupportActionRequestContract;
+  autoApproved: boolean;
+  nextCaseStatus: SupportCaseStatus;
+} {
+  assertIntegerCents(params.amountCents, "amountCents");
+  assertIntegerCents(params.orderCapturedCents, "orderCapturedCents");
+  assertIntegerCents(params.alreadyRefundedCents, "alreadyRefundedCents");
+  assertIntegerCents(params.autoApproveLimitCents, "autoApproveLimitCents");
+
+  if (params.amountCents <= 0) {
+    throw new Error("SUPPORT_ACTION_INVALID_AMOUNT: amountCents must be > 0.");
+  }
+  if (!params.reason || params.reason.trim().length < 5) {
+    throw new Error("SUPPORT_ACTION_REASON_REQUIRED: A reason of at least 5 characters is required.");
+  }
+  if (
+    (params.actionType === "PARTIAL_REFUND" || params.actionType === "FULL_REFUND") &&
+    params.alreadyRefundedCents + params.amountCents > params.orderCapturedCents
+  ) {
+    throw new Error(
+      `SUPPORT_REFUND_EXCEEDS_CAPTURED: Requested ${params.amountCents} + already refunded ${params.alreadyRefundedCents} exceeds captured ${params.orderCapturedCents} cents.`
+    );
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  const autoApproved = params.amountCents <= params.autoApproveLimitCents;
+
+  return {
+    actionRequest: {
+      id: params.id,
+      caseId: params.caseId,
+      orderId: params.orderId,
+      requestedBy: params.requestedByStaffId,
+      actionType: params.actionType,
+      amountCents: params.amountCents,
+      reason: params.reason.trim(),
+      status: autoApproved ? "APPROVED" : "PENDING_FINANCE",
+      decidedBy: autoApproved ? params.requestedByStaffId : null,
+      decidedAtIso: autoApproved ? nowIso : null,
+      decisionNotes: autoApproved
+        ? `Auto-approved within support threshold (${params.autoApproveLimitCents} cents).`
+        : null,
+      createdAtIso: nowIso,
+    },
+    autoApproved,
+    nextCaseStatus: autoApproved ? "RESOLVED" : "ESCALATED_FINANCE",
+  };
+}
+
+/**
+ * Approves or rejects an escalated `PENDING_FINANCE` support action request, enforcing
+ * `finance`/`tech_admin` role, `aal2` MFA, and Segregation of Duties (M17/M13).
+ */
+export function decideEscalatedSupportActionRequest(params: {
+  request: SupportActionRequestContract;
+  decision: "APPROVED" | "REJECTED";
+  decidedByStaffId: string;
+  actorStaffRoles: readonly string[];
+  actorAal: "aal1" | "aal2";
+  decisionNotes: string;
+  now?: Date;
+}): SupportActionRequestContract {
+  if (params.actorAal !== "aal2") {
+    throw new Error(
+      "SUPPORT_FINANCE_MFA_AAL2_REQUIRED: Multi-factor authentication (aal2) is required to decide escalated support refunds."
+    );
+  }
+  const hasFinanceAuthority = params.actorStaffRoles.some(
+    (r) => r === "finance" || r === "tech_admin"
+  );
+  if (!hasFinanceAuthority) {
+    throw new Error(
+      "SUPPORT_FINANCE_ROLE_REQUIRED: Only finance or tech_admin staff can decide escalated support action requests."
+    );
+  }
+  if (params.request.status !== "PENDING_FINANCE") {
+    throw new Error(
+      `SUPPORT_ACTION_ALREADY_DECIDED: Action request ${params.request.id} is already ${params.request.status}.`
+    );
+  }
+  if (params.decidedByStaffId === params.request.requestedBy) {
+    throw new Error(
+      "SEGREGATION_OF_DUTIES_VIOLATION: The staff member who requested the escalated refund cannot approve their own request."
+    );
+  }
+  if (!params.decisionNotes || params.decisionNotes.trim().length < 5) {
+    throw new Error("SUPPORT_DECISION_NOTES_REQUIRED: Decision notes of at least 5 characters are required.");
+  }
+
+  const nowIso = (params.now ?? new Date()).toISOString();
+  return {
+    ...params.request,
+    status: params.decision,
+    decidedBy: params.decidedByStaffId,
+    decidedAtIso: nowIso,
+    decisionNotes: params.decisionNotes.trim(),
+  };
+}
+

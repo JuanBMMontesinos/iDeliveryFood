@@ -49,7 +49,13 @@ import {
   type StoreOperatingHourContract,
   type StoreServiceAreaContract,
   type StoreSettingsPatchContract,
+  type SupportActionRequestContract,
+  type SupportAttachmentContract,
+  type SupportBackofficeOverviewContract,
   type SupportCaseContract,
+  type SupportCaseDetailResponseContract,
+  type SupportCaseStatus,
+  type SupportMessageContract,
   type SupportedLocale,
   type UserDeviceContract,
   type UserPreferencesContract,
@@ -209,6 +215,34 @@ export function createSupabasePostgresRepository(params: {
   }
   function restoreLogicalId(uuid: string): string {
     return logicalIdByUuid.get(uuid.toLowerCase()) ?? uuid;
+  }
+
+  async function ensureProfileExists(userUuid: string): Promise<void> {
+    const existing = await pool.query(
+      `SELECT 1 FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [userUuid]
+    );
+    if ((existing.rowCount ?? 0) > 0) return;
+    const syntheticEmail = `actor.${userUuid}@test.ideliveryfood.invalid`;
+    await pool.query(
+      `INSERT INTO auth.users (
+         instance_id, id, aud, role, email, encrypted_password, email_confirmed_at,
+         raw_app_meta_data, raw_user_meta_data, is_sso_user, is_anonymous, created_at, updated_at
+       ) VALUES (
+         '00000000-0000-0000-0000-000000000000', $1, 'authenticated', 'authenticated',
+         $2, NULL, timezone('utc', now()),
+         '{"provider":"email","providers":["email"]}'::jsonb, '{"synthetic_test":true}'::jsonb,
+         false, false, timezone('utc', now()), timezone('utc', now())
+       )
+       ON CONFLICT (id) DO NOTHING`,
+      [userUuid, syntheticEmail]
+    );
+    await pool.query(
+      `INSERT INTO public.profiles (id, email, full_name, preferred_locale, status, mfa_enforced, is_test_data)
+       VALUES ($1, $2, 'Platform Actor', 'en', 'ACTIVE', false, $3)
+       ON CONFLICT (id) DO NOTHING`,
+      [userUuid, syntheticEmail, isTestData]
+    );
   }
 
   return {
@@ -1282,6 +1316,12 @@ export function createSupabasePostgresRepository(params: {
       const refundUuid = rememberLogicalId(refund.id);
       const orderUuid = toDeterministicUuid(refund.orderId);
       const payAttemptUuid = rememberLogicalId(refund.paymentAttemptId);
+      const requestedByUuid = toDeterministicUuid(refund.requestedBy);
+      const approvedByUuid = refund.approvedBy ? toDeterministicUuid(refund.approvedBy) : null;
+      await ensureProfileExists(requestedByUuid);
+      if (approvedByUuid) {
+        await ensureProfileExists(approvedByUuid);
+      }
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -2669,6 +2709,9 @@ export function createSupabasePostgresRepository(params: {
       const orderUuid = supportCase.orderId
         ? toDeterministicUuid(supportCase.orderId)
         : null;
+      const taskUuid = supportCase.deliveryTaskId
+        ? toDeterministicUuid(supportCase.deliveryTaskId)
+        : null;
       const orgUuid = supportCase.organizationId
         ? toDeterministicUuid(supportCase.organizationId)
         : null;
@@ -2676,24 +2719,42 @@ export function createSupabasePostgresRepository(params: {
         ? toDeterministicUuid(supportCase.storeId)
         : null;
       const reqUuid = toDeterministicUuid(supportCase.requesterId);
+      const assignedUuid = supportCase.assignedStaffId
+        ? toDeterministicUuid(supportCase.assignedStaffId)
+        : null;
+
+      await ensureProfileExists(reqUuid);
+      if (assignedUuid) {
+        await ensureProfileExists(assignedUuid);
+      }
+
+      await pool.query(
+        `SELECT setval(
+           pg_get_serial_sequence('public.support_cases', 'case_number'),
+           GREATEST(COALESCE((SELECT MAX(case_number) FROM public.support_cases), 5000), 5000)
+         )`
+      );
 
       const res = await pool.query(
         `INSERT INTO public.support_cases (
-           id, order_id, organization_id, store_id, requester_id, requester_role,
-           category, priority, status, subject, sla_due_at, is_test_data
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         RETURNING id, case_number, order_id, organization_id, store_id, requester_id,
-                   requester_role, category, priority, status, subject, sla_due_at, created_at`,
+           id, order_id, delivery_task_id, organization_id, store_id, requester_id, requester_role,
+           assigned_staff_id, category, priority, status, subject, sla_due_at, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         RETURNING id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                   requester_role, assigned_staff_id, category, priority, status, subject,
+                   sla_due_at, resolved_at, created_at, updated_at`,
         [
           caseUuid,
           orderUuid,
+          taskUuid,
           orgUuid,
           storeUuid,
           reqUuid,
           supportCase.requesterRole,
+          assignedUuid,
           supportCase.category,
-          supportCase.priority,
-          supportCase.status,
+          supportCase.priority === "CRITICAL" ? "CRITICAL_IN_ROUTE" : supportCase.priority,
+          supportCase.status === "WAITING_USER" ? "WAITING_CUSTOMER" : supportCase.status,
           supportCase.subject,
           supportCase.slaDueAtIso,
           isTestData,
@@ -2704,18 +2765,26 @@ export function createSupabasePostgresRepository(params: {
         id: restoreLogicalId(String(r.id)),
         caseNumber: Number(r.case_number),
         orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        deliveryTaskId: r.delivery_task_id
+          ? restoreLogicalId(String(r.delivery_task_id))
+          : null,
         organizationId: r.organization_id
           ? restoreLogicalId(String(r.organization_id))
           : null,
         storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
         requesterId: restoreLogicalId(String(r.requester_id)),
         requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        assignedStaffId: r.assigned_staff_id
+          ? restoreLogicalId(String(r.assigned_staff_id))
+          : null,
         category: String(r.category),
         priority: String(r.priority) as SupportCaseContract["priority"],
         status: String(r.status) as SupportCaseContract["status"],
         subject: String(r.subject),
         slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        resolvedAtIso: r.resolved_at ? new Date(String(r.resolved_at)).toISOString() : null,
         createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
       };
     },
 
@@ -3294,6 +3363,559 @@ export function createSupabasePostgresRepository(params: {
           fleetOrganizationId: null, // Seeded couriers are independent couriers unless assigned to a fleet contract
           vehicleType: String(r.vehicle_type),
           approvalStatus: String(r.approval_status),
+        })),
+      };
+    },
+
+    async listSupportCasesForActor(params: {
+      actorId: string;
+      isStaffActor: boolean;
+      storeIds: readonly string[];
+      statusFilter?: string;
+    }): Promise<SupportCaseContract[]> {
+      const actorUuid = toDeterministicUuid(params.actorId);
+      const storeUuids = params.storeIds.map((sid) => toDeterministicUuid(sid));
+
+      const res = params.isStaffActor
+        ? await pool.query(
+            `SELECT id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                    requester_role, assigned_staff_id, category, priority, status, subject,
+                    sla_due_at, resolved_at, created_at, updated_at
+             FROM public.support_cases
+             WHERE ($1::text IS NULL OR status::text = $1)
+             ORDER BY sla_due_at ASC, created_at DESC`,
+            [params.statusFilter ?? null]
+          )
+        : await pool.query(
+            `SELECT id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                    requester_role, assigned_staff_id, category, priority, status, subject,
+                    sla_due_at, resolved_at, created_at, updated_at
+             FROM public.support_cases
+             WHERE (requester_id = $1 OR (store_id IS NOT NULL AND store_id = ANY($2::uuid[])))
+               AND ($3::text IS NULL OR status::text = $3)
+             ORDER BY sla_due_at ASC, created_at DESC`,
+            [actorUuid, storeUuids, params.statusFilter ?? null]
+          );
+
+      return res.rows.map((r: Record<string, unknown>) => ({
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        deliveryTaskId: r.delivery_task_id
+          ? restoreLogicalId(String(r.delivery_task_id))
+          : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        assignedStaffId: r.assigned_staff_id
+          ? restoreLogicalId(String(r.assigned_staff_id))
+          : null,
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        resolvedAtIso: r.resolved_at ? new Date(String(r.resolved_at)).toISOString() : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+      }));
+    },
+
+    async getSupportCaseDetail(
+      caseId: string
+    ): Promise<SupportCaseDetailResponseContract | null> {
+      const caseUuid = toDeterministicUuid(caseId);
+      const [caseRes, msgRes, attRes, actRes] = await Promise.all([
+        pool.query(
+          `SELECT id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                  requester_role, assigned_staff_id, category, priority, status, subject,
+                  sla_due_at, resolved_at, created_at, updated_at
+           FROM public.support_cases
+           WHERE id = $1
+           LIMIT 1`,
+          [caseUuid]
+        ),
+        pool.query(
+          `SELECT id, case_id, sender_id, body, is_internal_note, created_at
+           FROM public.support_messages
+           WHERE case_id = $1
+           ORDER BY created_at ASC`,
+          [caseUuid]
+        ),
+        pool.query(
+          `SELECT id, case_id, message_id, uploaded_by, storage_bucket, object_path,
+                  mime_type, byte_size, sha256_hex, is_internal_only, created_at
+           FROM public.support_attachments
+           WHERE case_id = $1
+           ORDER BY created_at ASC`,
+          [caseUuid]
+        ),
+        pool.query(
+          `SELECT id, case_id, order_id, requested_by, action_type, amount_cents,
+                  reason, status, decided_by, decided_at, decision_notes, created_at
+           FROM public.support_action_requests
+           WHERE case_id = $1
+           ORDER BY created_at ASC`,
+          [caseUuid]
+        ),
+      ]);
+
+      if (caseRes.rowCount === 0) return null;
+      const r = caseRes.rows[0] as Record<string, unknown>;
+      const supportCase: SupportCaseContract = {
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        deliveryTaskId: r.delivery_task_id
+          ? restoreLogicalId(String(r.delivery_task_id))
+          : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        assignedStaffId: r.assigned_staff_id
+          ? restoreLogicalId(String(r.assigned_staff_id))
+          : null,
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        resolvedAtIso: r.resolved_at ? new Date(String(r.resolved_at)).toISOString() : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+      };
+
+      return {
+        supportCase,
+        messages: msgRes.rows.map((m: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(m.id)),
+          caseId: restoreLogicalId(String(m.case_id)),
+          senderId: restoreLogicalId(String(m.sender_id)),
+          body: String(m.body),
+          isInternalNote: Boolean(m.is_internal_note),
+          createdAtIso: new Date(String(m.created_at)).toISOString(),
+        })),
+        attachments: attRes.rows.map((a: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(a.id)),
+          caseId: restoreLogicalId(String(a.case_id)),
+          messageId: a.message_id ? restoreLogicalId(String(a.message_id)) : null,
+          uploadedBy: restoreLogicalId(String(a.uploaded_by)),
+          storageBucket: String(a.storage_bucket),
+          objectPath: String(a.object_path),
+          mimeType: String(a.mime_type),
+          byteSize: Number(a.byte_size),
+          sha256Hex: String(a.sha256_hex),
+          isInternalOnly: Boolean(a.is_internal_only),
+          createdAtIso: new Date(String(a.created_at)).toISOString(),
+        })),
+        actionRequests: actRes.rows.map((ar: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(ar.id)),
+          caseId: restoreLogicalId(String(ar.case_id)),
+          orderId: restoreLogicalId(String(ar.order_id)),
+          requestedBy: restoreLogicalId(String(ar.requested_by)),
+          actionType: String(ar.action_type) as SupportActionRequestContract["actionType"],
+          amountCents: Number(ar.amount_cents),
+          reason: String(ar.reason),
+          status: String(ar.status) as SupportActionRequestContract["status"],
+          decidedBy: ar.decided_by ? restoreLogicalId(String(ar.decided_by)) : null,
+          decidedAtIso: ar.decided_at ? new Date(String(ar.decided_at)).toISOString() : null,
+          decisionNotes: ar.decision_notes ? String(ar.decision_notes) : null,
+          createdAtIso: new Date(String(ar.created_at)).toISOString(),
+        })),
+      };
+    },
+
+    async updateSupportCaseStatus(params: {
+      caseId: string;
+      status: SupportCaseStatus;
+      assignedStaffId?: string | null;
+      resolvedAtIso?: string | null;
+    }): Promise<SupportCaseContract | null> {
+      const caseUuid = toDeterministicUuid(params.caseId);
+      const assignedUuid =
+        params.assignedStaffId !== undefined
+          ? params.assignedStaffId
+            ? toDeterministicUuid(params.assignedStaffId)
+            : null
+          : undefined;
+
+      if (assignedUuid) {
+        await ensureProfileExists(assignedUuid);
+      }
+
+      const dbStatus =
+        params.status === "WAITING_USER" ? "WAITING_CUSTOMER" : params.status;
+
+      const res =
+        assignedUuid !== undefined
+          ? await pool.query(
+              `UPDATE public.support_cases
+               SET status = $2::public.support_case_status,
+                   assigned_staff_id = $3,
+                   resolved_at = COALESCE($4::timestamptz, resolved_at),
+                   updated_at = timezone('utc', now())
+               WHERE id = $1
+               RETURNING id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                         requester_role, assigned_staff_id, category, priority, status, subject,
+                         sla_due_at, resolved_at, created_at, updated_at`,
+              [caseUuid, dbStatus, assignedUuid, params.resolvedAtIso ?? null]
+            )
+          : await pool.query(
+              `UPDATE public.support_cases
+               SET status = $2::public.support_case_status,
+                   resolved_at = COALESCE($3::timestamptz, resolved_at),
+                   updated_at = timezone('utc', now())
+               WHERE id = $1
+               RETURNING id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                         requester_role, assigned_staff_id, category, priority, status, subject,
+                         sla_due_at, resolved_at, created_at, updated_at`,
+              [caseUuid, dbStatus, params.resolvedAtIso ?? null]
+            );
+
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        caseNumber: Number(r.case_number),
+        orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+        deliveryTaskId: r.delivery_task_id
+          ? restoreLogicalId(String(r.delivery_task_id))
+          : null,
+        organizationId: r.organization_id
+          ? restoreLogicalId(String(r.organization_id))
+          : null,
+        storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+        requesterId: restoreLogicalId(String(r.requester_id)),
+        requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+        assignedStaffId: r.assigned_staff_id
+          ? restoreLogicalId(String(r.assigned_staff_id))
+          : null,
+        category: String(r.category),
+        priority: String(r.priority) as SupportCaseContract["priority"],
+        status: String(r.status) as SupportCaseContract["status"],
+        subject: String(r.subject),
+        slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+        resolvedAtIso: r.resolved_at ? new Date(String(r.resolved_at)).toISOString() : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+        updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+      };
+    },
+
+    async createSupportMessage(params: {
+      message: SupportMessageContract;
+      attachments?: SupportAttachmentContract[];
+    }): Promise<{
+      message: SupportMessageContract;
+      attachments: SupportAttachmentContract[];
+    }> {
+      const msgUuid = rememberLogicalId(params.message.id);
+      const caseUuid = toDeterministicUuid(params.message.caseId);
+      const senderUuid = toDeterministicUuid(params.message.senderId);
+      await ensureProfileExists(senderUuid);
+
+      const msgRes = await pool.query(
+        `INSERT INTO public.support_messages (
+           id, case_id, sender_id, body, is_internal_note, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, case_id, sender_id, body, is_internal_note, created_at`,
+        [
+          msgUuid,
+          caseUuid,
+          senderUuid,
+          params.message.body,
+          params.message.isInternalNote,
+          isTestData,
+        ]
+      );
+      const mRow = msgRes.rows[0] as Record<string, unknown>;
+      const savedMessage: SupportMessageContract = {
+        id: restoreLogicalId(String(mRow.id)),
+        caseId: restoreLogicalId(String(mRow.case_id)),
+        senderId: restoreLogicalId(String(mRow.sender_id)),
+        body: String(mRow.body),
+        isInternalNote: Boolean(mRow.is_internal_note),
+        createdAtIso: new Date(String(mRow.created_at)).toISOString(),
+      };
+
+      const savedAttachments: SupportAttachmentContract[] = [];
+      for (const att of params.attachments ?? []) {
+        const attUuid = rememberLogicalId(att.id);
+        const uploaderUuid = toDeterministicUuid(att.uploadedBy);
+        await ensureProfileExists(uploaderUuid);
+        const attRes = await pool.query(
+          `INSERT INTO public.support_attachments (
+             id, case_id, message_id, uploaded_by, storage_bucket, object_path,
+             mime_type, byte_size, sha256_hex, is_internal_only, is_test_data
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING id, case_id, message_id, uploaded_by, storage_bucket, object_path,
+                     mime_type, byte_size, sha256_hex, is_internal_only, created_at`,
+          [
+            attUuid,
+            caseUuid,
+            msgUuid,
+            uploaderUuid,
+            att.storageBucket,
+            att.objectPath,
+            att.mimeType,
+            att.byteSize,
+            att.sha256Hex,
+            att.isInternalOnly,
+            isTestData,
+          ]
+        );
+        const aRow = attRes.rows[0] as Record<string, unknown>;
+        savedAttachments.push({
+          id: restoreLogicalId(String(aRow.id)),
+          caseId: restoreLogicalId(String(aRow.case_id)),
+          messageId: aRow.message_id ? restoreLogicalId(String(aRow.message_id)) : null,
+          uploadedBy: restoreLogicalId(String(aRow.uploaded_by)),
+          storageBucket: String(aRow.storage_bucket),
+          objectPath: String(aRow.object_path),
+          mimeType: String(aRow.mime_type),
+          byteSize: Number(aRow.byte_size),
+          sha256Hex: String(aRow.sha256_hex),
+          isInternalOnly: Boolean(aRow.is_internal_only),
+          createdAtIso: new Date(String(aRow.created_at)).toISOString(),
+        });
+      }
+
+      return { message: savedMessage, attachments: savedAttachments };
+    },
+
+    async getSupportAutoRefundLimitCents(): Promise<number> {
+      const res = await pool.query(
+        `SELECT support_auto_refund_limit_cents
+         FROM public.platform_policies
+         WHERE policy_key = 'DEFAULT_BR_MARKETPLACE'
+         LIMIT 1`
+      );
+      if (res.rowCount === 0) return 1500;
+      const r = res.rows[0] as Record<string, unknown>;
+      return Number(r.support_auto_refund_limit_cents ?? 1500);
+    },
+
+    async createSupportActionRequest(
+      req: SupportActionRequestContract
+    ): Promise<SupportActionRequestContract> {
+      const reqUuid = rememberLogicalId(req.id);
+      const caseUuid = toDeterministicUuid(req.caseId);
+      const orderUuid = toDeterministicUuid(req.orderId);
+      const requestedByUuid = toDeterministicUuid(req.requestedBy);
+      const decidedByUuid = req.decidedBy ? toDeterministicUuid(req.decidedBy) : null;
+
+      await ensureProfileExists(requestedByUuid);
+      if (decidedByUuid) {
+        await ensureProfileExists(decidedByUuid);
+      }
+
+      const res = await pool.query(
+        `INSERT INTO public.support_action_requests (
+           id, case_id, order_id, requested_by, action_type, amount_cents,
+           reason, status, decided_by, decided_at, decision_notes, is_test_data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, case_id, order_id, requested_by, action_type, amount_cents,
+                   reason, status, decided_by, decided_at, decision_notes, created_at`,
+        [
+          reqUuid,
+          caseUuid,
+          orderUuid,
+          requestedByUuid,
+          req.actionType,
+          req.amountCents,
+          req.reason,
+          req.status,
+          decidedByUuid,
+          req.decidedAtIso ?? null,
+          req.decisionNotes ?? null,
+          isTestData,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        caseId: restoreLogicalId(String(r.case_id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        requestedBy: restoreLogicalId(String(r.requested_by)),
+        actionType: String(r.action_type) as SupportActionRequestContract["actionType"],
+        amountCents: Number(r.amount_cents),
+        reason: String(r.reason),
+        status: String(r.status) as SupportActionRequestContract["status"],
+        decidedBy: r.decided_by ? restoreLogicalId(String(r.decided_by)) : null,
+        decidedAtIso: r.decided_at ? new Date(String(r.decided_at)).toISOString() : null,
+        decisionNotes: r.decision_notes ? String(r.decision_notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async getSupportActionRequestById(
+      requestId: string
+    ): Promise<SupportActionRequestContract | null> {
+      const reqUuid = toDeterministicUuid(requestId);
+      const res = await pool.query(
+        `SELECT id, case_id, order_id, requested_by, action_type, amount_cents,
+                reason, status, decided_by, decided_at, decision_notes, created_at
+         FROM public.support_action_requests
+         WHERE id = $1
+         LIMIT 1`,
+        [reqUuid]
+      );
+      if (res.rowCount === 0) return null;
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        caseId: restoreLogicalId(String(r.case_id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        requestedBy: restoreLogicalId(String(r.requested_by)),
+        actionType: String(r.action_type) as SupportActionRequestContract["actionType"],
+        amountCents: Number(r.amount_cents),
+        reason: String(r.reason),
+        status: String(r.status) as SupportActionRequestContract["status"],
+        decidedBy: r.decided_by ? restoreLogicalId(String(r.decided_by)) : null,
+        decidedAtIso: r.decided_at ? new Date(String(r.decided_at)).toISOString() : null,
+        decisionNotes: r.decision_notes ? String(r.decision_notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async updateSupportActionRequestDecision(
+      req: SupportActionRequestContract
+    ): Promise<SupportActionRequestContract> {
+      const reqUuid = toDeterministicUuid(req.id);
+      const decidedByUuid = req.decidedBy ? toDeterministicUuid(req.decidedBy) : null;
+      if (decidedByUuid) {
+        await ensureProfileExists(decidedByUuid);
+      }
+
+      const res = await pool.query(
+        `UPDATE public.support_action_requests
+         SET status = $2,
+             decided_by = $3,
+             decided_at = $4,
+             decision_notes = $5
+         WHERE id = $1
+         RETURNING id, case_id, order_id, requested_by, action_type, amount_cents,
+                   reason, status, decided_by, decided_at, decision_notes, created_at`,
+        [
+          reqUuid,
+          req.status,
+          decidedByUuid,
+          req.decidedAtIso ?? new Date().toISOString(),
+          req.decisionNotes ?? null,
+        ]
+      );
+      const r = res.rows[0] as Record<string, unknown>;
+      return {
+        id: restoreLogicalId(String(r.id)),
+        caseId: restoreLogicalId(String(r.case_id)),
+        orderId: restoreLogicalId(String(r.order_id)),
+        requestedBy: restoreLogicalId(String(r.requested_by)),
+        actionType: String(r.action_type) as SupportActionRequestContract["actionType"],
+        amountCents: Number(r.amount_cents),
+        reason: String(r.reason),
+        status: String(r.status) as SupportActionRequestContract["status"],
+        decidedBy: r.decided_by ? restoreLogicalId(String(r.decided_by)) : null,
+        decidedAtIso: r.decided_at ? new Date(String(r.decided_at)).toISOString() : null,
+        decisionNotes: r.decision_notes ? String(r.decision_notes) : null,
+        createdAtIso: new Date(String(r.created_at)).toISOString(),
+      };
+    },
+
+    async getSupportBackofficeOverview(): Promise<SupportBackofficeOverviewContract> {
+      const [limitCents, casesRes, msgRes, attRes, actRes] = await Promise.all([
+        this.getSupportAutoRefundLimitCents!(),
+        pool.query(
+          `SELECT id, case_number, order_id, delivery_task_id, organization_id, store_id, requester_id,
+                  requester_role, assigned_staff_id, category, priority, status, subject,
+                  sla_due_at, resolved_at, created_at, updated_at
+           FROM public.support_cases
+           ORDER BY sla_due_at ASC, created_at DESC`
+        ),
+        pool.query(
+          `SELECT id, case_id, sender_id, body, is_internal_note, created_at
+           FROM public.support_messages
+           ORDER BY created_at ASC`
+        ),
+        pool.query(
+          `SELECT id, case_id, message_id, uploaded_by, storage_bucket, object_path,
+                  mime_type, byte_size, sha256_hex, is_internal_only, created_at
+           FROM public.support_attachments
+           ORDER BY created_at ASC`
+        ),
+        pool.query(
+          `SELECT id, case_id, order_id, requested_by, action_type, amount_cents,
+                  reason, status, decided_by, decided_at, decision_notes, created_at
+           FROM public.support_action_requests
+           ORDER BY created_at DESC`
+        ),
+      ]);
+
+      return {
+        autoRefundLimitCents: limitCents,
+        cases: casesRes.rows.map((r: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(r.id)),
+          caseNumber: Number(r.case_number),
+          orderId: r.order_id ? restoreLogicalId(String(r.order_id)) : null,
+          deliveryTaskId: r.delivery_task_id
+            ? restoreLogicalId(String(r.delivery_task_id))
+            : null,
+          organizationId: r.organization_id
+            ? restoreLogicalId(String(r.organization_id))
+            : null,
+          storeId: r.store_id ? restoreLogicalId(String(r.store_id)) : null,
+          requesterId: restoreLogicalId(String(r.requester_id)),
+          requesterRole: String(r.requester_role) as SupportCaseContract["requesterRole"],
+          assignedStaffId: r.assigned_staff_id
+            ? restoreLogicalId(String(r.assigned_staff_id))
+            : null,
+          category: String(r.category),
+          priority: String(r.priority) as SupportCaseContract["priority"],
+          status: String(r.status) as SupportCaseContract["status"],
+          subject: String(r.subject),
+          slaDueAtIso: new Date(String(r.sla_due_at)).toISOString(),
+          resolvedAtIso: r.resolved_at ? new Date(String(r.resolved_at)).toISOString() : null,
+          createdAtIso: new Date(String(r.created_at)).toISOString(),
+          updatedAtIso: new Date(String(r.updated_at)).toISOString(),
+        })),
+        messages: msgRes.rows.map((m: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(m.id)),
+          caseId: restoreLogicalId(String(m.case_id)),
+          senderId: restoreLogicalId(String(m.sender_id)),
+          body: String(m.body),
+          isInternalNote: Boolean(m.is_internal_note),
+          createdAtIso: new Date(String(m.created_at)).toISOString(),
+        })),
+        attachments: attRes.rows.map((a: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(a.id)),
+          caseId: restoreLogicalId(String(a.case_id)),
+          messageId: a.message_id ? restoreLogicalId(String(a.message_id)) : null,
+          uploadedBy: restoreLogicalId(String(a.uploaded_by)),
+          storageBucket: String(a.storage_bucket),
+          objectPath: String(a.object_path),
+          mimeType: String(a.mime_type),
+          byteSize: Number(a.byte_size),
+          sha256Hex: String(a.sha256_hex),
+          isInternalOnly: Boolean(a.is_internal_only),
+          createdAtIso: new Date(String(a.created_at)).toISOString(),
+        })),
+        actionRequests: actRes.rows.map((ar: Record<string, unknown>) => ({
+          id: restoreLogicalId(String(ar.id)),
+          caseId: restoreLogicalId(String(ar.case_id)),
+          orderId: restoreLogicalId(String(ar.order_id)),
+          requestedBy: restoreLogicalId(String(ar.requested_by)),
+          actionType: String(ar.action_type) as SupportActionRequestContract["actionType"],
+          amountCents: Number(ar.amount_cents),
+          reason: String(ar.reason),
+          status: String(ar.status) as SupportActionRequestContract["status"],
+          decidedBy: ar.decided_by ? restoreLogicalId(String(ar.decided_by)) : null,
+          decidedAtIso: ar.decided_at ? new Date(String(ar.decided_at)).toISOString() : null,
+          decisionNotes: ar.decision_notes ? String(ar.decision_notes) : null,
+          createdAtIso: new Date(String(ar.created_at)).toISOString(),
         })),
       };
     },

@@ -491,5 +491,19 @@ describe("@ideliveryfood/admin-web — Live Supabase SSR Integration Tests (M16,
     assert.match(html, /DISABLED_PENDING_FLEET_CONTRACT/);
     assert.match(html, /FALSE \(DISABLED BY DEFAULT POLICY\)/);
   });
+
+  it("renders M17 Support, SLA & Refund Authority Console (/support) with live Supabase cases, internal notes, attachments & PENDING_FINANCE queue", async () => {
+    const res = await fetch(`${adminBaseUrl}/support?locale=en`, {
+      headers: { Authorization: `Bearer ${techAdminTokenAal2}` },
+    });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Support, SLA & Refund Authority Console \(M17\)/);
+    assert.match(html, /1500 cents/);
+    assert.match(html, /ESCALATED_FINANCE/);
+    assert.match(html, /PENDING_FINANCE/);
+    assert.match(html, /INTERNAL_STAFF_NOTE/);
+    assert.match(html, /INTERNAL_ONLY/);
+  });
 });
 

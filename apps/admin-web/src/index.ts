@@ -12,6 +12,11 @@ import {
   type PspReconciliationRunContract,
   type SettlementRecordContract,
   type StaffRole,
+  type SupportActionRequestContract,
+  type SupportAttachmentContract,
+  type SupportBackofficeOverviewContract,
+  type SupportCaseContract,
+  type SupportMessageContract,
   type SupportedLocale,
 } from "@ideliveryfood/contracts";
 import {
@@ -131,6 +136,7 @@ export function buildAdminRoleNavigationModules(
     modules.push("LOGISTICS_DISPATCH_CONSOLE");
   }
   if (
+    roles.has("support") ||
     roles.has("support_l1") ||
     roles.has("support_l2") ||
     roles.has("operations") ||
@@ -504,10 +510,87 @@ export function buildFleetOperatorPortalModel(params: {
   };
 }
 
+// ============================================================================
+// M17: Customer/Partner/Courier Support, SLA & Escalated Refunds Console Model
+// ============================================================================
+
+export interface SupportBackofficeConsoleModel {
+  authorized: boolean;
+  canApproveEscalatedFinance: boolean;
+  autoRefundLimitCents: number;
+  autoRefundLimitFormatted: string;
+  cases: readonly SupportCaseContract[];
+  messages: readonly SupportMessageContract[];
+  attachments: readonly SupportAttachmentContract[];
+  actionRequests: readonly SupportActionRequestContract[];
+  pendingFinanceCount: number;
+  criticalInRouteCount: number;
+}
+
+export function buildSupportBackofficeConsoleModel(params: {
+  actor: AuthenticatedActorProfileContract;
+  overview: SupportBackofficeOverviewContract;
+  locale?: SupportedLocale;
+}): SupportBackofficeConsoleModel {
+  const locale = params.locale ?? params.actor.preferredLocale ?? DEFAULT_LOCALE;
+  const decision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: [
+      "support",
+      "support_l1",
+      "support_l2",
+      "operations",
+      "finance",
+      "risk_compliance",
+      "tech_admin",
+    ],
+    requireMfaAal2: false,
+  });
+
+  if (!decision.allowed) {
+    return {
+      authorized: false,
+      canApproveEscalatedFinance: false,
+      autoRefundLimitCents: params.overview.autoRefundLimitCents,
+      autoRefundLimitFormatted: formatBrlCents(params.overview.autoRefundLimitCents, locale),
+      cases: [],
+      messages: [],
+      attachments: [],
+      actionRequests: [],
+      pendingFinanceCount: 0,
+      criticalInRouteCount: 0,
+    };
+  }
+
+  const financeDecision = authorizeStaffAction({
+    actor: params.actor,
+    allowedRoles: ["finance", "tech_admin"],
+    requireMfaAal2: true,
+  });
+
+  return {
+    authorized: true,
+    canApproveEscalatedFinance: financeDecision.allowed,
+    autoRefundLimitCents: params.overview.autoRefundLimitCents,
+    autoRefundLimitFormatted: formatBrlCents(params.overview.autoRefundLimitCents, locale),
+    cases: params.overview.cases,
+    messages: params.overview.messages,
+    attachments: params.overview.attachments,
+    actionRequests: params.overview.actionRequests,
+    pendingFinanceCount: params.overview.actionRequests.filter(
+      (r) => r.status === "PENDING_FINANCE"
+    ).length,
+    criticalInRouteCount: params.overview.cases.filter(
+      (c) => c.priority === "CRITICAL_IN_ROUTE" || c.priority === "CRITICAL"
+    ).length,
+  };
+}
+
 export * from "./app/layout.js";
 export * from "./app/admin/page.js";
 export * from "./app/finance/page.js";
 export * from "./app/logistics/page.js";
 export * from "./app/fleets/page.js";
+export * from "./app/support/page.js";
 export * from "./server.js";
 

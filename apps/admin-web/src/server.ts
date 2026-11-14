@@ -18,6 +18,10 @@ import {
   loadLogisticsBackofficePageData,
   renderLogisticsBackofficePageHtml,
 } from "./app/logistics/page.js";
+import {
+  loadSupportBackofficePageData,
+  renderSupportBackofficePageHtml,
+} from "./app/support/page.js";
 
 export interface AdminWebServerOptions {
   apiBaseUrl: string;
@@ -148,6 +152,20 @@ export function createAdminWebServer(
           ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         });
         const html = renderFleetsPortalPageHtml(data);
+        res.statusCode = data.status;
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(html);
+        return;
+      }
+
+      if (pathname === "/support" || pathname === "/support/cases") {
+        const data = await loadSupportBackofficePageData({
+          apiBaseUrl: options.apiBaseUrl,
+          accessToken,
+          locale,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        });
+        const html = renderSupportBackofficePageHtml(data);
         res.statusCode = data.status;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.end(html);

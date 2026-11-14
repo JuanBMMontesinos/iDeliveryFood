@@ -22,13 +22,17 @@ export type PartnerRole =
   | "partner_support";
 
 export type StaffRole =
+  | "support"
   | "support_l1"
   | "support_l2"
   | "operations"
+  | "logistics"
   | "finance"
   | "commercial"
+  | "marketing"
   | "growth_marketing"
   | "risk_compliance"
+  | "auditor_privacy"
   | "tech_admin";
 
 export type AccountStatus =
@@ -721,20 +725,91 @@ export interface OrderReviewContract {
   createdAtIso: string;
 }
 
+export type SupportCaseStatus =
+  | "OPEN"
+  | "IN_PROGRESS"
+  | "WAITING_USER"
+  | "WAITING_CUSTOMER"
+  | "WAITING_PARTNER"
+  | "AWAITING_ACTION_APPROVAL"
+  | "ESCALATED_FINANCE"
+  | "ESCALATED_LOGISTICS"
+  | "RESOLVED"
+  | "CLOSED";
+
+export type SupportPriority = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "CRITICAL_IN_ROUTE";
+
 export interface SupportCaseContract {
   id: string;
   caseNumber: number;
   orderId: string | null;
+  deliveryTaskId?: string | null;
   organizationId: string | null;
   storeId: string | null;
   requesterId: string;
   requesterRole: "CUSTOMER" | "PARTNER" | "COURIER";
+  assignedStaffId?: string | null;
   category: string;
-  priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-  status: "OPEN" | "IN_PROGRESS" | "WAITING_USER" | "RESOLVED" | "CLOSED";
+  priority: SupportPriority;
+  status: SupportCaseStatus;
   subject: string;
   slaDueAtIso: string;
+  resolvedAtIso?: string | null;
   createdAtIso: string;
+  updatedAtIso?: string;
+}
+
+export interface SupportMessageContract {
+  id: string;
+  caseId: string;
+  senderId: string;
+  body: string;
+  isInternalNote: boolean;
+  createdAtIso: string;
+}
+
+export interface SupportAttachmentContract {
+  id: string;
+  caseId: string;
+  messageId: string | null;
+  uploadedBy: string;
+  storageBucket: string;
+  objectPath: string;
+  mimeType: string;
+  byteSize: number;
+  sha256Hex: string;
+  isInternalOnly: boolean;
+  createdAtIso: string;
+}
+
+export interface SupportActionRequestContract {
+  id: string;
+  caseId: string;
+  orderId: string;
+  requestedBy: string;
+  actionType: "PARTIAL_REFUND" | "FULL_REFUND" | "COURIER_COMPENSATION";
+  amountCents: number;
+  reason: string;
+  status: "PENDING_FINANCE" | "APPROVED" | "REJECTED";
+  decidedBy: string | null;
+  decidedAtIso?: string | null;
+  decisionNotes?: string | null;
+  createdAtIso: string;
+}
+
+export interface SupportCaseDetailResponseContract {
+  supportCase: SupportCaseContract;
+  messages: SupportMessageContract[];
+  attachments: SupportAttachmentContract[];
+  actionRequests: SupportActionRequestContract[];
+}
+
+export interface SupportBackofficeOverviewContract {
+  autoRefundLimitCents: number;
+  cases: SupportCaseContract[];
+  messages: SupportMessageContract[];
+  attachments: SupportAttachmentContract[];
+  actionRequests: SupportActionRequestContract[];
 }
 
 export interface MerchantContractRecordContract {
@@ -1009,7 +1084,11 @@ export const I18N_MESSAGES = {
     "customer.order_tracking.otp_notice": "Share your 4-digit delivery confirmation code with the courier only upon handoff.",
     "customer.review.title": "Verified Order Review & Support",
     "customer.support.title": "Open Order Support Ticket",
-    "customer.profile.title": "My Profile, Devices & LGPD Privacy"
+    "customer.profile.title": "My Profile, Devices & LGPD Privacy",
+    "support.console.title": "Support & Customer Service Console — SLA Queue & Refund Thresholds",
+    "support.case.internal_note_badge": "INTERNAL STAFF NOTE — Never visible to external actors",
+    "support.action.auto_approved_notice": "Refund of {amount} auto-approved within support threshold ({limit}).",
+    "support.action.escalated_finance_notice": "Refund of {amount} exceeds support threshold ({limit}); escalated to PENDING_FINANCE (requires finance MFA aal2)."
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1083,7 +1162,11 @@ export const I18N_MESSAGES = {
     "customer.order_tracking.otp_notice": "Informe seu código de confirmação de entrega de 4 dígitos ao entregador apenas no recebimento.",
     "customer.review.title": "Avaliação Verificada do Pedido e Suporte",
     "customer.support.title": "Abrir Chamado de Suporte do Pedido",
-    "customer.profile.title": "Meu Perfil, Dispositivos e Privacidade LGPD"
+    "customer.profile.title": "Meu Perfil, Dispositivos e Privacidade LGPD",
+    "support.console.title": "Console de Atendimento e Suporte — Fila SLA e Alçadas de Reembolso",
+    "support.case.internal_note_badge": "NOTA INTERNA DA EQUIPE — Invisível para atores externos",
+    "support.action.auto_approved_notice": "Reembolso de {amount} aprovado automaticamente dentro da alçada de suporte ({limit}).",
+    "support.action.escalated_finance_notice": "Reembolso de {amount} excede a alçada de suporte ({limit}); escalonado para PENDING_FINANCE (exige finance com MFA aal2)."
   }
 } as const;
 
