@@ -5,6 +5,7 @@ import {
   formatOperationalTimestamp,
   translateMessage,
   type OrderEventRecordContract,
+  type OrderGroceryPickingDetailContract,
   type OrderRecordContract,
   type SupportedLocale,
 } from "@ideliveryfood/contracts";
@@ -17,6 +18,7 @@ export interface CustomerOrderTrackingScreenModel {
   banner: UiScreenStateBanner | null;
   order: OrderRecordContract | null;
   events: OrderEventRecordContract[];
+  pickingDetail: OrderGroceryPickingDetailContract | null;
   totalFormatted: string;
   statusLabel: string;
   otpSecurityNotice: string;
@@ -44,6 +46,7 @@ export async function loadCustomerOrderTrackingScreen(params: {
       banner: buildUiScreenStateBanner({ kind: "offline", locale }),
       order: null,
       events: [],
+      pickingDetail: null,
       totalFormatted: formatBrlCents(0, locale),
       statusLabel: translateMessage("app.state.offline", locale),
       otpSecurityNotice: translateMessage("customer.order_tracking.otp_notice", locale),
@@ -53,12 +56,16 @@ export async function loadCustomerOrderTrackingScreen(params: {
   }
 
   try {
-    const [orderRes, eventsRes] = await Promise.all([
+    const [orderRes, eventsRes, pickingRes] = await Promise.all([
       params.apiClient.getOrder(params.orderId),
       params.apiClient.listOrderEvents(params.orderId),
+      params.apiClient
+        .getOrderGroceryPickingDetail(params.orderId)
+        .catch(() => null),
     ]);
     const order = orderRes.data;
     const events = eventsRes.data;
+    const pickingDetail = pickingRes ? pickingRes.data : null;
 
     const elapsedSeconds = Math.floor(
       (now.getTime() - new Date(order.createdAtIso).getTime()) / 1000
@@ -98,6 +105,7 @@ export async function loadCustomerOrderTrackingScreen(params: {
       banner: null,
       order,
       events,
+      pickingDetail,
       totalFormatted: formatBrlCents(order.totalCents, locale),
       statusLabel,
       otpSecurityNotice: translateMessage("customer.order_tracking.otp_notice", locale),
@@ -115,6 +123,7 @@ export async function loadCustomerOrderTrackingScreen(params: {
       banner: buildUiScreenStateBanner({ kind: bannerKind, locale, errorCode, correlationId }),
       order: null,
       events: [],
+      pickingDetail: null,
       totalFormatted: formatBrlCents(0, locale),
       statusLabel: errorCode,
       otpSecurityNotice: translateMessage("customer.order_tracking.otp_notice", locale),
@@ -148,6 +157,57 @@ export function renderCustomerOrderTrackingHtml(
     )
     .join("");
 
+  const pickingHtml = model.pickingDetail
+    ? (() => {
+        const pd = model.pickingDetail;
+        const subsHtml =
+          pd.substitutions.length === 0
+            ? `<p>${escapeHtml(translateMessage("app.state.empty", model.locale))}</p>`
+            : pd.substitutions
+                .map((sub) => {
+                  const suggestedName = isPt
+                    ? (sub.suggestedProductNamePtBr ?? "—")
+                    : (sub.suggestedProductNameEn ?? "—");
+                  const controlsHtml =
+                    sub.status === "PENDING_CUSTOMER_APPROVAL"
+                      ? `<div style="display:flex;gap:0.5rem;margin-top:0.5rem;" data-testid="customer-sub-actions-${escapeHtml(sub.id)}">
+                          <button type="button" data-action="APPROVE">${isPt ? "Aprovar Substituição" : "Approve Substitution"}</button>
+                          <button type="button" data-action="REJECT">${isPt ? "Recusar e Reembolsar" : "Reject & Refund"}</button>
+                        </div>`
+                      : "";
+                  return `<article class="card" data-testid="customer-substitution-row-${escapeHtml(sub.id)}" style="margin-bottom:0.5rem;">
+                    <div>
+                      <strong>${escapeHtml(suggestedName)}</strong>
+                      <span class="badge">${escapeHtml(sub.status)}</span>
+                      <span class="badge">${escapeHtml(sub.customerPreference)}</span>
+                    </div>
+                    <p style="margin:0.25rem 0;">
+                      ${escapeHtml(formatBrlCents(sub.originalLineCents, model.locale))} →
+                      <strong>${escapeHtml(formatBrlCents(sub.suggestedLineCents, model.locale))}</strong> ·
+                      ${escapeHtml(sub.reason)}
+                    </p>
+                    ${controlsHtml}
+                  </article>`;
+                })
+                .join("\n");
+
+        return `<section class="card" data-testid="customer-order-picking-section" aria-labelledby="customer-picking-heading" style="margin-top:1rem;">
+          <h2 id="customer-picking-heading">${escapeHtml(translateMessage("picking.substitution.customer_title", model.locale))}</h2>
+          <p>
+            <span class="badge" data-testid="customer-picking-policy-status">${escapeHtml(pd.status)}</span>
+            ${
+              pd.pickTask
+                ? `<span class="badge" data-testid="customer-pick-task-status">${escapeHtml(pd.pickTask.status)}</span>
+                   <span> · ${isPt ? "Total Final Separado:" : "Final Picked Total:"} <strong>${escapeHtml(formatBrlCents(pd.pickTask.finalPickedTotalCents, model.locale))}</strong></span>
+                   <span> · ${isPt ? "Ajuste Reembolso:" : "Refund Adjustment:"} <strong>${escapeHtml(formatBrlCents(pd.pickTask.refundAdjustmentCents, model.locale))}</strong></span>`
+                : ""
+            }
+          </p>
+          ${subsHtml}
+        </section>`;
+      })()
+    : "";
+
   const mainContentHtml = `
     <section class="card" aria-labelledby="order-tracking-heading">
       <h1 id="order-tracking-heading">${escapeHtml(model.title)}</h1>
@@ -162,6 +222,7 @@ export function renderCustomerOrderTrackingHtml(
       </div>
       <h2>${isPt ? "Linha do Tempo Auditada" : "Audited Timeline"}</h2>
       <ol>${timelineHtml}</ol>
+      ${pickingHtml}
       ${
         model.canSelfCancel
           ? `<button type="button">${isPt ? "Cancelar Pedido" : "Cancel Order"}</button>`

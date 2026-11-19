@@ -83,6 +83,12 @@ import {
   type RiskAlertContract,
   type RiskAlertStatus,
   type RiskHumanReviewDecision,
+  type CustomerSubstitutionDecision,
+  type OrderGroceryPickingDetailContract,
+  type OrderItemSubstitutionContract,
+  type OrderPickTaskContract,
+  type OrderPickingItemContract,
+  type StoreGroceryPickingOverviewContract,
 } from "@ideliveryfood/contracts";
 
 export interface ApiClientOptions {
@@ -1448,6 +1454,166 @@ export class IDeliveryApiClient {
     return this.request({
       path: `/governance/privacy/requests/${encodeURIComponent(requestId)}/anonymize`,
       method: "POST",
+    });
+  }
+
+  // ============================================================================
+  // M22: Grocery & Market Extension — Picking, Scale Weighing & Substitutions
+  // ============================================================================
+
+  public async getStoreGroceryPickingOverview(
+    storeId: string
+  ): Promise<{ data: StoreGroceryPickingOverviewContract }> {
+    return this.request({
+      path: `/partner/stores/${encodeURIComponent(storeId)}/picking`,
+      method: "GET",
+    });
+  }
+
+  public async startOrderPickTask(params: {
+    storeId: string;
+    orderId: string;
+    id?: string;
+    notes?: string;
+  }): Promise<{ data: OrderPickTaskContract }> {
+    return this.request({
+      path: `/partner/stores/${encodeURIComponent(params.storeId)}/orders/${encodeURIComponent(params.orderId)}/pick-tasks`,
+      method: "POST",
+      body: {
+        ...(params.id ? { id: params.id } : {}),
+        ...(params.notes ? { notes: params.notes } : {}),
+      },
+    });
+  }
+
+  public async weighOrderPickingItem(params: {
+    pickTaskId: string;
+    orderItemId: string;
+    actualWeightGrams: number;
+    explicitCustomerOverweightConsent?: boolean;
+  }): Promise<{
+    data: {
+      orderItem: OrderPickingItemContract;
+      pickTask: OrderPickTaskContract;
+      weighedBaseCents: number;
+      calculatedLineCents: number;
+      deltaCents: number;
+      refundAdjustmentCents: number;
+    };
+  }> {
+    return this.request({
+      path: `/partner/pick-tasks/${encodeURIComponent(params.pickTaskId)}/items/${encodeURIComponent(params.orderItemId)}/weigh`,
+      method: "POST",
+      body: {
+        actualWeightGrams: params.actualWeightGrams,
+        ...(params.explicitCustomerOverweightConsent !== undefined
+          ? {
+              explicitCustomerOverweightConsent:
+                params.explicitCustomerOverweightConsent,
+            }
+          : {}),
+      },
+    });
+  }
+
+  public async proposeOrRefundOrderItemSubstitution(params: {
+    pickTaskId: string;
+    id?: string;
+    orderItemId: string;
+    action: "PROPOSE_SUBSTITUTION" | "MARK_UNAVAILABLE_REFUND";
+    suggestedProductId?: string | null;
+    suggestedProductNameEn?: string | null;
+    suggestedProductNamePtBr?: string | null;
+    suggestedLineCents?: number;
+    reason: string;
+    timeoutSeconds?: number;
+    allowPriceIncreaseWithConsent?: boolean;
+  }): Promise<{
+    data: {
+      substitution: OrderItemSubstitutionContract;
+      pickTask: OrderPickTaskContract;
+    };
+  }> {
+    return this.request({
+      path: `/partner/pick-tasks/${encodeURIComponent(params.pickTaskId)}/substitutions`,
+      method: "POST",
+      body: {
+        ...(params.id ? { id: params.id } : {}),
+        orderItemId: params.orderItemId,
+        action: params.action,
+        ...(params.suggestedProductId !== undefined
+          ? { suggestedProductId: params.suggestedProductId }
+          : {}),
+        ...(params.suggestedProductNameEn !== undefined
+          ? { suggestedProductNameEn: params.suggestedProductNameEn }
+          : {}),
+        ...(params.suggestedProductNamePtBr !== undefined
+          ? { suggestedProductNamePtBr: params.suggestedProductNamePtBr }
+          : {}),
+        ...(params.suggestedLineCents !== undefined
+          ? { suggestedLineCents: params.suggestedLineCents }
+          : {}),
+        reason: params.reason,
+        ...(params.timeoutSeconds !== undefined
+          ? { timeoutSeconds: params.timeoutSeconds }
+          : {}),
+        ...(params.allowPriceIncreaseWithConsent !== undefined
+          ? {
+              allowPriceIncreaseWithConsent:
+                params.allowPriceIncreaseWithConsent,
+            }
+          : {}),
+      },
+    });
+  }
+
+  public async completeOrderPickTask(params: {
+    pickTaskId: string;
+    notes?: string;
+  }): Promise<{
+    data: {
+      pickTask: OrderPickTaskContract;
+      refundAdjustmentCents: number;
+      finalPickedTotalCents: number;
+    };
+  }> {
+    return this.request({
+      path: `/partner/pick-tasks/${encodeURIComponent(params.pickTaskId)}/complete`,
+      method: "POST",
+      body: {
+        ...(params.notes ? { notes: params.notes } : {}),
+      },
+    });
+  }
+
+  public async getOrderGroceryPickingDetail(
+    orderId: string
+  ): Promise<{ data: OrderGroceryPickingDetailContract }> {
+    return this.request({
+      path: `/orders/${encodeURIComponent(orderId)}/picking`,
+      method: "GET",
+    });
+  }
+
+  public async respondToOrderItemSubstitution(params: {
+    orderId: string;
+    substitutionId: string;
+    decision: CustomerSubstitutionDecision;
+    notes?: string;
+  }): Promise<{
+    data: {
+      substitution: OrderItemSubstitutionContract;
+      pickTask: OrderPickTaskContract;
+      isExpiredTimeout: boolean;
+    };
+  }> {
+    return this.request({
+      path: `/orders/${encodeURIComponent(params.orderId)}/substitutions/${encodeURIComponent(params.substitutionId)}/respond`,
+      method: "POST",
+      body: {
+        decision: params.decision,
+        ...(params.notes ? { notes: params.notes } : {}),
+      },
     });
   }
 }

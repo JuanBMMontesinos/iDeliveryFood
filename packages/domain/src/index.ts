@@ -57,6 +57,14 @@ import {
   type RiskAlertStatus,
   type RiskHumanReviewDecision,
   type RiskRuleExplanationContract,
+  type CustomerSubstitutionDecision,
+  type GroceryPricingUnit,
+  type ItemSubstitutionPreference,
+  type OrderItemSubstitutionContract,
+  type OrderItemSubstitutionStatus,
+  type OrderPickTaskContract,
+  type OrderPickTaskStatus,
+  type OrderPickingItemContract,
   type SupportedLocale,
   formatBrlCents,
   resolveSupportedLocale,
@@ -4022,6 +4030,436 @@ export function anonymizeProfilePii(params: {
     anonymizedAtIso: (params.now ?? new Date()).toISOString(),
   };
 }
+
+// ============================================================================
+// M22: Grocery & Market Extension — Policy Gate, Scale Pricing (HALF_UP Cents),
+// Customer-Consented Substitutions & Financial Adjustments
+// ============================================================================
+
+export interface GroceryPickingPolicyEvaluation {
+  enabled: boolean;
+  status: "ACTIVE" | "FEATURE_DISABLED_BY_POLICY";
+  reasonCode:
+    | "GROCERY_PICKING_ENABLED"
+    | "PLATFORM_GROCERY_PICKING_DISABLED"
+    | "STORE_GROCERY_PICKING_DISABLED";
+}
+
+/**
+ * Evaluates whether the M22 Grocery & Market Picking extension is enabled for a store
+ * under platform_policies.feature_grocery_picking_enabled and organization/store policy.
+ */
+export function evaluateGroceryPickingPolicyAccess(params: {
+  platformFeatureGroceryPickingEnabled: boolean;
+  organizationFeatureGroceryPickingEnabled?: boolean;
+  storeFeatureGroceryPickingEnabled?: boolean;
+}): GroceryPickingPolicyEvaluation {
+  if (!params.platformFeatureGroceryPickingEnabled) {
+    return {
+      enabled: false,
+      status: "FEATURE_DISABLED_BY_POLICY",
+      reasonCode: "PLATFORM_GROCERY_PICKING_DISABLED",
+    };
+  }
+  const storeOrOrgEnabled = Boolean(
+    params.organizationFeatureGroceryPickingEnabled ||
+      params.storeFeatureGroceryPickingEnabled
+  );
+  if (!storeOrOrgEnabled) {
+    return {
+      enabled: false,
+      status: "FEATURE_DISABLED_BY_POLICY",
+      reasonCode: "STORE_GROCERY_PICKING_DISABLED",
+    };
+  }
+  return {
+    enabled: true,
+    status: "ACTIVE",
+    reasonCode: "GROCERY_PICKING_ENABLED",
+  };
+}
+
+export interface WeighedItemPriceEvaluation {
+  actualWeightGrams: number;
+  pricePerKgCents: number;
+  weighedBaseCents: number;
+  addonsTotalCents: number;
+  calculatedLineCents: number;
+  preAuthorizedLineCents: number;
+  deltaCents: number;
+  refundAdjustmentCents: number;
+}
+
+/**
+ * Deterministically calculates variable-weight item price in integer BRL centavos using
+ * HALF_UP rounding: round_half_up(actual_weight_grams * price_per_kg_cents / 1000).
+ * Never exceeds the pre-authorized line ceiling unless explicitCustomerOverweightConsent is true.
+ */
+export function calculateWeighedItemPriceCents(params: {
+  actualWeightGrams: number;
+  pricePerKgCents: number;
+  preAuthorizedLineCents: number;
+  addonsTotalCents?: number;
+  explicitCustomerOverweightConsent?: boolean;
+}): WeighedItemPriceEvaluation {
+  if (
+    !Number.isSafeInteger(params.actualWeightGrams) ||
+    params.actualWeightGrams < 0
+  ) {
+    throw new RangeError(
+      `INVALID_WEIGHT_GRAMS: actualWeightGrams must be a non-negative integer (received ${params.actualWeightGrams}).`
+    );
+  }
+  assertIntegerCents(params.pricePerKgCents, "pricePerKgCents");
+  assertIntegerCents(params.preAuthorizedLineCents, "preAuthorizedLineCents");
+  const addonsTotalCents = assertIntegerCents(
+    params.addonsTotalCents ?? 0,
+    "addonsTotalCents"
+  );
+
+  // HALF_UP integer division by 1000: floor((numerator + 500) / 1000)
+  const numerator = params.actualWeightGrams * params.pricePerKgCents;
+  const weighedBaseCents = Math.floor((numerator + 500) / 1000);
+  const calculatedLineCents = weighedBaseCents + addonsTotalCents;
+
+  if (
+    calculatedLineCents > params.preAuthorizedLineCents &&
+    !params.explicitCustomerOverweightConsent
+  ) {
+    throw new Error(
+      `WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING: Actual weighed price (${calculatedLineCents} cents) exceeds pre-authorized ceiling (${params.preAuthorizedLineCents} cents) without explicit customer consent.`
+    );
+  }
+
+  const deltaCents = calculatedLineCents - params.preAuthorizedLineCents;
+  const refundAdjustmentCents = deltaCents < 0 ? Math.abs(deltaCents) : 0;
+
+  return {
+    actualWeightGrams: params.actualWeightGrams,
+    pricePerKgCents: params.pricePerKgCents,
+    weighedBaseCents,
+    addonsTotalCents,
+    calculatedLineCents,
+    preAuthorizedLineCents: params.preAuthorizedLineCents,
+    deltaCents,
+    refundAdjustmentCents,
+  };
+}
+
+export interface ItemSubstitutionProposalEvaluation {
+  status: OrderItemSubstitutionStatus;
+  nextPickTaskStatus: OrderPickTaskStatus;
+  suggestedProductId: string | null;
+  suggestedProductNameEn: string | null;
+  suggestedProductNamePtBr: string | null;
+  originalLineCents: number;
+  suggestedLineCents: number;
+  priceDeltaCents: number;
+  refundAdjustmentCents: number;
+  expiresAtIso: string;
+}
+
+/**
+ * Evaluates a store picker action when an item is unavailable (M22):
+ * - If customerPreference === 'REFUND_IF_UNAVAILABLE', any suggested substitution is strictly prohibited
+ *   (no silent or suggested replacement!); only 'MARK_UNAVAILABLE_REFUND' is permitted.
+ * - If customerPreference === 'ALLOW_SUGGESTION' or 'CONTACT_ME', builds a PENDING_CUSTOMER_APPROVAL
+ *   substitution with a configurable timeout (default 300s) and transitions the pick task to
+ *   AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL.
+ */
+export function evaluateItemSubstitutionProposal(params: {
+  customerPreference: ItemSubstitutionPreference;
+  originalLineCents: number;
+  action: "PROPOSE_SUBSTITUTION" | "MARK_UNAVAILABLE_REFUND";
+  suggestedProductId?: string | null;
+  suggestedProductNameEn?: string | null;
+  suggestedProductNamePtBr?: string | null;
+  suggestedLineCents?: number;
+  reason: string;
+  timeoutSeconds?: number;
+  allowPriceIncreaseWithConsent?: boolean;
+  now?: Date;
+}): ItemSubstitutionProposalEvaluation {
+  assertIntegerCents(params.originalLineCents, "originalLineCents");
+  const cleanReason = (params.reason ?? "").trim();
+  if (cleanReason.length < 3) {
+    throw new Error(
+      "SUBSTITUTION_REASON_REQUIRED: Substitution or unavailability reason must have at least 3 characters."
+    );
+  }
+  const now = params.now ?? new Date();
+  const timeoutSeconds = params.timeoutSeconds ?? 300;
+  if (
+    !Number.isSafeInteger(timeoutSeconds) ||
+    timeoutSeconds < 30 ||
+    timeoutSeconds > 3600
+  ) {
+    throw new RangeError(
+      "INVALID_SUBSTITUTION_TIMEOUT: timeoutSeconds must be an integer between 30 and 3600."
+    );
+  }
+  const expiresAtIso = new Date(
+    now.getTime() + timeoutSeconds * 1000
+  ).toISOString();
+
+  if (params.customerPreference === "REFUND_IF_UNAVAILABLE") {
+    if (
+      params.action === "PROPOSE_SUBSTITUTION" ||
+      Boolean(params.suggestedProductId)
+    ) {
+      throw new Error(
+        "SUBSTITUTION_FORBIDDEN_BY_PREFERENCE: Customer selected REFUND_IF_UNAVAILABLE; silent or suggested substitution is strictly prohibited."
+      );
+    }
+    return {
+      status: "AUTO_REFUNDED_UNAVAILABLE",
+      nextPickTaskStatus: "PICKING_IN_PROGRESS",
+      suggestedProductId: null,
+      suggestedProductNameEn: null,
+      suggestedProductNamePtBr: null,
+      originalLineCents: params.originalLineCents,
+      suggestedLineCents: 0,
+      priceDeltaCents: -params.originalLineCents,
+      refundAdjustmentCents: params.originalLineCents,
+      expiresAtIso,
+    };
+  }
+
+  if (params.action === "MARK_UNAVAILABLE_REFUND") {
+    return {
+      status: "AUTO_REFUNDED_UNAVAILABLE",
+      nextPickTaskStatus: "PICKING_IN_PROGRESS",
+      suggestedProductId: null,
+      suggestedProductNameEn: null,
+      suggestedProductNamePtBr: null,
+      originalLineCents: params.originalLineCents,
+      suggestedLineCents: 0,
+      priceDeltaCents: -params.originalLineCents,
+      refundAdjustmentCents: params.originalLineCents,
+      expiresAtIso,
+    };
+  }
+
+  const suggestedProductId = (params.suggestedProductId ?? "").trim();
+  const suggestedProductNameEn = (params.suggestedProductNameEn ?? "").trim();
+  const suggestedProductNamePtBr = (params.suggestedProductNamePtBr ?? "").trim();
+  if (!suggestedProductId || !suggestedProductNameEn || !suggestedProductNamePtBr) {
+    throw new Error(
+      "SUBSTITUTION_SUGGESTED_PRODUCT_REQUIRED: suggestedProductId, suggestedProductNameEn, and suggestedProductNamePtBr are required when proposing a substitution."
+    );
+  }
+  const suggestedLineCents = assertIntegerCents(
+    params.suggestedLineCents ?? -1,
+    "suggestedLineCents"
+  );
+
+  if (
+    suggestedLineCents > params.originalLineCents &&
+    !params.allowPriceIncreaseWithConsent
+  ) {
+    throw new Error(
+      `SUBSTITUTION_EXCEEDS_ORIGINAL_CEILING: Suggested substitution (${suggestedLineCents} cents) exceeds pre-authorized item price (${params.originalLineCents} cents) without explicit upward consent.`
+    );
+  }
+
+  const priceDeltaCents = suggestedLineCents - params.originalLineCents;
+  const refundAdjustmentCents =
+    priceDeltaCents < 0 ? Math.abs(priceDeltaCents) : 0;
+
+  return {
+    status: "PENDING_CUSTOMER_APPROVAL",
+    nextPickTaskStatus: "AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL",
+    suggestedProductId,
+    suggestedProductNameEn,
+    suggestedProductNamePtBr,
+    originalLineCents: params.originalLineCents,
+    suggestedLineCents,
+    priceDeltaCents,
+    refundAdjustmentCents,
+    expiresAtIso,
+  };
+}
+
+export interface CustomerSubstitutionResolution {
+  updatedStatus: OrderItemSubstitutionStatus;
+  effectiveLineCents: number;
+  refundDeltaCents: number;
+  decidedAtIso: string;
+  isExpiredTimeout: boolean;
+}
+
+/**
+ * Resolves a pending substitution proposal when the customer responds (APPROVE / REJECT)
+ * or when the approval window expires (EXPIRED_TIMEOUT_REFUNDED — never substitutes silently on timeout).
+ */
+export function resolveCustomerSubstitutionDecision(params: {
+  substitution: Pick<
+    OrderItemSubstitutionContract,
+    | "id"
+    | "status"
+    | "originalLineCents"
+    | "suggestedLineCents"
+    | "expiresAtIso"
+  >;
+  decision: CustomerSubstitutionDecision;
+  now?: Date;
+}): CustomerSubstitutionResolution {
+  if (params.substitution.status !== "PENDING_CUSTOMER_APPROVAL") {
+    throw new Error(
+      `SUBSTITUTION_ALREADY_RESOLVED: Substitution ${params.substitution.id} is already in status ${params.substitution.status}.`
+    );
+  }
+  const now = params.now ?? new Date();
+  const decidedAtIso = now.toISOString();
+  const expiresAtMs = new Date(params.substitution.expiresAtIso).getTime();
+
+  if (now.getTime() > expiresAtMs) {
+    return {
+      updatedStatus: "EXPIRED_TIMEOUT_REFUNDED",
+      effectiveLineCents: 0,
+      refundDeltaCents: params.substitution.originalLineCents,
+      decidedAtIso,
+      isExpiredTimeout: true,
+    };
+  }
+
+  if (params.decision === "APPROVE") {
+    return {
+      updatedStatus: "APPROVED_BY_CUSTOMER",
+      effectiveLineCents: params.substitution.suggestedLineCents,
+      refundDeltaCents: Math.max(
+        0,
+        params.substitution.originalLineCents -
+          params.substitution.suggestedLineCents
+      ),
+      decidedAtIso,
+      isExpiredTimeout: false,
+    };
+  }
+
+  return {
+    updatedStatus: "REJECTED_BY_CUSTOMER",
+    effectiveLineCents: 0,
+    refundDeltaCents: params.substitution.originalLineCents,
+    decidedAtIso,
+    isExpiredTimeout: false,
+  };
+}
+
+export interface FinalizedPickTaskFinancialAdjustment {
+  status: "PICKING_COMPLETED";
+  preAuthorizedTotalCents: number;
+  finalPickedTotalCents: number;
+  weightAdjustmentDeltaCents: number;
+  refundAdjustmentCents: number;
+  completedAtIso: string;
+  refundLedgerJournal: LedgerJournalPostContract | null;
+}
+
+/**
+ * Finalizes an order pick task once all items are weighed and all substitutions are resolved.
+ * Computes the exact downward refund/capture adjustment in integer BRL cents and generates a
+ * balanced double-entry M13 ledger journal when refundAdjustmentCents > 0.
+ */
+export function finalizeOrderPickTaskFinancialAdjustment(params: {
+  orderId: string;
+  organizationId: string;
+  preAuthorizedTotalCents: number;
+  orderItems: readonly Pick<
+    OrderPickingItemContract,
+    "orderItemId" | "totalLineCents" | "adjustedLineCents"
+  >[];
+  substitutions: readonly Pick<
+    OrderItemSubstitutionContract,
+    "id" | "status" | "expiresAtIso"
+  >[];
+  journalId?: string;
+  now?: Date;
+}): FinalizedPickTaskFinancialAdjustment {
+  assertIntegerCents(params.preAuthorizedTotalCents, "preAuthorizedTotalCents");
+  const now = params.now ?? new Date();
+
+  for (const sub of params.substitutions) {
+    if (sub.status === "PENDING_CUSTOMER_APPROVAL") {
+      throw new Error(
+        `PICK_TASK_AWAITING_CUSTOMER_APPROVAL: Substitution ${sub.id} is still awaiting customer decision.`
+      );
+    }
+  }
+
+  const preAuthorizedItemsSum = params.orderItems.reduce(
+    (acc, item) => acc + item.totalLineCents,
+    0
+  );
+  const pickedItemsSum = params.orderItems.reduce(
+    (acc, item) => acc + (item.adjustedLineCents ?? item.totalLineCents),
+    0
+  );
+
+  const weightAdjustmentDeltaCents = pickedItemsSum - preAuthorizedItemsSum;
+  if (weightAdjustmentDeltaCents > 0) {
+    throw new Error(
+      `WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING: Final picked items sum (${pickedItemsSum} cents) exceeds pre-authorized items ceiling (${preAuthorizedItemsSum} cents).`
+    );
+  }
+
+  const refundAdjustmentCents = Math.min(
+    params.preAuthorizedTotalCents,
+    Math.abs(weightAdjustmentDeltaCents)
+  );
+  const finalPickedTotalCents = Math.max(
+    0,
+    params.preAuthorizedTotalCents - refundAdjustmentCents
+  );
+
+  let refundLedgerJournal: LedgerJournalPostContract | null = null;
+  if (refundAdjustmentCents > 0) {
+    const journalId = params.journalId ?? crypto.randomUUID();
+    const orgDigits =
+      params.organizationId.replace(/^0+/, "").replace(/[^0-9a-zA-Z]/g, "") ||
+      params.organizationId;
+    const merchantLiabilityCode = params.organizationId.endsWith("0101")
+      ? "LIABILITY_MERCHANT_ORG_101"
+      : params.organizationId.endsWith("0102")
+        ? "LIABILITY_MERCHANT_ORG_102"
+        : `LIABILITY_MERCHANT_ORG_${orgDigits}`;
+
+    refundLedgerJournal = {
+      id: journalId,
+      referenceType: "ORDER_REFUND",
+      referenceId: params.orderId,
+      description: `M22 grocery picking weight/substitution downward adjustment (${refundAdjustmentCents} cents)`,
+      idempotencyKey: `m22_pick_refund_${params.orderId}`,
+      postedBy: "SYSTEM_M22_PICKING",
+      entries: [
+        {
+          accountCode: merchantLiabilityCode,
+          direction: "DEBIT",
+          amountCents: refundAdjustmentCents,
+        },
+        {
+          accountCode: "ASSET_PSP_CLEARING",
+          direction: "CREDIT",
+          amountCents: refundAdjustmentCents,
+        },
+      ],
+      totalDebitsCents: refundAdjustmentCents,
+      totalCreditsCents: refundAdjustmentCents,
+      createdAtIso: now.toISOString(),
+    };
+  }
+
+  return {
+    status: "PICKING_COMPLETED",
+    preAuthorizedTotalCents: params.preAuthorizedTotalCents,
+    finalPickedTotalCents,
+    weightAdjustmentDeltaCents,
+    refundAdjustmentCents,
+    completedAtIso: now.toISOString(),
+    refundLedgerJournal,
+  };
+}
+
 
 
 

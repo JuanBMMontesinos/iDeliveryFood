@@ -529,6 +529,18 @@ describe("@ideliveryfood/partner-web — Live Supabase & SSR App Router Integrat
     assert.match(chainHtml, /Paulista Artisan Burgers - Jardins/);
     assert.match(chainHtml, /Tokyo Bay Sushi - Pinheiros/);
     assert.match(chainHtml, /data-testid="chain-units-table"/);
+
+    // 4. /picking M22 Grocery & Market Picking Console (Policy Gate + Seeded Weighed Items & Substitutions)
+    const pickingRes = await fetch(`${partnerBaseUrl}/picking?locale=pt-BR`);
+    assert.equal(pickingRes.status, 200);
+    const pickingHtml = await pickingRes.text();
+    assert.match(pickingHtml, /data-testid="picking-policy-status"/);
+    assert.match(pickingHtml, /FEATURE_DISABLED_BY_POLICY/);
+    assert.match(pickingHtml, /data-testid="picking-tasks-table"/);
+    assert.match(pickingHtml, /data-testid="picking-items-table"/);
+    assert.match(pickingHtml, /data-testid="picking-substitutions-table"/);
+    assert.match(pickingHtml, /APPROVED_BY_CUSTOMER/);
+    assert.match(pickingHtml, /ALLOW_SUGGESTION/);
   });
 });
 

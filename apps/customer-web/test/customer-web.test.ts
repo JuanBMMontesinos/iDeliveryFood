@@ -412,7 +412,7 @@ describe("@ideliveryfood/customer-web — M05 Discovery, Single-Store Cart, Quot
       assert.match(checkoutHtml, /Checkout \(Authoritative BRL Quote\)/);
       assert.match(checkoutHtml, /R\$\s?54\.57/);
 
-      // 7. Route /orders/[orderId] (Order #10001 live tracking + OTP notice)
+      // 7. Route /orders/[orderId] (Order #10001 live tracking + OTP notice + M22 Grocery Picking & Substitutions)
       const orderRes = await fetch(
         `${webBaseUrl}/orders/00000000-0000-4000-8000-000000001001?locale=en`
       );
@@ -421,6 +421,10 @@ describe("@ideliveryfood/customer-web — M05 Discovery, Single-Store Cart, Quot
       assert.match(orderHtml, /Order #10001 — Live Tracking/);
       assert.match(orderHtml, /4-digit delivery confirmation code/);
       assert.match(orderHtml, /ORDER_CREATED/);
+      assert.match(orderHtml, /data-testid="customer-order-picking-section"/);
+      assert.match(orderHtml, /PICKING_COMPLETED/);
+      assert.match(orderHtml, /APPROVED_BY_CUSTOMER/);
+      assert.match(orderHtml, /ALLOW_SUGGESTION/);
 
       // 8. Route /orders/[orderId]/review (Verified review & support ticket from live Supabase)
       const reviewRes = await fetch(

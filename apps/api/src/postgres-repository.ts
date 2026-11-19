@@ -4,8 +4,13 @@ import type { StoredInvitationRecord } from "@ideliveryfood/authz";
 import {
   anonymizeProfilePii,
   buildLgpdDataPortabilityPackage,
+  calculateWeighedItemPriceCents,
   computeReproducibleAnalyticalKpis,
+  evaluateGroceryPickingPolicyAccess,
+  evaluateItemSubstitutionProposal,
   evaluatePromotionEligibilityAndSubsidy,
+  finalizeOrderPickTaskFinancialAdjustment,
+  resolveCustomerSubstitutionDecision,
   type DeliveryStatus,
   type OrderStatus,
   type PaymentStatus,
@@ -88,6 +93,16 @@ import {
   type RiskAlertStatus,
   type RiskHumanReviewDecision,
   type RiskRuleExplanationContract,
+  type CustomerSubstitutionDecision,
+  type GroceryPricingUnit,
+  type ItemSubstitutionPreference,
+  type OrderGroceryPickingDetailContract,
+  type OrderItemSubstitutionContract,
+  type OrderItemSubstitutionStatus,
+  type OrderPickTaskContract,
+  type OrderPickTaskStatus,
+  type OrderPickingItemContract,
+  type StoreGroceryPickingOverviewContract,
 } from "@ideliveryfood/contracts";
 import type { ApiDataRepository, AuditLogWriteRecord } from "./index.js";
 
@@ -6475,6 +6490,1167 @@ export function createSupabasePostgresRepository(params: {
       };
     }
 
+    function mapOrderPickingItemRow(
+      row: Record<string, unknown>
+    ): OrderPickingItemContract {
+      return {
+        orderItemId: restoreLogicalId(String(row.id)),
+        orderId: restoreLogicalId(String(row.order_id)),
+        productId: restoreLogicalId(String(row.product_id)),
+        productNameEn: String(row.product_name_snapshot_en ?? ""),
+        productNamePtBr: String(row.product_name_snapshot_pt_br ?? ""),
+        quantity: Number(row.quantity ?? 1),
+        unitPriceCents: Number(row.unit_price_cents ?? 0),
+        addonsUnitPriceCents: Number(row.addons_unit_price_cents ?? 0),
+        totalLineCents: Number(row.total_line_cents ?? 0),
+        adjustedLineCents:
+          row.adjusted_line_cents !== null &&
+          row.adjusted_line_cents !== undefined
+            ? Number(row.adjusted_line_cents)
+            : null,
+        substitutionPreference: String(
+          row.substitution_preference ?? "REFUND_IF_UNAVAILABLE"
+        ) as ItemSubstitutionPreference,
+        pricingUnit: String(row.pricing_unit ?? "UNIT") as GroceryPricingUnit,
+        estimatedWeightGrams:
+          row.estimated_weight_grams !== null &&
+          row.estimated_weight_grams !== undefined
+            ? Number(row.estimated_weight_grams)
+            : null,
+        actualWeightGrams:
+          row.actual_weight_grams !== null &&
+          row.actual_weight_grams !== undefined
+            ? Number(row.actual_weight_grams)
+            : null,
+        pricePerKgCents:
+          row.price_per_kg_cents !== null &&
+          row.price_per_kg_cents !== undefined
+            ? Number(row.price_per_kg_cents)
+            : null,
+      };
+    }
+
+    function mapOrderPickTaskRow(
+      row: Record<string, unknown>
+    ): OrderPickTaskContract {
+      const base: OrderPickTaskContract = {
+        id: restoreLogicalId(String(row.id)),
+        orderId: restoreLogicalId(String(row.order_id)),
+        storeId: restoreLogicalId(String(row.store_id)),
+        customerId: restoreLogicalId(String(row.customer_id)),
+        pickerActorId: row.picker_actor_id
+          ? restoreLogicalId(String(row.picker_actor_id))
+          : null,
+        status: String(
+          row.status ?? "PICKING_IN_PROGRESS"
+        ) as OrderPickTaskStatus,
+        preAuthorizedTotalCents: Number(row.pre_authorized_total_cents ?? 0),
+        finalPickedTotalCents: Number(row.final_picked_total_cents ?? 0),
+        weightAdjustmentDeltaCents: Number(
+          row.weight_adjustment_delta_cents ?? 0
+        ),
+        refundAdjustmentCents: Number(row.refund_adjustment_cents ?? 0),
+        notes: row.notes ? String(row.notes) : null,
+        startedAtIso: new Date(String(row.started_at)).toISOString(),
+        completedAtIso: row.completed_at
+          ? new Date(String(row.completed_at)).toISOString()
+          : null,
+        isTestData: Boolean(row.is_test_data),
+        createdAtIso: new Date(String(row.created_at)).toISOString(),
+        updatedAtIso: new Date(String(row.updated_at)).toISOString(),
+      };
+      if (row.order_number !== null && row.order_number !== undefined) {
+        base.orderNumber = Number(row.order_number);
+      }
+      return base;
+    }
+
+    function mapOrderItemSubstitutionRow(
+      row: Record<string, unknown>
+    ): OrderItemSubstitutionContract {
+      return {
+        id: restoreLogicalId(String(row.id)),
+        pickTaskId: restoreLogicalId(String(row.pick_task_id)),
+        orderId: restoreLogicalId(String(row.order_id)),
+        storeId: restoreLogicalId(String(row.store_id)),
+        customerId: restoreLogicalId(String(row.customer_id)),
+        orderItemId: restoreLogicalId(String(row.order_item_id)),
+        originalProductId: restoreLogicalId(String(row.original_product_id)),
+        suggestedProductId: row.suggested_product_id
+          ? restoreLogicalId(String(row.suggested_product_id))
+          : null,
+        suggestedProductNameEn: row.suggested_product_name_en
+          ? String(row.suggested_product_name_en)
+          : null,
+        suggestedProductNamePtBr: row.suggested_product_name_pt_br
+          ? String(row.suggested_product_name_pt_br)
+          : null,
+        customerPreference: String(
+          row.customer_preference ?? "REFUND_IF_UNAVAILABLE"
+        ) as ItemSubstitutionPreference,
+        originalLineCents: Number(row.original_line_cents ?? 0),
+        suggestedLineCents: Number(row.suggested_line_cents ?? 0),
+        priceDeltaCents: Number(row.price_delta_cents ?? 0),
+        status: String(
+          row.status ?? "PENDING_CUSTOMER_APPROVAL"
+        ) as OrderItemSubstitutionStatus,
+        reason: String(row.reason ?? ""),
+        expiresAtIso: new Date(String(row.expires_at)).toISOString(),
+        customerDecidedAtIso: row.customer_decided_at
+          ? new Date(String(row.customer_decided_at)).toISOString()
+          : null,
+        customerDecisionNotes: row.customer_decision_notes
+          ? String(row.customer_decision_notes)
+          : null,
+        isTestData: Boolean(row.is_test_data),
+        createdAtIso: new Date(String(row.created_at)).toISOString(),
+        updatedAtIso: new Date(String(row.updated_at)).toISOString(),
+      };
+    }
+
+    async function loadStoreGroceryPolicyState(
+      queryable: { query: pg.Pool["query"] },
+      storeUuid: string
+    ): Promise<{
+      policyKey: string;
+      platformEnabled: boolean;
+      orgEnabled: boolean;
+      storeEnabled: boolean;
+      evaluation: ReturnType<typeof evaluateGroceryPickingPolicyAccess>;
+    }> {
+      const [policyRes, storeRes] = await Promise.all([
+        queryable.query(
+          `SELECT policy_key, feature_grocery_picking_enabled
+           FROM public.platform_policies
+           WHERE policy_key = 'DEFAULT_BR_MARKETPLACE'
+           LIMIT 1`
+        ),
+        queryable.query(
+          `SELECT s.feature_grocery_picking_enabled AS store_enabled,
+                  o.feature_grocery_picking_enabled AS org_enabled
+           FROM public.stores s
+           JOIN public.organizations o ON o.id = s.organization_id
+           WHERE s.id = $1
+           LIMIT 1`,
+          [storeUuid]
+        ),
+      ]);
+      const policyKey = String(
+        policyRes.rows[0]?.policy_key ?? "DEFAULT_BR_MARKETPLACE"
+      );
+      const platformEnabled = Boolean(
+        policyRes.rows[0]?.feature_grocery_picking_enabled ?? false
+      );
+      const orgEnabled = Boolean(storeRes.rows[0]?.org_enabled ?? false);
+      const storeEnabled = Boolean(storeRes.rows[0]?.store_enabled ?? false);
+      const evaluation = evaluateGroceryPickingPolicyAccess({
+        platformFeatureGroceryPickingEnabled: platformEnabled,
+        organizationFeatureGroceryPickingEnabled: orgEnabled,
+        storeFeatureGroceryPickingEnabled: storeEnabled,
+      });
+      return {
+        policyKey,
+        platformEnabled,
+        orgEnabled,
+        storeEnabled,
+        evaluation,
+      };
+    }
+
+    async function getStoreGroceryPickingOverview(
+      storeId: string
+    ): Promise<StoreGroceryPickingOverviewContract> {
+      const storeUuid = toDeterministicUuid(storeId);
+      const policyState = await loadStoreGroceryPolicyState(pool, storeUuid);
+      const [tasksRes, subsRes, itemsRes] = await Promise.all([
+        pool.query(
+          `SELECT opt.*, o.order_number
+           FROM public.order_pick_tasks opt
+           JOIN public.orders o ON o.id = opt.order_id
+           WHERE opt.store_id = $1
+           ORDER BY opt.created_at DESC`,
+          [storeUuid]
+        ),
+        pool.query(
+          `SELECT *
+           FROM public.order_item_substitutions
+           WHERE store_id = $1
+           ORDER BY created_at DESC`,
+          [storeUuid]
+        ),
+        pool.query(
+          `SELECT oi.*
+           FROM public.order_items oi
+           JOIN public.orders o ON o.id = oi.order_id
+           WHERE o.store_id = $1
+           ORDER BY oi.created_at ASC`,
+          [storeUuid]
+        ),
+      ]);
+
+      return {
+        policyKey: policyState.policyKey,
+        featureGroceryPickingEnabled: policyState.platformEnabled,
+        storeGroceryPickingEnabled: Boolean(
+          policyState.orgEnabled || policyState.storeEnabled
+        ),
+        status: policyState.evaluation.status,
+        reasonCode: policyState.evaluation.reasonCode,
+        pickTasks: tasksRes.rows.map((r) =>
+          mapOrderPickTaskRow(r as Record<string, unknown>)
+        ),
+        substitutions: subsRes.rows.map((r) =>
+          mapOrderItemSubstitutionRow(r as Record<string, unknown>)
+        ),
+        orderItems: itemsRes.rows.map((r) =>
+          mapOrderPickingItemRow(r as Record<string, unknown>)
+        ),
+      };
+    }
+
+    async function getOrderGroceryPickingDetail(
+      orderId: string
+    ): Promise<OrderGroceryPickingDetailContract | null> {
+      const orderUuid = toDeterministicUuid(orderId);
+      const orderRes = await pool.query(
+        `SELECT id, store_id FROM public.orders WHERE id = $1 LIMIT 1`,
+        [orderUuid]
+      );
+      if ((orderRes.rowCount ?? 0) === 0) return null;
+      const storeUuid = String(orderRes.rows[0]?.store_id);
+      const policyState = await loadStoreGroceryPolicyState(pool, storeUuid);
+
+      const [taskRes, subsRes, itemsRes] = await Promise.all([
+        pool.query(
+          `SELECT opt.*, o.order_number
+           FROM public.order_pick_tasks opt
+           JOIN public.orders o ON o.id = opt.order_id
+           WHERE opt.order_id = $1
+           LIMIT 1`,
+          [orderUuid]
+        ),
+        pool.query(
+          `SELECT *
+           FROM public.order_item_substitutions
+           WHERE order_id = $1
+           ORDER BY created_at ASC`,
+          [orderUuid]
+        ),
+        pool.query(
+          `SELECT *
+           FROM public.order_items
+           WHERE order_id = $1
+           ORDER BY created_at ASC`,
+          [orderUuid]
+        ),
+      ]);
+
+      return {
+        policyKey: policyState.policyKey,
+        featureGroceryPickingEnabled: policyState.platformEnabled,
+        storeGroceryPickingEnabled: Boolean(
+          policyState.orgEnabled || policyState.storeEnabled
+        ),
+        status: policyState.evaluation.status,
+        reasonCode: policyState.evaluation.reasonCode,
+        pickTask:
+          (taskRes.rowCount ?? 0) > 0
+            ? mapOrderPickTaskRow(taskRes.rows[0] as Record<string, unknown>)
+            : null,
+        substitutions: subsRes.rows.map((r) =>
+          mapOrderItemSubstitutionRow(r as Record<string, unknown>)
+        ),
+        orderItems: itemsRes.rows.map((r) =>
+          mapOrderPickingItemRow(r as Record<string, unknown>)
+        ),
+      };
+    }
+
+    async function startOrderPickTask(params: {
+      id?: string;
+      storeId: string;
+      orderId: string;
+      pickerActorId: string;
+      notes?: string;
+    }): Promise<OrderPickTaskContract> {
+      const storeUuid = toDeterministicUuid(params.storeId);
+      const orderUuid = toDeterministicUuid(params.orderId);
+      const pickerUuid = toDeterministicUuid(params.pickerActorId);
+      const pickTaskUuid = params.id
+        ? toDeterministicUuid(params.id)
+        : crypto.randomUUID();
+      await ensureProfileExists(pickerUuid);
+
+      const policyState = await loadStoreGroceryPolicyState(pool, storeUuid);
+      if (!policyState.evaluation.enabled) {
+        throw new Error(
+          `FEATURE_DISABLED_BY_POLICY: ${policyState.evaluation.reasonCode}`
+        );
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const orderRes = await client.query(
+          `SELECT id, order_number, store_id, customer_id, quote_id, total_cents, is_test_data
+           FROM public.orders
+           WHERE id = $1 AND store_id = $2
+           LIMIT 1`,
+          [orderUuid, storeUuid]
+        );
+        if ((orderRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `ORDER_NOT_FOUND: Order ${params.orderId} not found in store ${params.storeId}.`
+          );
+        }
+        const orderRow = orderRes.rows[0] as Record<string, unknown>;
+
+        // Materialize order_items from quote.items_snapshot if not yet materialized
+        const existingItemsRes = await client.query(
+          `SELECT COUNT(*)::int AS c FROM public.order_items WHERE order_id = $1`,
+          [orderUuid]
+        );
+        if (Number(existingItemsRes.rows[0]?.c ?? 0) === 0 && orderRow.quote_id) {
+          const quoteRes = await client.query(
+            `SELECT items_snapshot FROM public.quotes WHERE id = $1 LIMIT 1`,
+            [String(orderRow.quote_id)]
+          );
+          const snapshot = Array.isArray(quoteRes.rows[0]?.items_snapshot)
+            ? (quoteRes.rows[0]?.items_snapshot as Array<Record<string, unknown>>)
+            : [];
+          for (const snap of snapshot) {
+            const prodUuid = toDeterministicUuid(String(snap.productId ?? ""));
+            const prodRes = await client.query(
+              `SELECT id, name_en, name_pt_br, price_cents, pricing_unit, estimated_weight_grams, price_per_kg_cents
+               FROM public.catalog_products
+               WHERE id = $1
+               LIMIT 1`,
+              [prodUuid]
+            );
+            if ((prodRes.rowCount ?? 0) > 0) {
+              const prod = prodRes.rows[0] as Record<string, unknown>;
+              const qty = Math.max(1, Number(snap.quantity ?? 1));
+              const unitPrice = Number(
+                snap.unitPriceCents ?? prod.price_cents ?? 0
+              );
+              const addonsUnit = Number(snap.addonsUnitPriceCents ?? 0);
+              const totalLine = qty * (unitPrice + addonsUnit);
+              const subPref = String(
+                snap.substitutionPreference ?? "REFUND_IF_UNAVAILABLE"
+              );
+              await client.query(
+                `INSERT INTO public.order_items (
+                   id, order_id, product_id, product_name_snapshot_en, product_name_snapshot_pt_br,
+                   quantity, unit_price_cents, addons_unit_price_cents, total_line_cents,
+                   substitution_preference, pricing_unit, estimated_weight_grams, price_per_kg_cents, is_test_data
+                 ) VALUES (
+                   gen_random_uuid(), $1, $2, $3, $4,
+                   $5, $6, $7, $8,
+                   $9, $10, $11, $12, $13
+                 )`,
+                [
+                  orderUuid,
+                  prodUuid,
+                  String(prod.name_en),
+                  String(prod.name_pt_br),
+                  qty,
+                  unitPrice,
+                  addonsUnit,
+                  totalLine,
+                  ["ALLOW_SUGGESTION", "CONTACT_ME", "REFUND_IF_UNAVAILABLE"].includes(
+                    subPref
+                  )
+                    ? subPref
+                    : "REFUND_IF_UNAVAILABLE",
+                  String(prod.pricing_unit ?? "UNIT"),
+                  prod.estimated_weight_grams ?? null,
+                  prod.price_per_kg_cents ?? null,
+                  Boolean(orderRow.is_test_data),
+                ]
+              );
+            }
+          }
+        }
+
+        const totalCents = Number(orderRow.total_cents ?? 0);
+        const upsertRes = await client.query(
+          `INSERT INTO public.order_pick_tasks (
+             id, order_id, store_id, customer_id, picker_actor_id, status,
+             pre_authorized_total_cents, final_picked_total_cents,
+             weight_adjustment_delta_cents, refund_adjustment_cents, notes, is_test_data
+           ) VALUES (
+             $1, $2, $3, $4, $5, 'PICKING_IN_PROGRESS',
+             $6, $6, 0, 0, $7, $8
+           )
+           ON CONFLICT (order_id) DO UPDATE SET
+             picker_actor_id = EXCLUDED.picker_actor_id,
+             notes = COALESCE(EXCLUDED.notes, public.order_pick_tasks.notes),
+             updated_at = timezone('utc', now())
+           RETURNING *`,
+          [
+            pickTaskUuid,
+            orderUuid,
+            storeUuid,
+            String(orderRow.customer_id),
+            pickerUuid,
+            totalCents,
+            params.notes ?? null,
+            Boolean(orderRow.is_test_data),
+          ]
+        );
+
+        await client.query("COMMIT");
+        const mapped = mapOrderPickTaskRow({
+          ...(upsertRes.rows[0] as Record<string, unknown>),
+          order_number: orderRow.order_number,
+        });
+        return mapped;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function recomputePickTaskTotalsInTx(
+      client: pg.PoolClient,
+      pickTaskUuid: string,
+      orderUuid: string,
+      preAuthorizedTotalCents: number
+    ): Promise<Record<string, unknown>> {
+      const itemsRes = await client.query(
+        `SELECT total_line_cents, adjusted_line_cents
+         FROM public.order_items
+         WHERE order_id = $1`,
+        [orderUuid]
+      );
+      const preAuthItemsSum = itemsRes.rows.reduce(
+        (acc, r) => acc + Number(r.total_line_cents ?? 0),
+        0
+      );
+      const pickedItemsSum = itemsRes.rows.reduce(
+        (acc, r) =>
+          acc +
+          Number(
+            r.adjusted_line_cents !== null && r.adjusted_line_cents !== undefined
+              ? r.adjusted_line_cents
+              : r.total_line_cents ?? 0
+          ),
+        0
+      );
+      const deltaCents = pickedItemsSum - preAuthItemsSum;
+      const refundCents =
+        deltaCents < 0
+          ? Math.min(preAuthorizedTotalCents, Math.abs(deltaCents))
+          : 0;
+      const finalPickedCents = Math.max(
+        0,
+        preAuthorizedTotalCents - refundCents
+      );
+
+      const updatedTaskRes = await client.query(
+        `UPDATE public.order_pick_tasks
+         SET weight_adjustment_delta_cents = $2,
+             refund_adjustment_cents = $3,
+             final_picked_total_cents = $4,
+             updated_at = timezone('utc', now())
+         WHERE id = $1
+         RETURNING *`,
+        [pickTaskUuid, deltaCents, refundCents, finalPickedCents]
+      );
+      return updatedTaskRes.rows[0] as Record<string, unknown>;
+    }
+
+    async function weighOrderPickingItem(params: {
+      pickTaskId: string;
+      orderItemId: string;
+      actualWeightGrams: number;
+      explicitCustomerOverweightConsent?: boolean;
+      actorId: string;
+    }): Promise<{
+      orderItem: OrderPickingItemContract;
+      pickTask: OrderPickTaskContract;
+      weighedBaseCents: number;
+      calculatedLineCents: number;
+      deltaCents: number;
+      refundAdjustmentCents: number;
+    }> {
+      const pickTaskUuid = toDeterministicUuid(params.pickTaskId);
+      const orderItemUuid = toDeterministicUuid(params.orderItemId);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const taskRes = await client.query(
+          `SELECT * FROM public.order_pick_tasks WHERE id = $1 LIMIT 1 FOR UPDATE`,
+          [pickTaskUuid]
+        );
+        if ((taskRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `PICK_TASK_NOT_FOUND: Pick task ${params.pickTaskId} not found.`
+          );
+        }
+        const taskRow = taskRes.rows[0] as Record<string, unknown>;
+        const storeUuid = String(taskRow.store_id);
+        const orderUuid = String(taskRow.order_id);
+
+        const policyState = await loadStoreGroceryPolicyState(client, storeUuid);
+        if (!policyState.evaluation.enabled) {
+          throw new Error(
+            `FEATURE_DISABLED_BY_POLICY: ${policyState.evaluation.reasonCode}`
+          );
+        }
+
+        const itemRes = await client.query(
+          `SELECT oi.*, cp.price_per_kg_cents AS catalog_price_per_kg_cents
+           FROM public.order_items oi
+           LEFT JOIN public.catalog_products cp ON cp.id = oi.product_id
+           WHERE oi.id = $1 AND oi.order_id = $2
+           LIMIT 1
+           FOR UPDATE OF oi`,
+          [orderItemUuid, orderUuid]
+        );
+        if ((itemRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `ORDER_ITEM_NOT_FOUND: Order item ${params.orderItemId} not found in order.`
+          );
+        }
+        const itemRow = itemRes.rows[0] as Record<string, unknown>;
+        const pricePerKgCents = Number(
+          itemRow.price_per_kg_cents ??
+            itemRow.catalog_price_per_kg_cents ??
+            itemRow.unit_price_cents ??
+            0
+        );
+        const addonsTotalCents =
+          Number(itemRow.quantity ?? 1) *
+          Number(itemRow.addons_unit_price_cents ?? 0);
+
+        const evaluation = calculateWeighedItemPriceCents({
+          actualWeightGrams: params.actualWeightGrams,
+          pricePerKgCents,
+          preAuthorizedLineCents: Number(itemRow.total_line_cents ?? 0),
+          addonsTotalCents,
+          explicitCustomerOverweightConsent: Boolean(
+            params.explicitCustomerOverweightConsent
+          ),
+        });
+
+        const updatedItemRes = await client.query(
+          `UPDATE public.order_items
+           SET actual_weight_grams = $2,
+               price_per_kg_cents = COALESCE(price_per_kg_cents, $3),
+               adjusted_line_cents = $4
+           WHERE id = $1
+           RETURNING *`,
+          [
+            orderItemUuid,
+            evaluation.actualWeightGrams,
+            pricePerKgCents,
+            evaluation.calculatedLineCents,
+          ]
+        );
+
+        const updatedTaskRow = await recomputePickTaskTotalsInTx(
+          client,
+          pickTaskUuid,
+          orderUuid,
+          Number(taskRow.pre_authorized_total_cents ?? 0)
+        );
+
+        await client.query("COMMIT");
+        return {
+          orderItem: mapOrderPickingItemRow(
+            updatedItemRes.rows[0] as Record<string, unknown>
+          ),
+          pickTask: mapOrderPickTaskRow(updatedTaskRow),
+          weighedBaseCents: evaluation.weighedBaseCents,
+          calculatedLineCents: evaluation.calculatedLineCents,
+          deltaCents: evaluation.deltaCents,
+          refundAdjustmentCents: evaluation.refundAdjustmentCents,
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function proposeOrRefundOrderItemSubstitution(params: {
+      id?: string;
+      pickTaskId: string;
+      orderItemId: string;
+      action: "PROPOSE_SUBSTITUTION" | "MARK_UNAVAILABLE_REFUND";
+      suggestedProductId?: string | null;
+      suggestedProductNameEn?: string | null;
+      suggestedProductNamePtBr?: string | null;
+      suggestedLineCents?: number;
+      reason: string;
+      timeoutSeconds?: number;
+      allowPriceIncreaseWithConsent?: boolean;
+      actorId: string;
+      now?: Date;
+    }): Promise<{
+      substitution: OrderItemSubstitutionContract;
+      pickTask: OrderPickTaskContract;
+    }> {
+      const pickTaskUuid = toDeterministicUuid(params.pickTaskId);
+      const orderItemUuid = toDeterministicUuid(params.orderItemId);
+      const subUuid = params.id
+        ? toDeterministicUuid(params.id)
+        : crypto.randomUUID();
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const taskRes = await client.query(
+          `SELECT * FROM public.order_pick_tasks WHERE id = $1 LIMIT 1 FOR UPDATE`,
+          [pickTaskUuid]
+        );
+        if ((taskRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `PICK_TASK_NOT_FOUND: Pick task ${params.pickTaskId} not found.`
+          );
+        }
+        const taskRow = taskRes.rows[0] as Record<string, unknown>;
+        const storeUuid = String(taskRow.store_id);
+        const orderUuid = String(taskRow.order_id);
+        const customerUuid = String(taskRow.customer_id);
+
+        const policyState = await loadStoreGroceryPolicyState(client, storeUuid);
+        if (!policyState.evaluation.enabled) {
+          throw new Error(
+            `FEATURE_DISABLED_BY_POLICY: ${policyState.evaluation.reasonCode}`
+          );
+        }
+
+        const itemRes = await client.query(
+          `SELECT * FROM public.order_items WHERE id = $1 AND order_id = $2 LIMIT 1 FOR UPDATE`,
+          [orderItemUuid, orderUuid]
+        );
+        if ((itemRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `ORDER_ITEM_NOT_FOUND: Order item ${params.orderItemId} not found.`
+          );
+        }
+        const itemRow = itemRes.rows[0] as Record<string, unknown>;
+        const customerPreference = String(
+          itemRow.substitution_preference ?? "REFUND_IF_UNAVAILABLE"
+        ) as ItemSubstitutionPreference;
+        const originalLineCents = Number(itemRow.total_line_cents ?? 0);
+
+        let suggestedNameEn = params.suggestedProductNameEn ?? null;
+        let suggestedNamePtBr = params.suggestedProductNamePtBr ?? null;
+        let suggestedProductUuid: string | null = null;
+        if (params.suggestedProductId) {
+          suggestedProductUuid = toDeterministicUuid(params.suggestedProductId);
+          if (!suggestedNameEn || !suggestedNamePtBr) {
+            const prodRes = await client.query(
+              `SELECT name_en, name_pt_br FROM public.catalog_products WHERE id = $1 LIMIT 1`,
+              [suggestedProductUuid]
+            );
+            if ((prodRes.rowCount ?? 0) > 0) {
+              suggestedNameEn =
+                suggestedNameEn ?? String(prodRes.rows[0]?.name_en ?? "");
+              suggestedNamePtBr =
+                suggestedNamePtBr ?? String(prodRes.rows[0]?.name_pt_br ?? "");
+            }
+          }
+        }
+
+        const evaluation = evaluateItemSubstitutionProposal({
+          customerPreference,
+          originalLineCents,
+          action: params.action,
+          suggestedProductId: suggestedProductUuid,
+          suggestedProductNameEn: suggestedNameEn,
+          suggestedProductNamePtBr: suggestedNamePtBr,
+          ...(params.suggestedLineCents !== undefined
+            ? { suggestedLineCents: params.suggestedLineCents }
+            : {}),
+          reason: params.reason,
+          ...(params.timeoutSeconds !== undefined
+            ? { timeoutSeconds: params.timeoutSeconds }
+            : {}),
+          ...(params.allowPriceIncreaseWithConsent !== undefined
+            ? {
+                allowPriceIncreaseWithConsent:
+                  params.allowPriceIncreaseWithConsent,
+              }
+            : {}),
+          ...(params.now ? { now: params.now } : {}),
+        });
+
+        const insertSubRes = await client.query(
+          `INSERT INTO public.order_item_substitutions (
+             id, pick_task_id, order_id, store_id, customer_id, order_item_id,
+             original_product_id, suggested_product_id, suggested_product_name_en, suggested_product_name_pt_br,
+             customer_preference, original_line_cents, suggested_line_cents, price_delta_cents,
+             status, reason, expires_at, is_test_data
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10,
+             $11, $12, $13, $14,
+             $15, $16, $17::timestamptz, $18
+           )
+           RETURNING *`,
+          [
+            subUuid,
+            pickTaskUuid,
+            orderUuid,
+            storeUuid,
+            customerUuid,
+            orderItemUuid,
+            String(itemRow.product_id),
+            evaluation.suggestedProductId,
+            evaluation.suggestedProductNameEn,
+            evaluation.suggestedProductNamePtBr,
+            customerPreference,
+            evaluation.originalLineCents,
+            evaluation.suggestedLineCents,
+            evaluation.priceDeltaCents,
+            evaluation.status,
+            params.reason.trim(),
+            evaluation.expiresAtIso,
+            Boolean(taskRow.is_test_data),
+          ]
+        );
+
+        if (evaluation.status === "AUTO_REFUNDED_UNAVAILABLE") {
+          await client.query(
+            `UPDATE public.order_items SET adjusted_line_cents = 0 WHERE id = $1`,
+            [orderItemUuid]
+          );
+        } else if (
+          evaluation.nextPickTaskStatus ===
+          "AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL"
+        ) {
+          await client.query(
+            `UPDATE public.order_pick_tasks
+             SET status = 'AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL',
+                 updated_at = timezone('utc', now())
+             WHERE id = $1`,
+            [pickTaskUuid]
+          );
+        }
+
+        const updatedTaskRow = await recomputePickTaskTotalsInTx(
+          client,
+          pickTaskUuid,
+          orderUuid,
+          Number(taskRow.pre_authorized_total_cents ?? 0)
+        );
+
+        await client.query("COMMIT");
+        return {
+          substitution: mapOrderItemSubstitutionRow(
+            insertSubRes.rows[0] as Record<string, unknown>
+          ),
+          pickTask: mapOrderPickTaskRow(updatedTaskRow),
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function respondToOrderItemSubstitution(params: {
+      orderId: string;
+      substitutionId: string;
+      customerId: string;
+      decision: CustomerSubstitutionDecision;
+      notes?: string;
+      now?: Date;
+    }): Promise<{
+      substitution: OrderItemSubstitutionContract;
+      pickTask: OrderPickTaskContract;
+      isExpiredTimeout: boolean;
+    }> {
+      const orderUuid = toDeterministicUuid(params.orderId);
+      const subUuid = toDeterministicUuid(params.substitutionId);
+      const customerUuid = toDeterministicUuid(params.customerId);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const subRes = await client.query(
+          `SELECT * FROM public.order_item_substitutions WHERE id = $1 AND order_id = $2 LIMIT 1 FOR UPDATE`,
+          [subUuid, orderUuid]
+        );
+        if ((subRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `SUBSTITUTION_NOT_FOUND: Substitution ${params.substitutionId} not found for order ${params.orderId}.`
+          );
+        }
+        const subRow = subRes.rows[0] as Record<string, unknown>;
+        if (String(subRow.customer_id) !== customerUuid) {
+          throw new Error(
+            "SUBSTITUTION_FORBIDDEN_NOT_ORDER_OWNER: Customer can only approve or reject substitutions on their own order."
+          );
+        }
+
+        const storeUuid = String(subRow.store_id);
+        const pickTaskUuid = String(subRow.pick_task_id);
+        const orderItemUuid = String(subRow.order_item_id);
+
+        const policyState = await loadStoreGroceryPolicyState(client, storeUuid);
+        if (!policyState.evaluation.enabled) {
+          throw new Error(
+            `FEATURE_DISABLED_BY_POLICY: ${policyState.evaluation.reasonCode}`
+          );
+        }
+
+        const resolution = resolveCustomerSubstitutionDecision({
+          substitution: {
+            id: restoreLogicalId(String(subRow.id)),
+            status: String(subRow.status) as OrderItemSubstitutionStatus,
+            originalLineCents: Number(subRow.original_line_cents ?? 0),
+            suggestedLineCents: Number(subRow.suggested_line_cents ?? 0),
+            expiresAtIso: new Date(String(subRow.expires_at)).toISOString(),
+          },
+          decision: params.decision,
+          ...(params.now ? { now: params.now } : {}),
+        });
+
+        const updatedSubRes = await client.query(
+          `UPDATE public.order_item_substitutions
+           SET status = $2,
+               customer_decided_at = $3::timestamptz,
+               customer_decision_notes = $4,
+               updated_at = timezone('utc', now())
+           WHERE id = $1
+           RETURNING *`,
+          [
+            subUuid,
+            resolution.updatedStatus,
+            resolution.decidedAtIso,
+            params.notes ?? null,
+          ]
+        );
+
+        await client.query(
+          `UPDATE public.order_items
+           SET adjusted_line_cents = $2
+           WHERE id = $1`,
+          [orderItemUuid, resolution.effectiveLineCents]
+        );
+
+        const pendingRes = await client.query(
+          `SELECT COUNT(*)::int AS c
+           FROM public.order_item_substitutions
+           WHERE pick_task_id = $1 AND status = 'PENDING_CUSTOMER_APPROVAL'`,
+          [pickTaskUuid]
+        );
+        if (Number(pendingRes.rows[0]?.c ?? 0) === 0) {
+          await client.query(
+            `UPDATE public.order_pick_tasks
+             SET status = 'PICKING_IN_PROGRESS',
+                 updated_at = timezone('utc', now())
+             WHERE id = $1 AND status = 'AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL'`,
+            [pickTaskUuid]
+          );
+        }
+
+        const taskRes = await client.query(
+          `SELECT pre_authorized_total_cents FROM public.order_pick_tasks WHERE id = $1 LIMIT 1`,
+          [pickTaskUuid]
+        );
+        const updatedTaskRow = await recomputePickTaskTotalsInTx(
+          client,
+          pickTaskUuid,
+          orderUuid,
+          Number(taskRes.rows[0]?.pre_authorized_total_cents ?? 0)
+        );
+
+        await client.query("COMMIT");
+        return {
+          substitution: mapOrderItemSubstitutionRow(
+            updatedSubRes.rows[0] as Record<string, unknown>
+          ),
+          pickTask: mapOrderPickTaskRow(updatedTaskRow),
+          isExpiredTimeout: resolution.isExpiredTimeout,
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function completeOrderPickTask(params: {
+      pickTaskId: string;
+      actorId: string;
+      notes?: string;
+      now?: Date;
+    }): Promise<{
+      pickTask: OrderPickTaskContract;
+      refundAdjustmentCents: number;
+      finalPickedTotalCents: number;
+    }> {
+      const pickTaskUuid = toDeterministicUuid(params.pickTaskId);
+      const actorUuid = toDeterministicUuid(params.actorId);
+      const now = params.now ?? new Date();
+      await ensureProfileExists(actorUuid);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const taskRes = await client.query(
+          `SELECT opt.*, o.organization_id, o.payment_status, o.is_test_data AS order_is_test_data
+           FROM public.order_pick_tasks opt
+           JOIN public.orders o ON o.id = opt.order_id
+           WHERE opt.id = $1
+           LIMIT 1
+           FOR UPDATE OF opt`,
+          [pickTaskUuid]
+        );
+        if ((taskRes.rowCount ?? 0) === 0) {
+          throw new Error(
+            `PICK_TASK_NOT_FOUND: Pick task ${params.pickTaskId} not found.`
+          );
+        }
+        const taskRow = taskRes.rows[0] as Record<string, unknown>;
+        const storeUuid = String(taskRow.store_id);
+        const orderUuid = String(taskRow.order_id);
+        const orgUuid = String(taskRow.organization_id);
+
+        const policyState = await loadStoreGroceryPolicyState(client, storeUuid);
+        if (!policyState.evaluation.enabled) {
+          throw new Error(
+            `FEATURE_DISABLED_BY_POLICY: ${policyState.evaluation.reasonCode}`
+          );
+        }
+
+        // Automatically expire any pending substitutions whose expires_at has elapsed
+        const expiredSubsRes = await client.query(
+          `UPDATE public.order_item_substitutions
+           SET status = 'EXPIRED_TIMEOUT_REFUNDED',
+               customer_decided_at = $2::timestamptz,
+               customer_decision_notes = 'Auto-expired on timeout without silent substitution',
+               updated_at = timezone('utc', now())
+           WHERE pick_task_id = $1
+             AND status = 'PENDING_CUSTOMER_APPROVAL'
+             AND expires_at <= $2::timestamptz
+           RETURNING order_item_id`,
+          [pickTaskUuid, now.toISOString()]
+        );
+        for (const expRow of expiredSubsRes.rows) {
+          await client.query(
+            `UPDATE public.order_items SET adjusted_line_cents = 0 WHERE id = $1`,
+            [String(expRow.order_item_id)]
+          );
+        }
+
+        const [itemsRes, subsRes] = await Promise.all([
+          client.query(
+            `SELECT * FROM public.order_items WHERE order_id = $1 ORDER BY created_at ASC`,
+            [orderUuid]
+          ),
+          client.query(
+            `SELECT * FROM public.order_item_substitutions WHERE pick_task_id = $1 ORDER BY created_at ASC`,
+            [pickTaskUuid]
+          ),
+        ]);
+
+        const items = itemsRes.rows.map((r) =>
+          mapOrderPickingItemRow(r as Record<string, unknown>)
+        );
+        const subs = subsRes.rows.map((r) =>
+          mapOrderItemSubstitutionRow(r as Record<string, unknown>)
+        );
+
+        const finalized = finalizeOrderPickTaskFinancialAdjustment({
+          orderId: restoreLogicalId(orderUuid),
+          organizationId: restoreLogicalId(orgUuid),
+          preAuthorizedTotalCents: Number(
+            taskRow.pre_authorized_total_cents ?? 0
+          ),
+          orderItems: items,
+          substitutions: subs,
+          now,
+        });
+
+        const updatedTaskRes = await client.query(
+          `UPDATE public.order_pick_tasks
+           SET status = 'PICKING_COMPLETED',
+               final_picked_total_cents = $2,
+               weight_adjustment_delta_cents = $3,
+               refund_adjustment_cents = $4,
+               notes = COALESCE($5, notes),
+               completed_at = $6::timestamptz,
+               updated_at = timezone('utc', now())
+           WHERE id = $1
+           RETURNING *`,
+          [
+            pickTaskUuid,
+            finalized.finalPickedTotalCents,
+            finalized.weightAdjustmentDeltaCents,
+            finalized.refundAdjustmentCents,
+            params.notes ?? null,
+            finalized.completedAtIso,
+          ]
+        );
+
+        // Reflect downward adjustment in M12 Refunds & M13 Double-Entry Ledger when refundAdjustmentCents > 0
+        if (
+          finalized.refundAdjustmentCents > 0 &&
+          finalized.refundLedgerJournal
+        ) {
+          const customerUuid = String(taskRow.customer_id);
+          const payAttemptRes = await client.query(
+            `SELECT id FROM public.payment_attempts WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+            [orderUuid]
+          );
+          let payAttemptUuid = payAttemptRes.rows[0]?.id
+            ? String(payAttemptRes.rows[0].id)
+            : toDeterministicUuid(`pay_m22_${orderUuid}`);
+
+          if ((payAttemptRes.rowCount ?? 0) === 0) {
+            await client.query(
+              `INSERT INTO public.payment_attempts (
+                 id, order_id, customer_id, provider_code, payment_method,
+                 amount_cents, currency_code, status, idempotency_key, is_sandbox, is_test_data
+               ) VALUES ($1, $2, $3, 'stripe', 'PIX', $4, 'BRL', 'CAPTURED', $5, true, $6)
+               ON CONFLICT (id) DO NOTHING`,
+              [
+                payAttemptUuid,
+                orderUuid,
+                customerUuid,
+                Number(taskRow.pre_authorized_total_cents ?? 0),
+                `auto_pay_m22_${orderUuid}`,
+                Boolean(taskRow.is_test_data),
+              ]
+            );
+          }
+
+          const refundId = crypto.randomUUID();
+          await client.query(
+            `INSERT INTO public.refunds (
+               id, order_id, payment_attempt_id, requested_by, approved_by,
+               amount_cents, reason, status, external_refund_id, idempotency_key, is_test_data
+             ) VALUES (
+               $1, $2, $3, $4, $4,
+               $5, $6, 'PROCESSED', $7, $8, $9
+             )
+             ON CONFLICT (idempotency_key) DO NOTHING`,
+            [
+              refundId,
+              orderUuid,
+              payAttemptUuid,
+              actorUuid,
+              finalized.refundAdjustmentCents,
+              "M22 grocery picking downward weight/substitution adjustment",
+              `m22_pick_refund_${pickTaskUuid}`,
+              `m22_pick_refund_${pickTaskUuid}`,
+              Boolean(taskRow.is_test_data),
+            ]
+          );
+
+          const journalUuid = toDeterministicUuid(
+            finalized.refundLedgerJournal.id
+          );
+          const jnlInsertRes = await client.query(
+            `INSERT INTO public.ledger_journals (
+               id, reference_type, reference_id, description, idempotency_key, is_test_data
+             ) VALUES (
+               $1, 'ORDER_REFUND', $2, $3, $4, $5
+             )
+             ON CONFLICT (idempotency_key) DO NOTHING
+             RETURNING id`,
+            [
+              journalUuid,
+              orderUuid,
+              finalized.refundLedgerJournal.description,
+              `m22_jnl_pick_refund_${pickTaskUuid}`,
+              Boolean(taskRow.is_test_data),
+            ]
+          );
+
+          if ((jnlInsertRes.rowCount ?? 0) > 0) {
+            for (const entry of finalized.refundLedgerJournal.entries) {
+              const isAsset = entry.accountCode === "ASSET_PSP_CLEARING";
+              const accRes = await client.query(
+                `INSERT INTO public.ledger_accounts (
+                   id, code, name, account_type, organization_id, currency_code, is_test_data
+                 ) VALUES ($1, $2, $3, $4, $5, 'BRL', $6)
+                 ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                 RETURNING id`,
+                [
+                  crypto.randomUUID(),
+                  entry.accountCode,
+                  isAsset
+                    ? "PSP Clearing Receivable (BRL)"
+                    : `Merchant Payable (${entry.accountCode})`,
+                  isAsset ? "ASSET" : "LIABILITY",
+                  isAsset ? null : orgUuid,
+                  Boolean(taskRow.is_test_data),
+                ]
+              );
+              const accountId = String(accRes.rows[0]?.id);
+              await client.query(
+                `INSERT INTO public.ledger_entries (
+                   id, journal_id, account_id, direction, amount_cents, is_test_data
+                 ) VALUES (
+                   gen_random_uuid(), $1, $2, $3::public.ledger_entry_direction, $4, $5
+                 )`,
+                [
+                  journalUuid,
+                  accountId,
+                  entry.direction,
+                  entry.amountCents,
+                  Boolean(taskRow.is_test_data),
+                ]
+              );
+            }
+          }
+
+          await client.query(
+            `UPDATE public.orders
+             SET total_cents = GREATEST(0, total_cents - $2),
+                 merchant_net_cents = GREATEST(0, merchant_net_cents - $2),
+                 updated_at = timezone('utc', now())
+             WHERE id = $1`,
+            [orderUuid, finalized.refundAdjustmentCents]
+          );
+        }
+
+        await client.query("COMMIT");
+        return {
+          pickTask: mapOrderPickTaskRow(
+            updatedTaskRes.rows[0] as Record<string, unknown>
+          ),
+          refundAdjustmentCents: finalized.refundAdjustmentCents,
+          finalPickedTotalCents: finalized.finalPickedTotalCents,
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    async function getPickTaskById(
+      pickTaskId: string
+    ): Promise<OrderPickTaskContract | null> {
+      const pickTaskUuid = toDeterministicUuid(pickTaskId);
+      const res = await pool.query(
+        `SELECT opt.*, o.order_number
+         FROM public.order_pick_tasks opt
+         JOIN public.orders o ON o.id = opt.order_id
+         WHERE opt.id = $1
+         LIMIT 1`,
+        [pickTaskUuid]
+      );
+      if ((res.rowCount ?? 0) === 0) return null;
+      return mapOrderPickTaskRow(res.rows[0] as Record<string, unknown>);
+    }
+
     return {
       getAnalyticalKpiSummary,
       listRiskAlerts,
@@ -6488,6 +7664,14 @@ export function createSupabasePostgresRepository(params: {
       completePrivacyExportRequest,
       anonymizeUserAccountAndCompleteRequest,
       getGovernanceBackofficeOverview,
+      getPickTaskById,
+      getStoreGroceryPickingOverview,
+      getOrderGroceryPickingDetail,
+      startOrderPickTask,
+      weighOrderPickingItem,
+      proposeOrRefundOrderItemSubstitution,
+      respondToOrderItemSubstitution,
+      completeOrderPickTask,
     };
   })(),
   };

@@ -399,5 +399,6 @@ export * from "./app/finance/page.js";
 export * from "./app/reviews/page.js";
 export * from "./app/kitchen/page.js";
 export * from "./app/chain/page.js";
+export * from "./app/picking/page.js";
 export * from "./server.js";
 

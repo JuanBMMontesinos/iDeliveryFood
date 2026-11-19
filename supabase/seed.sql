@@ -1480,4 +1480,78 @@ SET export_payload = '{"subjectUserId":"00000000-0000-4000-8000-000000000002","l
     legal_basis_note = 'LGPD Art. 18, V — Data portability package generated in structured JSON.'
 WHERE id = '00000000-0000-4000-8000-000000001705';
 
+-- Fase S (M22): Grocery & Market Extension — Variable Weight Metadata, Order Pick Tasks & Consented Substitutions Seed
+UPDATE public.catalog_products
+SET pricing_unit = 'KG',
+    estimated_weight_grams = 500,
+    price_per_kg_cents = 3380
+WHERE id = '00000000-0000-4000-8000-000000000602';
+
+UPDATE public.order_items
+SET substitution_preference = 'ALLOW_SUGGESTION',
+    pricing_unit = 'KG',
+    estimated_weight_grams = 500,
+    actual_weight_grams = 500,
+    price_per_kg_cents = 3380,
+    adjusted_line_cents = 1690
+WHERE id = '00000000-0000-4000-8000-000000001052';
+
+INSERT INTO public.order_pick_tasks (
+  id, order_id, store_id, customer_id, picker_actor_id, status,
+  pre_authorized_total_cents, final_picked_total_cents, weight_adjustment_delta_cents,
+  refund_adjustment_cents, notes, started_at, completed_at, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001801',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000201',
+  '00000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-000000000011',
+  'PICKING_COMPLETED',
+  6232,
+  6232,
+  0,
+  0,
+  'Verified scale weight 500g (3380 cents/kg = 1690 cents) and customer-approved artisan batch substitution.',
+  '2026-11-03T15:02:00Z',
+  '2026-11-03T15:08:00Z',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  final_picked_total_cents = EXCLUDED.final_picked_total_cents,
+  notes = EXCLUDED.notes,
+  is_test_data = true;
+
+INSERT INTO public.order_item_substitutions (
+  id, pick_task_id, order_id, store_id, customer_id, order_item_id,
+  original_product_id, suggested_product_id, suggested_product_name_en, suggested_product_name_pt_br,
+  customer_preference, original_line_cents, suggested_line_cents, price_delta_cents,
+  status, reason, expires_at, customer_decided_at, customer_decision_notes, is_test_data
+) VALUES (
+  '00000000-0000-4000-8000-000000001851',
+  '00000000-0000-4000-8000-000000001801',
+  '00000000-0000-4000-8000-000000001001',
+  '00000000-0000-4000-8000-000000000201',
+  '00000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-000000001052',
+  '00000000-0000-4000-8000-000000000602',
+  '00000000-0000-4000-8000-000000000602',
+  'Rosemary & Sea Salt Crinkle Fries (Artisan Cut)',
+  'Batata Crinkle com Alecrim e Flor de Sal (Corte Artesanal)',
+  'ALLOW_SUGGESTION',
+  1690,
+  1690,
+  0,
+  'APPROVED_BY_CUSTOMER',
+  'Standard cut batch replaced by fresh artisan batch with explicit customer consent.',
+  '2026-11-03T15:15:00Z',
+  '2026-11-03T15:05:00Z',
+  'Approved artisan cut batch at same price.',
+  true
+)
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  customer_decided_at = EXCLUDED.customer_decided_at,
+  is_test_data = true;
+
 COMMIT;

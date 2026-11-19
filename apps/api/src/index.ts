@@ -98,6 +98,12 @@ import {
   type RiskAlertContract,
   type RiskAlertStatus,
   type RiskHumanReviewDecision,
+  type CustomerSubstitutionDecision,
+  type OrderGroceryPickingDetailContract,
+  type OrderItemSubstitutionContract,
+  type OrderPickTaskContract,
+  type OrderPickingItemContract,
+  type StoreGroceryPickingOverviewContract,
 } from "@ideliveryfood/contracts";
 import {
   DEFAULT_BR_PLATFORM_POLICY,
@@ -589,6 +595,74 @@ export interface ApiDataRepository {
   getGovernanceBackofficeOverview?(params?: {
     excludeTestData?: boolean;
   }): Promise<GovernanceBackofficeOverviewContract>;
+  getPickTaskById?(pickTaskId: string): Promise<OrderPickTaskContract | null>;
+  getStoreGroceryPickingOverview?(
+    storeId: string
+  ): Promise<StoreGroceryPickingOverviewContract>;
+  getOrderGroceryPickingDetail?(
+    orderId: string
+  ): Promise<OrderGroceryPickingDetailContract | null>;
+  startOrderPickTask?(params: {
+    id?: string;
+    storeId: string;
+    orderId: string;
+    pickerActorId: string;
+    notes?: string;
+  }): Promise<OrderPickTaskContract>;
+  weighOrderPickingItem?(params: {
+    pickTaskId: string;
+    orderItemId: string;
+    actualWeightGrams: number;
+    explicitCustomerOverweightConsent?: boolean;
+    actorId: string;
+  }): Promise<{
+    orderItem: OrderPickingItemContract;
+    pickTask: OrderPickTaskContract;
+    weighedBaseCents: number;
+    calculatedLineCents: number;
+    deltaCents: number;
+    refundAdjustmentCents: number;
+  }>;
+  proposeOrRefundOrderItemSubstitution?(params: {
+    id?: string;
+    pickTaskId: string;
+    orderItemId: string;
+    action: "PROPOSE_SUBSTITUTION" | "MARK_UNAVAILABLE_REFUND";
+    suggestedProductId?: string | null;
+    suggestedProductNameEn?: string | null;
+    suggestedProductNamePtBr?: string | null;
+    suggestedLineCents?: number;
+    reason: string;
+    timeoutSeconds?: number;
+    allowPriceIncreaseWithConsent?: boolean;
+    actorId: string;
+    now?: Date;
+  }): Promise<{
+    substitution: OrderItemSubstitutionContract;
+    pickTask: OrderPickTaskContract;
+  }>;
+  respondToOrderItemSubstitution?(params: {
+    orderId: string;
+    substitutionId: string;
+    customerId: string;
+    decision: CustomerSubstitutionDecision;
+    notes?: string;
+    now?: Date;
+  }): Promise<{
+    substitution: OrderItemSubstitutionContract;
+    pickTask: OrderPickTaskContract;
+    isExpiredTimeout: boolean;
+  }>;
+  completeOrderPickTask?(params: {
+    pickTaskId: string;
+    actorId: string;
+    notes?: string;
+    now?: Date;
+  }): Promise<{
+    pickTask: OrderPickTaskContract;
+    refundAdjustmentCents: number;
+    finalPickedTotalCents: number;
+  }>;
 }
 
 /**
@@ -7760,6 +7834,639 @@ export function createApiServer(deps: {
 
         sendJson(res, 200, correlationId, { data: result.request, meta: { outcome: result.outcome, reasonCode: result.reasonCode, holdUntilIso: result.holdUntilIso } });
         return;
+      }
+
+      // ======================================================================
+      // 24. M22: Grocery & Market Extension — Picking, Weighing & Substitutions
+      // ======================================================================
+
+      // 24a. GET /v1/partner/stores/:storeId/picking
+      const storePickingOverviewMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/picking$/
+      );
+      if (method === "GET" && storePickingOverviewMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = storePickingOverviewMatch[1] ?? "";
+        const store = await deps.repository.getStoreById(storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        const staffAuthz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "support", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!partnerAuthz.allowed && !staffAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            partnerAuthz.reasonCode,
+            "Access restricted to store operators/managers or platform operations staff.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getStoreGroceryPickingOverview) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const overview = await deps.repository.getStoreGroceryPickingOverview(store.id);
+        sendJson(res, 200, correlationId, { data: overview });
+        return;
+      }
+
+      // 24b. POST /v1/partner/stores/:storeId/orders/:orderId/pick-tasks
+      const startPickTaskMatch = pathname.match(
+        /^\/v1\/partner\/stores\/([^/]+)\/orders\/([^/]+)\/pick-tasks$/
+      );
+      if (method === "POST" && startPickTaskMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const storeId = startPickTaskMatch[1] ?? "";
+        const orderId = startPickTaskMatch[2] ?? "";
+        const store = await deps.repository.getStoreById(storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${storeId} not found.`, correlationId);
+          return;
+        }
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        if (!partnerAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            partnerAuthz.reasonCode,
+            "Only store operators, managers, or owners of this store can start picking tasks.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.startOrderPickTask) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const pickTask = await deps.repository.startOrderPickTask({
+            ...(body.id ? { id: String(body.id) } : {}),
+            storeId: store.id,
+            orderId,
+            pickerActorId: actor.id,
+            ...(body.notes ? { notes: String(body.notes) } : {}),
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "GROCERY_PICK_TASK_STARTED",
+            targetType: "ORDER_PICK_TASK",
+            targetId: pickTask.id,
+            correlationId,
+            reason: "Started M22 grocery order picking task",
+            redactedPayload: {
+              storeId: store.id,
+              orderId: pickTask.orderId,
+              preAuthorizedTotalCents: pickTask.preAuthorizedTotalCents,
+            },
+            createdAt: new Date().toISOString(),
+          });
+          sendJson(res, 201, correlationId, { data: pickTask });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to start pick task.";
+          if (msg.startsWith("FEATURE_DISABLED_BY_POLICY")) {
+            sendError(res, 403, "FEATURE_DISABLED_BY_POLICY", msg, correlationId);
+            return;
+          }
+          if (msg.startsWith("ORDER_NOT_FOUND")) {
+            sendError(res, 404, "ORDER_NOT_FOUND", msg, correlationId);
+            return;
+          }
+          throw err;
+        }
+      }
+
+      // 24c. POST /v1/partner/pick-tasks/:pickTaskId/items/:orderItemId/weigh
+      const weighItemMatch = pathname.match(
+        /^\/v1\/partner\/pick-tasks\/([^/]+)\/items\/([^/]+)\/weigh$/
+      );
+      if (method === "POST" && weighItemMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const pickTaskId = weighItemMatch[1] ?? "";
+        const orderItemId = weighItemMatch[2] ?? "";
+        if (!deps.repository.weighOrderPickingItem || !deps.repository.getPickTaskById) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const existingTask = await deps.repository.getPickTaskById(pickTaskId);
+        if (!existingTask) {
+          sendError(res, 404, "PICK_TASK_NOT_FOUND", `Pick task ${pickTaskId} not found.`, correlationId);
+          return;
+        }
+        const store = await deps.repository.getStoreById(existingTask.storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${existingTask.storeId} not found.`, correlationId);
+          return;
+        }
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        if (!partnerAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            partnerAuthz.reasonCode,
+            "Only authorized store operators/managers can weigh items for this store.",
+            correlationId
+          );
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const actualWeightGrams = Number(body.actualWeightGrams);
+        if (!Number.isSafeInteger(actualWeightGrams) || actualWeightGrams < 0) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "actualWeightGrams must be a non-negative integer.",
+            correlationId
+          );
+          return;
+        }
+        try {
+          const weighed = await deps.repository.weighOrderPickingItem({
+            pickTaskId,
+            orderItemId,
+            actualWeightGrams,
+            explicitCustomerOverweightConsent: Boolean(
+              body.explicitCustomerOverweightConsent ?? false
+            ),
+            actorId: actor.id,
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "GROCERY_ITEM_WEIGHED",
+            targetType: "ORDER_ITEM",
+            targetId: weighed.orderItem.orderItemId,
+            correlationId,
+            reason: `Scale weighed ${actualWeightGrams}g -> ${weighed.calculatedLineCents} cents`,
+            redactedPayload: {
+              pickTaskId: weighed.pickTask.id,
+              actualWeightGrams,
+              calculatedLineCents: weighed.calculatedLineCents,
+              deltaCents: weighed.deltaCents,
+              refundAdjustmentCents: weighed.refundAdjustmentCents,
+            },
+            createdAt: new Date().toISOString(),
+          });
+          sendJson(res, 200, correlationId, { data: weighed });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to weigh item.";
+          if (msg.startsWith("FEATURE_DISABLED_BY_POLICY")) {
+            sendError(res, 403, "FEATURE_DISABLED_BY_POLICY", msg, correlationId);
+            return;
+          }
+          if (msg.startsWith("WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING")) {
+            sendError(res, 409, "WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING", msg, correlationId);
+            return;
+          }
+          if (
+            msg.startsWith("PICK_TASK_NOT_FOUND") ||
+            msg.startsWith("ORDER_ITEM_NOT_FOUND")
+          ) {
+            sendError(res, 404, "RESOURCE_NOT_FOUND", msg, correlationId);
+            return;
+          }
+          throw err;
+        }
+      }
+
+      // 24d. POST /v1/partner/pick-tasks/:pickTaskId/substitutions
+      const proposeSubMatch = pathname.match(
+        /^\/v1\/partner\/pick-tasks\/([^/]+)\/substitutions$/
+      );
+      if (method === "POST" && proposeSubMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const pickTaskId = proposeSubMatch[1] ?? "";
+        if (!deps.repository.proposeOrRefundOrderItemSubstitution || !deps.repository.getPickTaskById) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const existingTask = await deps.repository.getPickTaskById(pickTaskId);
+        if (!existingTask) {
+          sendError(res, 404, "PICK_TASK_NOT_FOUND", `Pick task ${pickTaskId} not found.`, correlationId);
+          return;
+        }
+        const store = await deps.repository.getStoreById(existingTask.storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${existingTask.storeId} not found.`, correlationId);
+          return;
+        }
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        if (!partnerAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            partnerAuthz.reasonCode,
+            "Only authorized store operators/managers can propose substitutions for this store.",
+            correlationId
+          );
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const orderItemId = String(body.orderItemId ?? "").trim();
+        const action = String(
+          body.action ?? "PROPOSE_SUBSTITUTION"
+        ) as "PROPOSE_SUBSTITUTION" | "MARK_UNAVAILABLE_REFUND";
+        const reason = String(body.reason ?? "").trim();
+        if (
+          !orderItemId ||
+          !["PROPOSE_SUBSTITUTION", "MARK_UNAVAILABLE_REFUND"].includes(action) ||
+          reason.length < 3
+        ) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "orderItemId, valid action (PROPOSE_SUBSTITUTION | MARK_UNAVAILABLE_REFUND), and reason (>= 3 chars) are required.",
+            correlationId
+          );
+          return;
+        }
+        try {
+          const result = await deps.repository.proposeOrRefundOrderItemSubstitution({
+            ...(body.id ? { id: String(body.id) } : {}),
+            pickTaskId,
+            orderItemId,
+            action,
+            ...(body.suggestedProductId !== undefined
+              ? {
+                  suggestedProductId: body.suggestedProductId
+                    ? String(body.suggestedProductId)
+                    : null,
+                }
+              : {}),
+            ...(body.suggestedProductNameEn !== undefined
+              ? {
+                  suggestedProductNameEn: body.suggestedProductNameEn
+                    ? String(body.suggestedProductNameEn)
+                    : null,
+                }
+              : {}),
+            ...(body.suggestedProductNamePtBr !== undefined
+              ? {
+                  suggestedProductNamePtBr: body.suggestedProductNamePtBr
+                    ? String(body.suggestedProductNamePtBr)
+                    : null,
+                }
+              : {}),
+            ...(body.suggestedLineCents !== undefined
+              ? { suggestedLineCents: Number(body.suggestedLineCents) }
+              : {}),
+            reason,
+            ...(body.timeoutSeconds !== undefined
+              ? { timeoutSeconds: Number(body.timeoutSeconds) }
+              : {}),
+            ...(body.allowPriceIncreaseWithConsent !== undefined
+              ? {
+                  allowPriceIncreaseWithConsent: Boolean(
+                    body.allowPriceIncreaseWithConsent
+                  ),
+                }
+              : {}),
+            actorId: actor.id,
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action:
+              result.substitution.status === "AUTO_REFUNDED_UNAVAILABLE"
+                ? "GROCERY_ITEM_UNAVAILABLE_REFUNDED"
+                : "GROCERY_SUBSTITUTION_PROPOSED",
+            targetType: "ORDER_ITEM_SUBSTITUTION",
+            targetId: result.substitution.id,
+            correlationId,
+            reason,
+            redactedPayload: {
+              pickTaskId: result.pickTask.id,
+              orderItemId: result.substitution.orderItemId,
+              customerPreference: result.substitution.customerPreference,
+              status: result.substitution.status,
+              priceDeltaCents: result.substitution.priceDeltaCents,
+            },
+            createdAt: new Date().toISOString(),
+          });
+          sendJson(res, 201, correlationId, { data: result });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to propose substitution.";
+          if (msg.startsWith("FEATURE_DISABLED_BY_POLICY")) {
+            sendError(res, 403, "FEATURE_DISABLED_BY_POLICY", msg, correlationId);
+            return;
+          }
+          if (msg.startsWith("SUBSTITUTION_FORBIDDEN_BY_PREFERENCE")) {
+            sendError(
+              res,
+              409,
+              "SUBSTITUTION_FORBIDDEN_BY_PREFERENCE",
+              msg,
+              correlationId
+            );
+            return;
+          }
+          if (msg.startsWith("SUBSTITUTION_EXCEEDS_ORIGINAL_CEILING")) {
+            sendError(
+              res,
+              409,
+              "SUBSTITUTION_EXCEEDS_ORIGINAL_CEILING",
+              msg,
+              correlationId
+            );
+            return;
+          }
+          if (
+            msg.startsWith("SUBSTITUTION_REASON_REQUIRED") ||
+            msg.startsWith("SUBSTITUTION_SUGGESTED_PRODUCT_REQUIRED") ||
+            msg.startsWith("INVALID_SUBSTITUTION_TIMEOUT")
+          ) {
+            sendError(res, 400, "VALIDATION_ERROR", msg, correlationId);
+            return;
+          }
+          if (
+            msg.startsWith("PICK_TASK_NOT_FOUND") ||
+            msg.startsWith("ORDER_ITEM_NOT_FOUND")
+          ) {
+            sendError(res, 404, "RESOURCE_NOT_FOUND", msg, correlationId);
+            return;
+          }
+          throw err;
+        }
+      }
+
+      // 24e. POST /v1/partner/pick-tasks/:pickTaskId/complete
+      const completePickTaskMatch = pathname.match(
+        /^\/v1\/partner\/pick-tasks\/([^/]+)\/complete$/
+      );
+      if (method === "POST" && completePickTaskMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const pickTaskId = completePickTaskMatch[1] ?? "";
+        if (!deps.repository.completeOrderPickTask || !deps.repository.getPickTaskById) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const existingTask = await deps.repository.getPickTaskById(pickTaskId);
+        if (!existingTask) {
+          sendError(res, 404, "PICK_TASK_NOT_FOUND", `Pick task ${pickTaskId} not found.`, correlationId);
+          return;
+        }
+        const store = await deps.repository.getStoreById(existingTask.storeId, locale);
+        if (!store) {
+          sendError(res, 404, "STORE_NOT_FOUND", `Store ${existingTask.storeId} not found.`, correlationId);
+          return;
+        }
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: store.organizationId,
+          storeId: store.id,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        if (!partnerAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            partnerAuthz.reasonCode,
+            "Only authorized store operators/managers can complete picking tasks for this store.",
+            correlationId
+          );
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        try {
+          const completed = await deps.repository.completeOrderPickTask({
+            pickTaskId,
+            actorId: actor.id,
+            ...(body.notes ? { notes: String(body.notes) } : {}),
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: "GROCERY_PICK_TASK_COMPLETED",
+            targetType: "ORDER_PICK_TASK",
+            targetId: completed.pickTask.id,
+            correlationId,
+            reason: "Completed M22 grocery picking with reconciled financial adjustment",
+            redactedPayload: {
+              orderId: completed.pickTask.orderId,
+              preAuthorizedTotalCents: completed.pickTask.preAuthorizedTotalCents,
+              finalPickedTotalCents: completed.finalPickedTotalCents,
+              refundAdjustmentCents: completed.refundAdjustmentCents,
+            },
+            createdAt: new Date().toISOString(),
+          });
+          sendJson(res, 200, correlationId, { data: completed });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to complete pick task.";
+          if (msg.startsWith("FEATURE_DISABLED_BY_POLICY")) {
+            sendError(res, 403, "FEATURE_DISABLED_BY_POLICY", msg, correlationId);
+            return;
+          }
+          if (
+            msg.startsWith("PICK_TASK_AWAITING_CUSTOMER_APPROVAL") ||
+            msg.startsWith("WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING")
+          ) {
+            sendError(
+              res,
+              409,
+              msg.startsWith("PICK_TASK_AWAITING_CUSTOMER_APPROVAL")
+                ? "PICK_TASK_AWAITING_CUSTOMER_APPROVAL"
+                : "WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING",
+              msg,
+              correlationId
+            );
+            return;
+          }
+          if (msg.startsWith("PICK_TASK_NOT_FOUND")) {
+            sendError(res, 404, "PICK_TASK_NOT_FOUND", msg, correlationId);
+            return;
+          }
+          throw err;
+        }
+      }
+
+      // 24f. GET /v1/orders/:orderId/picking
+      const orderPickingDetailMatch = pathname.match(
+        /^\/v1\/orders\/([^/]+)\/picking$/
+      );
+      if (method === "GET" && orderPickingDetailMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const orderId = orderPickingDetailMatch[1] ?? "";
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          return;
+        }
+        const isCustomerOwner = order.customerId === actor.id;
+        const partnerAuthz = authorizePartnerScope({
+          actor,
+          organizationId: order.organizationId,
+          storeId: order.storeId,
+          allowedRoles: ["partner_owner", "partner_manager", "partner_operator"],
+        });
+        const staffAuthz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["operations", "support", "tech_admin"],
+          requireMfaAal2: false,
+        });
+        if (!isCustomerOwner && !partnerAuthz.allowed && !staffAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            "DENIED_TENANT_SCOPE_MISMATCH",
+            "Only the order owner, store members, or support/operations staff can view picking details.",
+            correlationId
+          );
+          return;
+        }
+        if (!deps.repository.getOrderGroceryPickingDetail) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const detail = await deps.repository.getOrderGroceryPickingDetail(order.id);
+        if (!detail) {
+          sendError(res, 404, "ORDER_NOT_FOUND", `Order ${orderId} not found.`, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, { data: detail });
+        return;
+      }
+
+      // 24g. POST /v1/orders/:orderId/substitutions/:substitutionId/respond
+      const respondSubMatch = pathname.match(
+        /^\/v1\/orders\/([^/]+)\/substitutions\/([^/]+)\/respond$/
+      );
+      if (method === "POST" && respondSubMatch) {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const orderId = respondSubMatch[1] ?? "";
+        const substitutionId = respondSubMatch[2] ?? "";
+        if (!deps.repository.respondToOrderItemSubstitution) {
+          sendError(res, 501, "NOT_IMPLEMENTED", "Grocery picking repository not configured.", correlationId);
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const decision = String(body.decision ?? "") as CustomerSubstitutionDecision;
+        if (!["APPROVE", "REJECT"].includes(decision)) {
+          sendError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            "decision must be APPROVE or REJECT.",
+            correlationId
+          );
+          return;
+        }
+        try {
+          const result = await deps.repository.respondToOrderItemSubstitution({
+            orderId,
+            substitutionId,
+            customerId: actor.id,
+            decision,
+            ...(body.notes ? { notes: String(body.notes) } : {}),
+          });
+          await deps.repository.appendAuditLog({
+            id: crypto.randomUUID(),
+            actorId: actor.id,
+            action: `GROCERY_SUBSTITUTION_CUSTOMER_${result.substitution.status}`,
+            targetType: "ORDER_ITEM_SUBSTITUTION",
+            targetId: result.substitution.id,
+            correlationId,
+            reason:
+              body.notes
+                ? String(body.notes)
+                : `Customer responded ${decision} to item substitution`,
+            redactedPayload: {
+              orderId,
+              pickTaskId: result.pickTask.id,
+              decision,
+              updatedStatus: result.substitution.status,
+              isExpiredTimeout: result.isExpiredTimeout,
+            },
+            createdAt: new Date().toISOString(),
+          });
+          sendJson(res, 200, correlationId, { data: result });
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to respond to substitution.";
+          if (msg.startsWith("FEATURE_DISABLED_BY_POLICY")) {
+            sendError(res, 403, "FEATURE_DISABLED_BY_POLICY", msg, correlationId);
+            return;
+          }
+          if (msg.startsWith("SUBSTITUTION_FORBIDDEN_NOT_ORDER_OWNER")) {
+            sendError(
+              res,
+              403,
+              "SUBSTITUTION_FORBIDDEN_NOT_ORDER_OWNER",
+              msg,
+              correlationId
+            );
+            return;
+          }
+          if (msg.startsWith("SUBSTITUTION_ALREADY_RESOLVED")) {
+            sendError(
+              res,
+              409,
+              "SUBSTITUTION_ALREADY_RESOLVED",
+              msg,
+              correlationId
+            );
+            return;
+          }
+          if (msg.startsWith("SUBSTITUTION_NOT_FOUND")) {
+            sendError(res, 404, "SUBSTITUTION_NOT_FOUND", msg, correlationId);
+            return;
+          }
+          throw err;
+        }
       }
 
       sendError(

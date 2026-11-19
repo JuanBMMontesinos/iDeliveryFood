@@ -1332,6 +1332,117 @@ export interface GovernanceBackofficeOverviewContract {
   privacyRequests: PrivacyRequestRecordContract[];
 }
 
+// ============================================================================
+// M22: Grocery & Market Extension, Picking, Variable Weight & Substitutions
+// ============================================================================
+
+export type GroceryPricingUnit = "UNIT" | "KG" | "GRAM_100";
+
+export type ItemSubstitutionPreference =
+  | "ALLOW_SUGGESTION"
+  | "CONTACT_ME"
+  | "REFUND_IF_UNAVAILABLE";
+
+export type OrderPickTaskStatus =
+  | "PICKING_IN_PROGRESS"
+  | "AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL"
+  | "PICKING_COMPLETED"
+  | "CANCELLED";
+
+export type OrderItemSubstitutionStatus =
+  | "PENDING_CUSTOMER_APPROVAL"
+  | "APPROVED_BY_CUSTOMER"
+  | "REJECTED_BY_CUSTOMER"
+  | "EXPIRED_TIMEOUT_REFUNDED"
+  | "AUTO_REFUNDED_UNAVAILABLE";
+
+export type CustomerSubstitutionDecision = "APPROVE" | "REJECT";
+
+export interface OrderPickingItemContract {
+  orderItemId: string;
+  orderId: string;
+  productId: string;
+  productNameEn: string;
+  productNamePtBr: string;
+  quantity: number;
+  unitPriceCents: number;
+  addonsUnitPriceCents: number;
+  totalLineCents: number;
+  adjustedLineCents: number | null;
+  substitutionPreference: ItemSubstitutionPreference;
+  pricingUnit: GroceryPricingUnit;
+  estimatedWeightGrams: number | null;
+  actualWeightGrams: number | null;
+  pricePerKgCents: number | null;
+}
+
+export interface OrderPickTaskContract {
+  id: string;
+  orderId: string;
+  orderNumber?: number;
+  storeId: string;
+  customerId: string;
+  pickerActorId: string | null;
+  status: OrderPickTaskStatus;
+  preAuthorizedTotalCents: number;
+  finalPickedTotalCents: number;
+  weightAdjustmentDeltaCents: number;
+  refundAdjustmentCents: number;
+  notes: string | null;
+  startedAtIso: string;
+  completedAtIso: string | null;
+  isTestData: boolean;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface OrderItemSubstitutionContract {
+  id: string;
+  pickTaskId: string;
+  orderId: string;
+  storeId: string;
+  customerId: string;
+  orderItemId: string;
+  originalProductId: string;
+  suggestedProductId: string | null;
+  suggestedProductNameEn: string | null;
+  suggestedProductNamePtBr: string | null;
+  customerPreference: ItemSubstitutionPreference;
+  originalLineCents: number;
+  suggestedLineCents: number;
+  priceDeltaCents: number;
+  status: OrderItemSubstitutionStatus;
+  reason: string;
+  expiresAtIso: string;
+  customerDecidedAtIso: string | null;
+  customerDecisionNotes: string | null;
+  isTestData: boolean;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface StoreGroceryPickingOverviewContract {
+  policyKey: string;
+  featureGroceryPickingEnabled: boolean;
+  storeGroceryPickingEnabled: boolean;
+  status: "ACTIVE" | "FEATURE_DISABLED_BY_POLICY";
+  reasonCode: string;
+  pickTasks: OrderPickTaskContract[];
+  substitutions: OrderItemSubstitutionContract[];
+  orderItems: OrderPickingItemContract[];
+}
+
+export interface OrderGroceryPickingDetailContract {
+  policyKey: string;
+  featureGroceryPickingEnabled: boolean;
+  storeGroceryPickingEnabled: boolean;
+  status: "ACTIVE" | "FEATURE_DISABLED_BY_POLICY";
+  reasonCode: string;
+  pickTask: OrderPickTaskContract | null;
+  substitutions: OrderItemSubstitutionContract[];
+  orderItems: OrderPickingItemContract[];
+}
+
 /**
  * Validates that a monetary value is a safe non-negative integer in BRL centavos.
  */
@@ -1481,7 +1592,11 @@ export const I18N_MESSAGES = {
     "governance.analytics.title": "Analytical BI, Reproducible KPIs & Ledger Reconciliation (M21)",
     "governance.risk.title": "Explainable Risk Engine & Mandatory Human Review Queue (M21)",
     "governance.risk.human_review_required": "No automated permanent ban is allowed. Every risk alert requires human review by risk_compliance with mandatory justification.",
-    "governance.privacy.title": "LGPD Privacy Governance, Data Portability & Statutory Retention Hold (M21)"
+    "governance.privacy.title": "LGPD Privacy Governance, Data Portability & Statutory Retention Hold (M21)",
+    "picking.console.title": "Grocery & Market Picking Console — Variable Weight & Customer-Consented Substitutions (M22)",
+    "picking.policy.disabled_notice": "FEATURE_DISABLED_BY_POLICY: Grocery picking extension (feature_grocery_picking_enabled=false) is currently disabled by platform/store policy.",
+    "picking.weighing.cap_notice": "Scale Pricing Rule: Actual weight is priced at HALF_UP integer BRL cents (actual_weight_grams * price_per_kg_cents / 1000) and never exceeds pre-authorized ceiling without explicit customer consent.",
+    "picking.substitution.customer_title": "Grocery Picking & Item Substitutions Requiring Your Consent (M22)"
   },
   "pt-BR": {
     "app.brand.name": "iDeliveryFood",
@@ -1572,7 +1687,11 @@ export const I18N_MESSAGES = {
     "governance.analytics.title": "BI Analítico, KPIs Reproduzíveis e Reconciliação com o Ledger (M21)",
     "governance.risk.title": "Motor de Risco Explicável e Fila de Revisão Humana Obrigatória (M21)",
     "governance.risk.human_review_required": "Nenhum banimento definitivo automático é permitido. Todo alerta de risco exige revisão humana por risk_compliance com justificativa obrigatória.",
-    "governance.privacy.title": "Governança de Privacidade LGPD, Portabilidade de Dados e Retenção Legal (M21)"
+    "governance.privacy.title": "Governança de Privacidade LGPD, Portabilidade de Dados e Retenção Legal (M21)",
+    "picking.console.title": "Console de Separação de Mercado (Picking) — Pesagem Real e Substituições com Consentimento (M22)",
+    "picking.policy.disabled_notice": "FEATURE_DISABLED_BY_POLICY: A extensão de mercados e separação (feature_grocery_picking_enabled=false) está desabilitada por política da plataforma/loja.",
+    "picking.weighing.cap_notice": "Regra de Pesagem na Balança: O peso real é calculado em centavos inteiros BRL com arredondamento HALF_UP (actual_weight_grams * price_per_kg_cents / 1000) e nunca excede o teto pré-autorizado sem consentimento explícito do cliente.",
+    "picking.substitution.customer_title": "Separação de Mercado e Substituições Aguardando Seu Consentimento (M22)"
   }
 } as const;
 

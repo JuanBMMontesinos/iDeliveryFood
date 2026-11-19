@@ -24,7 +24,8 @@ export interface PartnerLayoutShellOptions {
     | "/contract"
     | "/support"
     | "/onboarding"
-    | "/chain";
+    | "/chain"
+    | "/picking";
   actorSummary?: string | null;
   storeName?: string | null;
   banner?: UiScreenStateBanner | null;
@@ -106,6 +107,10 @@ export function renderPartnerLayoutHtml(options: PartnerLayoutShellOptions): str
     {
       href: "/chain",
       label: locale === "pt-BR" ? "Rede Multi-Unidade (M09)" : "Multi-Unit Chain (M09)",
+    },
+    {
+      href: "/picking",
+      label: locale === "pt-BR" ? "Separação Mercado (M22)" : "Grocery Picking (M22)",
     },
   ];
 

@@ -37,6 +37,10 @@ import {
   loadPartnerTeamScreen,
   renderPartnerTeamHtml,
 } from "./app/team/page.js";
+import {
+  loadPartnerPickingConsoleScreen,
+  renderPartnerPickingConsoleHtml,
+} from "./app/picking/page.js";
 
 export interface PartnerWebServerDeps {
   apiClient: IDeliveryApiClient;
@@ -181,6 +185,17 @@ export function createPartnerWebServer(deps: PartnerWebServerDeps): http.Server 
         });
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(renderPartnerChainPortalHtml(model));
+        return;
+      }
+
+      if (pathname === "/picking") {
+        const model = await loadPartnerPickingConsoleScreen({
+          apiClient: deps.apiClient,
+          storeId,
+          locale,
+        });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderPartnerPickingConsoleHtml(model));
         return;
       }
 

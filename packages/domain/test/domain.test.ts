@@ -52,6 +52,11 @@ import {
   evaluateExplainableRiskRule,
   formatAnalyticalKpisCsv,
   validateHumanRiskReview,
+  calculateWeighedItemPriceCents,
+  evaluateGroceryPickingPolicyAccess,
+  evaluateItemSubstitutionProposal,
+  finalizeOrderPickTaskFinancialAdjustment,
+  resolveCustomerSubstitutionDecision,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -1651,5 +1656,188 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     assert.equal(eligibleAnonymization.allowed, true);
     assert.equal(eligibleAnonymization.reasonCode, "PII_ANONYMIZED_LGPD_COMPLIANT");
     assert.ok(eligibleAnonymization.anonymizedEmail?.endsWith("@anonymized.ideliveryfood.invalid"));
+  });
+
+  it("verifies Fase S (M22): grocery picking policy gate, HALF_UP scale pricing in cents, REFUND_IF_UNAVAILABLE substitution prohibition, substitution timeout, and balanced ledger adjustment", () => {
+    // 1. Policy gate evaluation
+    const disabledByPlatform = evaluateGroceryPickingPolicyAccess({
+      platformFeatureGroceryPickingEnabled: false,
+      organizationFeatureGroceryPickingEnabled: true,
+      storeFeatureGroceryPickingEnabled: true,
+    });
+    assert.equal(disabledByPlatform.enabled, false);
+    assert.equal(disabledByPlatform.status, "FEATURE_DISABLED_BY_POLICY");
+    assert.equal(disabledByPlatform.reasonCode, "PLATFORM_GROCERY_PICKING_DISABLED");
+
+    const disabledByStore = evaluateGroceryPickingPolicyAccess({
+      platformFeatureGroceryPickingEnabled: true,
+      organizationFeatureGroceryPickingEnabled: false,
+      storeFeatureGroceryPickingEnabled: false,
+    });
+    assert.equal(disabledByStore.enabled, false);
+    assert.equal(disabledByStore.status, "FEATURE_DISABLED_BY_POLICY");
+    assert.equal(disabledByStore.reasonCode, "STORE_GROCERY_PICKING_DISABLED");
+
+    const activePolicy = evaluateGroceryPickingPolicyAccess({
+      platformFeatureGroceryPickingEnabled: true,
+      organizationFeatureGroceryPickingEnabled: false,
+      storeFeatureGroceryPickingEnabled: true,
+    });
+    assert.equal(activePolicy.enabled, true);
+    assert.equal(activePolicy.status, "ACTIVE");
+
+    // 2. Deterministic scale pricing in integer BRL cents with HALF_UP rounding
+    // 485g * 3399 cents/kg = 1,648,515 / 1000 = 1648.515 -> HALF_UP -> 1649 cents
+    const weighedDownward = calculateWeighedItemPriceCents({
+      actualWeightGrams: 485,
+      pricePerKgCents: 3399,
+      preAuthorizedLineCents: 1700,
+    });
+    assert.equal(weighedDownward.weighedBaseCents, 1649);
+    assert.equal(weighedDownward.calculatedLineCents, 1649);
+    assert.equal(weighedDownward.deltaCents, -51);
+    assert.equal(weighedDownward.refundAdjustmentCents, 51);
+
+    // Exact 0.5 cent boundary rounds UP under HALF_UP: 500g * 1999 cents/kg = 999,500 / 1000 = 999.5 -> 1000 cents
+    const weighedHalfUpBoundary = calculateWeighedItemPriceCents({
+      actualWeightGrams: 500,
+      pricePerKgCents: 1999,
+      preAuthorizedLineCents: 1000,
+    });
+    assert.equal(weighedHalfUpBoundary.calculatedLineCents, 1000);
+    assert.equal(weighedHalfUpBoundary.refundAdjustmentCents, 0);
+
+    // Exceeding pre-authorized ceiling without explicit customer consent is blocked
+    assert.throws(
+      () =>
+        calculateWeighedItemPriceCents({
+          actualWeightGrams: 550,
+          pricePerKgCents: 3399,
+          preAuthorizedLineCents: 1700,
+        }),
+      /WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING/
+    );
+
+    // 3. Prohibits substitution when customer selected REFUND_IF_UNAVAILABLE
+    assert.throws(
+      () =>
+        evaluateItemSubstitutionProposal({
+          customerPreference: "REFUND_IF_UNAVAILABLE",
+          originalLineCents: 1690,
+          action: "PROPOSE_SUBSTITUTION",
+          suggestedProductId: "prod_sub_1",
+          suggestedProductNameEn: "Sweet Potato Fries",
+          suggestedProductNamePtBr: "Batata Doce Rústica",
+          suggestedLineCents: 1590,
+          reason: "Regular crinkle fries out of stock",
+        }),
+      /SUBSTITUTION_FORBIDDEN_BY_PREFERENCE/
+    );
+
+    // REFUND_IF_UNAVAILABLE allows immediate unavailable item refund
+    const autoRefunded = evaluateItemSubstitutionProposal({
+      customerPreference: "REFUND_IF_UNAVAILABLE",
+      originalLineCents: 1690,
+      action: "MARK_UNAVAILABLE_REFUND",
+      reason: "Item unavailable; customer opted for automatic refund",
+    });
+    assert.equal(autoRefunded.status, "AUTO_REFUNDED_UNAVAILABLE");
+    assert.equal(autoRefunded.refundAdjustmentCents, 1690);
+
+    // 4. ALLOW_SUGGESTION creates pending approval proposal and enforces timeout
+    const baseNow = new Date("2026-11-19T04:00:00.000Z");
+    const proposal = evaluateItemSubstitutionProposal({
+      customerPreference: "ALLOW_SUGGESTION",
+      originalLineCents: 1690,
+      action: "PROPOSE_SUBSTITUTION",
+      suggestedProductId: "prod_sub_1",
+      suggestedProductNameEn: "Artisan Sweet Potato Fries",
+      suggestedProductNamePtBr: "Batata Doce Rústica Artesanal",
+      suggestedLineCents: 1490,
+      reason: "Out of regular fries; suggesting artisan sweet potato fries",
+      timeoutSeconds: 300,
+      now: baseNow,
+    });
+    assert.equal(proposal.status, "PENDING_CUSTOMER_APPROVAL");
+    assert.equal(
+      proposal.nextPickTaskStatus,
+      "AWAITING_CUSTOMER_SUBSTITUTION_APPROVAL"
+    );
+    assert.equal(proposal.priceDeltaCents, -200);
+    assert.equal(proposal.refundAdjustmentCents, 200);
+
+    // Timeout expiration (> 300s) auto-refunds and never substitutes silently
+    const expiredResolution = resolveCustomerSubstitutionDecision({
+      substitution: {
+        id: "sub_1",
+        status: proposal.status,
+        originalLineCents: 1690,
+        suggestedLineCents: 1490,
+        expiresAtIso: proposal.expiresAtIso,
+      },
+      decision: "APPROVE",
+      now: new Date(baseNow.getTime() + 301 * 1000),
+    });
+    assert.equal(expiredResolution.isExpiredTimeout, true);
+    assert.equal(expiredResolution.updatedStatus, "EXPIRED_TIMEOUT_REFUNDED");
+    assert.equal(expiredResolution.effectiveLineCents, 0);
+    assert.equal(expiredResolution.refundDeltaCents, 1690);
+
+    // Customer approval within timeout applies suggestedLineCents and partial refund delta (200 cents)
+    const approvedResolution = resolveCustomerSubstitutionDecision({
+      substitution: {
+        id: "sub_2",
+        status: "PENDING_CUSTOMER_APPROVAL",
+        originalLineCents: 1690,
+        suggestedLineCents: 1490,
+        expiresAtIso: proposal.expiresAtIso,
+      },
+      decision: "APPROVE",
+      now: new Date(baseNow.getTime() + 120 * 1000),
+    });
+    assert.equal(approvedResolution.isExpiredTimeout, false);
+    assert.equal(approvedResolution.updatedStatus, "APPROVED_BY_CUSTOMER");
+    assert.equal(approvedResolution.effectiveLineCents, 1490);
+    assert.equal(approvedResolution.refundDeltaCents, 200);
+
+    // 5. Finalizing pick task generates balanced M13 REFUND ledger adjustment journal
+    const finalized = finalizeOrderPickTaskFinancialAdjustment({
+      orderId: "00000000-0000-4000-8000-000000001001",
+      organizationId: "00000000-0000-4000-8000-000000000101",
+      preAuthorizedTotalCents: 6232,
+      orderItems: [
+        {
+          orderItemId: "item_1",
+          totalLineCents: 4540,
+          adjustedLineCents: 4489, // -51 cents scale weight adjustment
+        },
+        {
+          orderItemId: "item_2",
+          totalLineCents: 1690,
+          adjustedLineCents: 1490, // -200 cents consented substitution adjustment
+        },
+      ],
+      substitutions: [
+        {
+          id: "sub_2",
+          status: "APPROVED_BY_CUSTOMER",
+          expiresAtIso: proposal.expiresAtIso,
+        },
+      ],
+      journalId: "00000000-0000-4000-8000-000000009988",
+      now: new Date(baseNow.getTime() + 180 * 1000),
+    });
+    assert.equal(finalized.status, "PICKING_COMPLETED");
+    assert.equal(finalized.weightAdjustmentDeltaCents, -251);
+    assert.equal(finalized.refundAdjustmentCents, 251);
+    assert.equal(finalized.finalPickedTotalCents, 5981);
+    assert.ok(finalized.refundLedgerJournal);
+    assert.equal(finalized.refundLedgerJournal?.entries.length, 2);
+    assert.equal(finalized.refundLedgerJournal?.totalDebitsCents, 251);
+    assert.equal(finalized.refundLedgerJournal?.totalCreditsCents, 251);
+    assert.equal(finalized.refundLedgerJournal?.entries[0]?.direction, "DEBIT");
+    assert.equal(finalized.refundLedgerJournal?.entries[0]?.amountCents, 251);
+    assert.equal(finalized.refundLedgerJournal?.entries[1]?.direction, "CREDIT");
+    assert.equal(finalized.refundLedgerJournal?.entries[1]?.amountCents, 251);
   });
 });
