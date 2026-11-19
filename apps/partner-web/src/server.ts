@@ -1,5 +1,6 @@
 import http from "node:http";
 import { IDeliveryApiClient } from "@ideliveryfood/api-client";
+import { buildHttpSecurityHeaders } from "@ideliveryfood/config";
 import { DEFAULT_LOCALE, resolveSupportedLocale } from "@ideliveryfood/contracts";
 import {
   loadPartnerCatalogScreen,
@@ -54,7 +55,11 @@ export function createPartnerWebServer(deps: PartnerWebServerDeps): http.Server 
   const defaultStoreId =
     deps.defaultStoreId ?? "00000000-0000-4000-8000-000000000201";
 
+  const secHeaders = buildHttpSecurityHeaders({ surface: "partner-web" });
   return http.createServer(async (req, res) => {
+    for (const [hKey, hVal] of Object.entries(secHeaders)) {
+      res.setHeader(hKey, hVal);
+    }
     try {
       const parsedUrl = new URL(req.url ?? "/", "http://localhost");
       const pathname = parsedUrl.pathname;

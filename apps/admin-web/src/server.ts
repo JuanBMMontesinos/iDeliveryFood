@@ -1,4 +1,5 @@
 import http from "node:http";
+import { buildHttpSecurityHeaders } from "@ideliveryfood/config";
 import { resolveSupportedLocale } from "@ideliveryfood/contracts";
 import {
   loadAdminBackofficePageData,
@@ -57,7 +58,11 @@ function extractAccessToken(
 export function createAdminWebServer(
   options: AdminWebServerOptions
 ): http.Server {
+  const secHeaders = buildHttpSecurityHeaders({ surface: "admin-web" });
   return http.createServer(async (req, res) => {
+    for (const [hKey, hVal] of Object.entries(secHeaders)) {
+      res.setHeader(hKey, hVal);
+    }
     try {
       const parsedUrl = new URL(req.url ?? "/admin", "http://localhost");
       const pathname = parsedUrl.pathname;

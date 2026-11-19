@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
-import { createStructuredLogEntry, inspectProviderReadiness } from "@ideliveryfood/config";
+import {
+  createStructuredLogEntry,
+  inspectProviderReadiness,
+  validateExternalWebhookUrlAgainstSsrf,
+} from "@ideliveryfood/config";
 import type {
   NotificationCategory,
   NotificationChannel,
@@ -488,7 +492,28 @@ export async function processSupabaseOutboxBatch(params?: {
           });
 
           let deliveryPayload: Record<string, unknown> = { ...enrichedPayload };
-          if (channel === "WEBHOOK" && eligibility.eligible) {
+          let finalDeliveryStatus = eligibility.deliveryStatus;
+          let ssrfBlockMessage: string | null = null;
+          if (channel === "WEBHOOK") {
+            const rawTargetUrl =
+              typeof enrichedPayload.targetUrl === "string"
+                ? enrichedPayload.targetUrl
+                : typeof enrichedPayload.webhookUrl === "string"
+                  ? enrichedPayload.webhookUrl
+                  : null;
+            if (rawTargetUrl) {
+              const ssrfCheck = validateExternalWebhookUrlAgainstSsrf(rawTargetUrl);
+              if (!ssrfCheck.allowed) {
+                finalDeliveryStatus = "FAILED";
+                ssrfBlockMessage = ssrfCheck.message;
+              }
+            }
+          }
+          if (
+            channel === "WEBHOOK" &&
+            eligibility.eligible &&
+            !ssrfBlockMessage
+          ) {
             const secret =
               params?.webhookSigningSecret ??
               process.env.OUTBOUND_WEBHOOK_SIGNING_SECRET ??
@@ -507,11 +532,12 @@ export async function processSupabaseOutboxBatch(params?: {
           }
 
           const lastError =
-            eligibility.deliveryStatus === "BLOCKED_MISSING_CREDENTIALS"
+            ssrfBlockMessage ??
+            (eligibility.deliveryStatus === "BLOCKED_MISSING_CREDENTIALS"
               ? `PROVIDER_BLOCKED [${providerCode ?? channel.toLowerCase()}]: Missing ${missingVars.join(", ")}`
               : eligibility.deliveryStatus === "BLOCKED_DEVICE_REVOKED"
                 ? "DEVICE_REVOKED_OR_TOKEN_CLEARED"
-                : null;
+                : null);
 
           const idempotencyKey = `notif_${event.id}_${channel.toLowerCase()}_${recipientUserId}`;
 
@@ -548,7 +574,7 @@ export async function processSupabaseOutboxBatch(params?: {
               renderedTemplate.title,
               renderedTemplate.body,
               JSON.stringify(deliveryPayload),
-              eligibility.deliveryStatus,
+              finalDeliveryStatus,
               providerCode,
               idempotencyKey,
               lastError,

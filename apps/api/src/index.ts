@@ -8,8 +8,16 @@ import {
   type StoredInvitationRecord,
 } from "@ideliveryfood/authz";
 import {
+  SlidingWindowRateLimiter,
+  buildHttpSecurityHeaders,
+  classifyRateLimitRouteBucket,
   createStructuredLogEntry,
+  evaluateCorsRequest,
+  evaluateCsrfProtection,
   inspectProviderReadiness,
+  validateExternalWebhookUrlAgainstSsrf,
+  validatePayloadAgainstMassAssignment,
+  validateStorageUploadSecurity,
 } from "@ideliveryfood/config";
 import {
   assertIntegerCents,
@@ -750,6 +758,23 @@ function sendError(
   sendJson(res, statusCode, correlationId, envelope);
 }
 
+class PayloadSecurityError extends Error {
+  public readonly statusCode: number;
+  public readonly errorCode: string;
+
+  constructor(statusCode: number, errorCode: string, message: string) {
+    super(message);
+    this.name = "PayloadSecurityError";
+    this.statusCode = statusCode;
+    this.errorCode = errorCode;
+  }
+}
+
+interface IncomingMessageWithRouteMeta extends http.IncomingMessage {
+  __pathname?: string;
+  __method?: string;
+}
+
 async function readRawAndJsonBody(
   req: http.IncomingMessage
 ): Promise<{ raw: string; json: Record<string, unknown> }> {
@@ -759,9 +784,51 @@ async function readRawAndJsonBody(
   }
   if (chunks.length === 0) return { raw: "", json: {} };
   const raw = Buffer.concat(chunks).toString("utf8");
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new PayloadSecurityError(
+      400,
+      "INVALID_JSON_PAYLOAD",
+      "Request body must be valid JSON."
+    );
+  }
+
+  const metaReq = req as IncomingMessageWithRouteMeta;
+  const pathname = metaReq.__pathname ?? "/";
+  const method = metaReq.__method ?? req.method ?? "POST";
+
+  const massCheck = validatePayloadAgainstMassAssignment({
+    pathname,
+    method,
+    body: json,
+  });
+  if (!massCheck.valid) {
+    throw new PayloadSecurityError(
+      400,
+      massCheck.reasonCode,
+      massCheck.message ?? "Mass assignment property rejected."
+    );
+  }
+
+  for (const urlField of ["webhookUrl", "targetUrl", "callbackUrl"]) {
+    const rawTarget = json[urlField];
+    if (typeof rawTarget === "string" && rawTarget.trim().length > 0) {
+      const ssrfCheck = validateExternalWebhookUrlAgainstSsrf(rawTarget);
+      if (!ssrfCheck.allowed) {
+        throw new PayloadSecurityError(
+          400,
+          ssrfCheck.reasonCode,
+          ssrfCheck.message
+        );
+      }
+    }
+  }
+
   return {
     raw,
-    json: JSON.parse(raw) as Record<string, unknown>,
+    json,
   };
 }
 
@@ -771,6 +838,8 @@ export function createApiServer(deps: {
   allowTestActorHeaders?: boolean;
 }): http.Server {
   const env = deps.env ?? process.env;
+  const apiSecurityHeaders = buildHttpSecurityHeaders({ surface: "api" });
+  const rateLimiter = new SlidingWindowRateLimiter(env);
 
   return http.createServer(async (req, res) => {
     const correlationId =
@@ -781,9 +850,100 @@ export function createApiServer(deps: {
     );
     const parsedUrl = new URL(req.url ?? "/", "http://localhost");
     const pathname = parsedUrl.pathname;
-    const method = req.method ?? "GET";
+    const method = (req.method ?? "GET").toUpperCase();
+
+    const metaReq = req as IncomingMessageWithRouteMeta;
+    metaReq.__pathname = pathname;
+    metaReq.__method = method;
+
+    // 0a. M23 Mandatory HTTP Security Headers & Strict CSP (without unsafe-eval)
+    for (const [hKey, hVal] of Object.entries(apiSecurityHeaders)) {
+      res.setHeader(hKey, hVal);
+    }
 
     try {
+      // 0b. M23 Strict Allowlist CORS Guard (never '*' on authenticated routes)
+      const corsEval = evaluateCorsRequest({
+        originHeader: req.headers.origin as string | undefined,
+        method,
+        rawEnv: env,
+      });
+      for (const [cKey, cVal] of Object.entries(corsEval.headers)) {
+        res.setHeader(cKey, cVal);
+      }
+      if (!corsEval.allowed) {
+        sendError(
+          res,
+          403,
+          "CORS_ORIGIN_FORBIDDEN",
+          `Origin '${String(req.headers.origin ?? "")}' is not permitted by CORS_ALLOWED_ORIGINS allowlist.`,
+          correlationId
+        );
+        return;
+      }
+      if (corsEval.isPreflight) {
+        res.writeHead(204, { "X-Correlation-Id": correlationId });
+        res.end();
+        return;
+      }
+
+      // 0c. M23 Anti-CSRF Guard for Cookie/Session-Authenticated Mutations
+      const csrfEval = evaluateCsrfProtection({
+        method,
+        cookieHeader: req.headers.cookie,
+        authorizationHeader: req.headers.authorization,
+        originHeader: req.headers.origin as string | undefined,
+        refererHeader: req.headers.referer as string | undefined,
+        csrfTokenHeader: req.headers["x-csrf-token"] as string | undefined,
+        rawEnv: env,
+      });
+      if (!csrfEval.allowed) {
+        sendError(
+          res,
+          403,
+          csrfEval.reasonCode,
+          "CSRF validation failed: cookie-authenticated state-changing requests require an allowed Origin/Referer and matching X-CSRF-Token.",
+          correlationId
+        );
+        return;
+      }
+
+      // 0d. M23 Configurable Sliding-Window Rate Limiter by IP, Actor & Sensitive Route Bucket
+      const forwardedFor = req.headers["x-forwarded-for"];
+      const clientIp =
+        (typeof forwardedFor === "string"
+          ? forwardedFor.split(",")[0]?.trim()
+          : undefined) ||
+        req.socket?.remoteAddress ||
+        "127.0.0.1";
+      const actorHint =
+        (req.headers["x-actor-id"] as string | undefined) ??
+        (req.headers.authorization
+          ? crypto
+              .createHash("sha256")
+              .update(req.headers.authorization)
+              .digest("hex")
+              .slice(0, 16)
+          : null);
+      const routeBucket = classifyRateLimitRouteBucket(method, pathname);
+      const rateEval = rateLimiter.consume({
+        bucket: routeBucket,
+        clientIp,
+        actorId: actorHint,
+      });
+      res.setHeader("X-RateLimit-Limit", String(rateEval.limit));
+      res.setHeader("X-RateLimit-Remaining", String(rateEval.remaining));
+      if (!rateEval.allowed) {
+        res.setHeader("Retry-After", String(rateEval.retryAfterSeconds));
+        sendError(
+          res,
+          429,
+          "TOO_MANY_REQUESTS",
+          `Rate limit exceeded for route bucket '${rateEval.bucket}'. Retry after ${rateEval.retryAfterSeconds} seconds.`,
+          correlationId
+        );
+        return;
+      }
       // 1. Liveness Probe
       if (method === "GET" && pathname === "/v1/health/live") {
         sendJson(res, 200, correlationId, {
@@ -4887,43 +5047,19 @@ export function createApiServer(deps: {
           return;
         }
 
-        if (
-          !rawFileName ||
-          rawFileName.includes("..") ||
-          rawFileName.includes("/") ||
-          rawFileName.includes("\\")
-        ) {
+        const uploadSecurity = validateStorageUploadSecurity({
+          fileName: rawFileName,
+          mimeType,
+          fileSizeBytes,
+          maxSizeBytes: policy.maxSizeBytes,
+          allowedMimeTypes: policy.allowedMimeTypes,
+        });
+        if (!uploadSecurity.valid) {
           sendError(
             res,
             400,
-            "STORAGE_INVALID_FILENAME",
-            "fileName must be a clean basename without path traversal characters.",
-            correlationId
-          );
-          return;
-        }
-
-        if (!policy.allowedMimeTypes.includes(mimeType)) {
-          sendError(
-            res,
-            400,
-            "STORAGE_INVALID_MIME_TYPE",
-            `MIME type '${mimeType}' is not allowed in bucket '${bucket}'.`,
-            correlationId
-          );
-          return;
-        }
-
-        if (
-          !Number.isSafeInteger(fileSizeBytes) ||
-          fileSizeBytes <= 0 ||
-          fileSizeBytes > policy.maxSizeBytes
-        ) {
-          sendError(
-            res,
-            400,
-            "STORAGE_FILE_TOO_LARGE",
-            `fileSizeBytes must be between 1 and ${policy.maxSizeBytes} bytes for bucket '${bucket}'.`,
+            uploadSecurity.reasonCode,
+            uploadSecurity.message ?? "Storage upload failed security validation.",
             correlationId
           );
           return;
@@ -8469,6 +8605,29 @@ export function createApiServer(deps: {
         }
       }
 
+      // 25. M23: POST /v1/security/webhooks/validate-target (Anti-SSRF External Webhook Target Validation)
+      if (method === "POST" && pathname === "/v1/security/webhooks/validate-target") {
+        if (!actor) {
+          sendError(res, 401, "AUTH_UNAUTHORIZED", "Authentication required.", correlationId);
+          return;
+        }
+        const { json: body } = await readRawAndJsonBody(req);
+        const rawUrl = String(body.url ?? body.targetUrl ?? body.webhookUrl ?? "").trim();
+        const ssrf = validateExternalWebhookUrlAgainstSsrf(rawUrl);
+        if (!ssrf.allowed) {
+          sendError(res, 400, ssrf.reasonCode, ssrf.message, correlationId);
+          return;
+        }
+        sendJson(res, 200, correlationId, {
+          data: {
+            allowed: true,
+            normalizedUrl: ssrf.normalizedUrl,
+            reasonCode: ssrf.reasonCode,
+          },
+        });
+        return;
+      }
+
       sendError(
         res,
         404,
@@ -8477,6 +8636,16 @@ export function createApiServer(deps: {
         correlationId
       );
     } catch (err) {
+      if (err instanceof PayloadSecurityError) {
+        sendError(
+          res,
+          err.statusCode,
+          err.errorCode,
+          err.message,
+          correlationId
+        );
+        return;
+      }
       createStructuredLogEntry({
         level: "ERROR",
         service: "@ideliveryfood/api",

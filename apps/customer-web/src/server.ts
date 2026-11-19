@@ -27,7 +27,10 @@ import {
 } from "./app/stores/[slug]/page.js";
 import { renderCustomerCartHtml } from "./app/cart/page.js";
 import { renderCustomerCheckoutHtml } from "./app/checkout/page.js";
-import type { ExternalProviderDescriptor } from "@ideliveryfood/config";
+import {
+  buildHttpSecurityHeaders,
+  type ExternalProviderDescriptor,
+} from "@ideliveryfood/config";
 import {
   loadCustomerOrderTrackingScreen,
   renderCustomerOrderTrackingHtml,
@@ -62,7 +65,11 @@ export function createCustomerWebServer(deps: CustomerWebServerDeps): http.Serve
     "https://dwsoochnfxldfvcaijie.supabase.co";
   const cartController = deps.cartController ?? new CustomerCartController();
 
+  const secHeaders = buildHttpSecurityHeaders({ surface: "customer-web" });
   return http.createServer(async (req, res) => {
+    for (const [hKey, hVal] of Object.entries(secHeaders)) {
+      res.setHeader(hKey, hVal);
+    }
     const parsedUrl = new URL(req.url ?? "/", "http://localhost");
     const pathname = parsedUrl.pathname;
     const locale = resolveSupportedLocale(
