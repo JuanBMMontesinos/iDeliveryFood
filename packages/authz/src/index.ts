@@ -223,3 +223,189 @@ export function isAllowedAuthRedirectUri(redirectUri: string): boolean {
     return false;
   }
 }
+
+export const ALL_PLATFORM_ROLES = [
+  "customer",
+  "courier",
+  "partner_owner",
+  "partner_manager",
+  "partner_operator",
+  "partner_catalog",
+  "partner_finance",
+  "operations",
+  "logistics",
+  "support",
+  "finance",
+  "commercial",
+  "marketing",
+  "risk_compliance",
+  "auditor_privacy",
+  "tech_admin",
+  "fleet_operator",
+] as const;
+
+export type PlatformRoleName = (typeof ALL_PLATFORM_ROLES)[number];
+
+export type PlatformCapability =
+  | "CUSTOMER_PLACE_ORDER"
+  | "COURIER_ACCEPT_OFFER"
+  | "PARTNER_KDS_OPERATIONS"
+  | "PARTNER_CATALOG_EDIT"
+  | "PARTNER_FINANCE_VIEW"
+  | "PARTNER_BANK_CHANGE_REQUEST"
+  | "STAFF_OPS_CADASTRE"
+  | "STAFF_LOGISTICS_DISPATCH"
+  | "STAFF_SUPPORT_TICKET"
+  | "STAFF_FINANCE_SETTLEMENT"
+  | "STAFF_COMMERCIAL_CONTRACT"
+  | "STAFF_MARKETING_PROMO"
+  | "STAFF_RISK_HUMAN_REVIEW"
+  | "STAFF_PRIVACY_LGPD_AUDIT"
+  | "STAFF_IAM_GRANT_SCOPE"
+  | "FLEET_OPERATOR_VIEW_COURIERS";
+
+const ROLE_CAPABILITY_MATRIX: Readonly<
+  Record<
+    PlatformRoleName,
+    {
+      capabilities: ReadonlySet<PlatformCapability>;
+      requiresMfaAal2ForMutations: boolean;
+    }
+  >
+> = {
+  customer: {
+    capabilities: new Set(["CUSTOMER_PLACE_ORDER"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  courier: {
+    capabilities: new Set(["COURIER_ACCEPT_OFFER"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  partner_owner: {
+    capabilities: new Set([
+      "PARTNER_KDS_OPERATIONS",
+      "PARTNER_CATALOG_EDIT",
+      "PARTNER_FINANCE_VIEW",
+      "PARTNER_BANK_CHANGE_REQUEST",
+    ]),
+    requiresMfaAal2ForMutations: true,
+  },
+  partner_manager: {
+    capabilities: new Set(["PARTNER_KDS_OPERATIONS", "PARTNER_CATALOG_EDIT"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  partner_operator: {
+    capabilities: new Set(["PARTNER_KDS_OPERATIONS"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  partner_catalog: {
+    capabilities: new Set(["PARTNER_CATALOG_EDIT"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  partner_finance: {
+    capabilities: new Set(["PARTNER_FINANCE_VIEW"]),
+    requiresMfaAal2ForMutations: true,
+  },
+  operations: {
+    capabilities: new Set([
+      "STAFF_OPS_CADASTRE",
+      "STAFF_LOGISTICS_DISPATCH",
+      "STAFF_SUPPORT_TICKET",
+    ]),
+    requiresMfaAal2ForMutations: true,
+  },
+  logistics: {
+    capabilities: new Set(["STAFF_LOGISTICS_DISPATCH"]),
+    requiresMfaAal2ForMutations: true,
+  },
+  support: {
+    capabilities: new Set(["STAFF_SUPPORT_TICKET"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  finance: {
+    capabilities: new Set(["STAFF_FINANCE_SETTLEMENT"]),
+    requiresMfaAal2ForMutations: true,
+  },
+  commercial: {
+    capabilities: new Set(["STAFF_COMMERCIAL_CONTRACT"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  marketing: {
+    capabilities: new Set(["STAFF_MARKETING_PROMO"]),
+    requiresMfaAal2ForMutations: false,
+  },
+  risk_compliance: {
+    capabilities: new Set(["STAFF_RISK_HUMAN_REVIEW", "STAFF_PRIVACY_LGPD_AUDIT"]),
+    requiresMfaAal2ForMutations: true,
+  },
+  auditor_privacy: {
+    capabilities: new Set(["STAFF_PRIVACY_LGPD_AUDIT"]),
+    requiresMfaAal2ForMutations: true,
+  },
+  tech_admin: {
+    capabilities: new Set([
+      "STAFF_OPS_CADASTRE",
+      "STAFF_LOGISTICS_DISPATCH",
+      "STAFF_SUPPORT_TICKET",
+      "STAFF_FINANCE_SETTLEMENT",
+      "STAFF_COMMERCIAL_CONTRACT",
+      "STAFF_MARKETING_PROMO",
+      "STAFF_RISK_HUMAN_REVIEW",
+      "STAFF_PRIVACY_LGPD_AUDIT",
+      "STAFF_IAM_GRANT_SCOPE",
+    ]),
+    requiresMfaAal2ForMutations: true,
+  },
+  fleet_operator: {
+    capabilities: new Set(["FLEET_OPERATOR_VIEW_COURIERS"]),
+    requiresMfaAal2ForMutations: false,
+  },
+};
+
+/**
+ * Evaluates capability authorization across all 17 canonical platform roles,
+ * enforcing MFA `aal2` on privileged roles and anti-self-elevation on `STAFF_IAM_GRANT_SCOPE` (M01/M02/M24).
+ */
+export function evaluateCanonicalRoleCapability(params: {
+  role: PlatformRoleName;
+  capability: PlatformCapability;
+  actorId: string;
+  targetUserId?: string | null;
+  aal: "aal1" | "aal2";
+  isMutation?: boolean;
+}): {
+  allowed: boolean;
+  reasonCode:
+    | "ALLOWED"
+    | "DENIED_ROLE_INSUFFICIENT"
+    | "DENIED_MFA_STEP_UP_REQUIRED"
+    | "DENIED_SELF_ELEVATION_FORBIDDEN";
+} {
+  const def = ROLE_CAPABILITY_MATRIX[params.role];
+  if (!def || !def.capabilities.has(params.capability)) {
+    return { allowed: false, reasonCode: "DENIED_ROLE_INSUFFICIENT" };
+  }
+
+  if (
+    params.capability === "STAFF_IAM_GRANT_SCOPE" &&
+    params.targetUserId &&
+    params.targetUserId === params.actorId
+  ) {
+    return { allowed: false, reasonCode: "DENIED_SELF_ELEVATION_FORBIDDEN" };
+  }
+
+  const requiresMfa =
+    (params.isMutation ?? true) &&
+    (def.requiresMfaAal2ForMutations ||
+      params.capability === "PARTNER_BANK_CHANGE_REQUEST" ||
+      params.capability === "STAFF_FINANCE_SETTLEMENT" ||
+      params.capability === "STAFF_IAM_GRANT_SCOPE" ||
+      params.capability === "STAFF_RISK_HUMAN_REVIEW");
+
+  if (requiresMfa && params.aal !== "aal2") {
+    return { allowed: false, reasonCode: "DENIED_MFA_STEP_UP_REQUIRED" };
+  }
+
+  return { allowed: true, reasonCode: "ALLOWED" };
+}
+

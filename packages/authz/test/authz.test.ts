@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AuthenticatedActorProfileContract } from "@ideliveryfood/contracts";
 import {
+  ALL_PLATFORM_ROLES,
   authorizePartnerScope,
   authorizeStaffAction,
+  evaluateCanonicalRoleCapability,
   hashInvitationToken,
   isAllowedAuthRedirectUri,
   sanitizeClientUserMetadata,
   validateInvitationAcceptance,
+  type PlatformCapability,
+  type PlatformRoleName,
 } from "../src/index.js";
 
 describe("@ideliveryfood/authz — RBAC, Multi-Tenant ABAC, MFA aal2, Invitations & Redirect Guard Tests", () => {
@@ -180,10 +184,277 @@ describe("@ideliveryfood/authz — RBAC, Multi-Tenant ABAC, MFA aal2, Invitation
 
   it("blocks open redirects while allowing allowlisted Web and Native deep links", () => {
     assert.equal(isAllowedAuthRedirectUri("http://localhost:3000/auth/callback"), true);
+    assert.equal(isAllowedAuthRedirectUri("http://127.0.0.1:3001/auth/callback"), true);
     assert.equal(isAllowedAuthRedirectUri("https://partner.ideliveryfood.com.br/dashboard"), true);
+    assert.equal(isAllowedAuthRedirectUri("http://partner.ideliveryfood.com.br/dashboard"), false);
     assert.equal(isAllowedAuthRedirectUri("ideliveryfood-customer://auth-callback?code=123"), true);
     assert.equal(isAllowedAuthRedirectUri("ideliveryfood-courier://auth-callback?code=123"), true);
+    assert.equal(isAllowedAuthRedirectUri("ideliveryfood-customer://wrong-host?code=123"), false);
     assert.equal(isAllowedAuthRedirectUri("https://evil-phishing.example.com/callback"), false);
     assert.equal(isAllowedAuthRedirectUri("javascript:alert(1)"), false);
+    assert.equal(isAllowedAuthRedirectUri("not a valid url"), false);
+  });
+
+  it("covers edge branches for sanitizeClientUserMetadata, authorizePartnerScope, authorizeStaffAction, and invitation validation", () => {
+    assert.deepEqual(sanitizeClientUserMetadata(null), {});
+    assert.deepEqual(sanitizeClientUserMetadata(undefined), {});
+
+    // Inactive partner actor is denied
+    const inactivePartner = authorizePartnerScope({
+      actor: { ...partnerOperatorActor, status: "SUSPENDED" },
+      organizationId: "00000000-0000-4000-8000-000000000101",
+      allowedRoles: ["partner_operator"],
+    });
+    assert.equal(inactivePartner.allowed, false);
+    assert.equal(inactivePartner.reasonCode, "DENIED_ACCOUNT_INACTIVE");
+
+    // Partner MFA step-up required when requireMfaAal2 is true and actor is aal1
+    const mfaDeniedPartner = authorizePartnerScope({
+      actor: partnerOperatorActor,
+      organizationId: "00000000-0000-4000-8000-000000000101",
+      allowedRoles: ["partner_operator"],
+      requireMfaAal2: true,
+    });
+    assert.equal(mfaDeniedPartner.allowed, false);
+    assert.equal(mfaDeniedPartner.reasonCode, "DENIED_MFA_STEP_UP_REQUIRED");
+
+    // Inactive staff actor is denied
+    const inactiveStaff = authorizeStaffAction({
+      actor: { ...partnerOperatorActor, status: "BLOCKED" },
+      allowedRoles: ["operations"],
+    });
+    assert.equal(inactiveStaff.allowed, false);
+    assert.equal(inactiveStaff.reasonCode, "DENIED_ACCOUNT_INACTIVE");
+
+    // Staff without matching role is denied
+    const roleInsufficientStaff = authorizeStaffAction({
+      actor: partnerOperatorActor,
+      allowedRoles: ["finance"],
+    });
+    assert.equal(roleInsufficientStaff.allowed, false);
+    assert.equal(roleInsufficientStaff.reasonCode, "DENIED_ROLE_INSUFFICIENT");
+
+    // Staff with region mismatch is denied
+    const regionalStaff: AuthenticatedActorProfileContract = {
+      ...partnerOperatorActor,
+      aal: "aal2",
+      staffScopes: [
+        {
+          role: "operations",
+          regionCode: "BR-SP",
+          maxRefundApprovalCents: 10000,
+          requiresMfa: true,
+        },
+      ],
+    };
+    const regionMismatch = authorizeStaffAction({
+      actor: regionalStaff,
+      allowedRoles: ["operations"],
+      regionCode: "BR-RJ",
+    });
+    assert.equal(regionMismatch.allowed, false);
+    assert.equal(regionMismatch.reasonCode, "DENIED_TENANT_SCOPE_MISMATCH");
+
+    // Short invitation token throws
+    assert.throws(() => hashInvitationToken("short_token"), /INVALID_INVITATION_TOKEN/);
+
+    const validHash = hashInvitationToken("inv_token_secret_9876543210");
+    // Token mismatch
+    const tokenMismatch = validateInvitationAcceptance({
+      rawToken: "inv_token_different_1234567890",
+      actorEmail: "new.manager@test.ideliveryfood.invalid",
+      invitation: {
+        id: "inv_1",
+        email: "new.manager@test.ideliveryfood.invalid",
+        tokenHash: validHash,
+        expiresAtIso: "2027-11-10T00:00:00Z",
+        consumedAtIso: null,
+      },
+    });
+    assert.equal(tokenMismatch.valid, false);
+    assert.equal(tokenMismatch.reasonCode, "TOKEN_MISMATCH");
+
+    // Email mismatch
+    const emailMismatch = validateInvitationAcceptance({
+      rawToken: "inv_token_secret_9876543210",
+      actorEmail: "wrong.email@test.ideliveryfood.invalid",
+      invitation: {
+        id: "inv_1",
+        email: "new.manager@test.ideliveryfood.invalid",
+        tokenHash: validHash,
+        expiresAtIso: "2027-11-10T00:00:00Z",
+        consumedAtIso: null,
+      },
+    });
+    assert.equal(emailMismatch.valid, false);
+    assert.equal(emailMismatch.reasonCode, "EMAIL_MISMATCH");
+  });
+
+  it("verifies all 17 canonical platform roles across positive permissions, negative denials, MFA aal2 enforcement, and anti-self-elevation", () => {
+    assert.equal(ALL_PLATFORM_ROLES.length, 17);
+
+    const roleExpectations: ReadonlyArray<{
+      role: PlatformRoleName;
+      positive: PlatformCapability;
+      negative: PlatformCapability;
+      requiresMfa: boolean;
+    }> = [
+      {
+        role: "customer",
+        positive: "CUSTOMER_PLACE_ORDER",
+        negative: "PARTNER_KDS_OPERATIONS",
+        requiresMfa: false,
+      },
+      {
+        role: "courier",
+        positive: "COURIER_ACCEPT_OFFER",
+        negative: "CUSTOMER_PLACE_ORDER",
+        requiresMfa: false,
+      },
+      {
+        role: "partner_owner",
+        positive: "PARTNER_BANK_CHANGE_REQUEST",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: true,
+      },
+      {
+        role: "partner_manager",
+        positive: "PARTNER_CATALOG_EDIT",
+        negative: "PARTNER_FINANCE_VIEW",
+        requiresMfa: false,
+      },
+      {
+        role: "partner_operator",
+        positive: "PARTNER_KDS_OPERATIONS",
+        negative: "PARTNER_FINANCE_VIEW",
+        requiresMfa: false,
+      },
+      {
+        role: "partner_catalog",
+        positive: "PARTNER_CATALOG_EDIT",
+        negative: "PARTNER_KDS_OPERATIONS",
+        requiresMfa: false,
+      },
+      {
+        role: "partner_finance",
+        positive: "PARTNER_FINANCE_VIEW",
+        negative: "PARTNER_BANK_CHANGE_REQUEST",
+        requiresMfa: true,
+      },
+      {
+        role: "operations",
+        positive: "STAFF_OPS_CADASTRE",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: true,
+      },
+      {
+        role: "logistics",
+        positive: "STAFF_LOGISTICS_DISPATCH",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: true,
+      },
+      {
+        role: "support",
+        positive: "STAFF_SUPPORT_TICKET",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: false,
+      },
+      {
+        role: "finance",
+        positive: "STAFF_FINANCE_SETTLEMENT",
+        negative: "STAFF_LOGISTICS_DISPATCH",
+        requiresMfa: true,
+      },
+      {
+        role: "commercial",
+        positive: "STAFF_COMMERCIAL_CONTRACT",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: false,
+      },
+      {
+        role: "marketing",
+        positive: "STAFF_MARKETING_PROMO",
+        negative: "STAFF_FINANCE_SETTLEMENT",
+        requiresMfa: false,
+      },
+      {
+        role: "risk_compliance",
+        positive: "STAFF_RISK_HUMAN_REVIEW",
+        negative: "STAFF_IAM_GRANT_SCOPE",
+        requiresMfa: true,
+      },
+      {
+        role: "auditor_privacy",
+        positive: "STAFF_PRIVACY_LGPD_AUDIT",
+        negative: "STAFF_RISK_HUMAN_REVIEW",
+        requiresMfa: true,
+      },
+      {
+        role: "tech_admin",
+        positive: "STAFF_IAM_GRANT_SCOPE",
+        negative: "CUSTOMER_PLACE_ORDER",
+        requiresMfa: true,
+      },
+      {
+        role: "fleet_operator",
+        positive: "FLEET_OPERATOR_VIEW_COURIERS",
+        negative: "STAFF_LOGISTICS_DISPATCH",
+        requiresMfa: false,
+      },
+    ];
+
+    assert.equal(roleExpectations.length, 17);
+
+    for (const item of roleExpectations) {
+      // Positive capability check at aal2
+      const posAal2 = evaluateCanonicalRoleCapability({
+        role: item.role,
+        capability: item.positive,
+        actorId: "actor_1",
+        targetUserId: "actor_2",
+        aal: "aal2",
+        isMutation: true,
+      });
+      assert.equal(posAal2.allowed, true, `Expected ${item.role} allowed for ${item.positive}`);
+
+      // Negative capability check
+      const neg = evaluateCanonicalRoleCapability({
+        role: item.role,
+        capability: item.negative,
+        actorId: "actor_1",
+        targetUserId: "actor_2",
+        aal: "aal2",
+        isMutation: true,
+      });
+      assert.equal(neg.allowed, false, `Expected ${item.role} denied for ${item.negative}`);
+      assert.equal(neg.reasonCode, "DENIED_ROLE_INSUFFICIENT");
+
+      // MFA aal1 check on mutation
+      const posAal1 = evaluateCanonicalRoleCapability({
+        role: item.role,
+        capability: item.positive,
+        actorId: "actor_1",
+        targetUserId: "actor_2",
+        aal: "aal1",
+        isMutation: true,
+      });
+      if (item.requiresMfa) {
+        assert.equal(posAal1.allowed, false, `Expected ${item.role} to require aal2`);
+        assert.equal(posAal1.reasonCode, "DENIED_MFA_STEP_UP_REQUIRED");
+      } else {
+        assert.equal(posAal1.allowed, true);
+      }
+    }
+
+    // Anti-self-elevation check on tech_admin
+    const selfElevation = evaluateCanonicalRoleCapability({
+      role: "tech_admin",
+      capability: "STAFF_IAM_GRANT_SCOPE",
+      actorId: "admin_99",
+      targetUserId: "admin_99",
+      aal: "aal2",
+    });
+    assert.equal(selfElevation.allowed, false);
+    assert.equal(selfElevation.reasonCode, "DENIED_SELF_ELEVATION_FORBIDDEN");
   });
 });

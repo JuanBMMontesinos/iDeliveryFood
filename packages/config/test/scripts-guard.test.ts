@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe("Operational Safety Scripts (db-reset-local, bootstrap-first-admin, secret-scan)", () => {
-  const repoRoot = path.resolve(process.cwd(), "../..");
+  const repoRoot = path.resolve(__dirname, "../../../..");
 
   it("blocks remote database hosts and production environments in db-reset-local.mjs", async () => {
     const dbResetMod = (await import(

@@ -23,6 +23,27 @@ describe("@ideliveryfood/ui-web — Language Selector, Accessibility States & St
     const loading = buildUiScreenStateBanner({ kind: "loading", locale: "en" });
     assert.equal(loading.role, "status");
     assert.equal(loading.ariaLive, "polite");
+    assert.match(loading.message, /Loading live data/);
+
+    const empty = buildUiScreenStateBanner({ kind: "empty", locale: "pt-BR" });
+    assert.equal(empty.role, "status");
+    assert.equal(empty.ariaLive, "polite");
+    assert.match(empty.message, /Nenhum registro encontrado/);
+
+    const offline = buildUiScreenStateBanner({ kind: "offline", locale: "en" });
+    assert.equal(offline.role, "alert");
+    assert.equal(offline.ariaLive, "assertive");
+    assert.match(offline.message, /currently offline/);
+
+    const forbidden = buildUiScreenStateBanner({ kind: "forbidden", locale: "pt-BR" });
+    assert.equal(forbidden.role, "alert");
+    assert.equal(forbidden.ariaLive, "assertive");
+    assert.match(forbidden.message, /Acesso negado/);
+
+    const mfaRequired = buildUiScreenStateBanner({ kind: "mfa_required" });
+    assert.equal(mfaRequired.role, "alert");
+    assert.equal(mfaRequired.ariaLive, "assertive");
+    assert.match(mfaRequired.message, /MFA aal2/);
 
     const errorPt = buildUiScreenStateBanner({
       kind: "error",
@@ -33,6 +54,10 @@ describe("@ideliveryfood/ui-web — Language Selector, Accessibility States & St
     assert.equal(errorPt.role, "alert");
     assert.match(errorPt.message, /DB_TIMEOUT/);
     assert.match(errorPt.message, /corr_99/);
+
+    const errorDefaultParams = buildUiScreenStateBanner({ kind: "error" });
+    assert.match(errorDefaultParams.message, /UNKNOWN_ERROR/);
+    assert.match(errorDefaultParams.message, /N\/A/);
   });
 
   it("maps live store records in both 'en' and 'pt-BR' while preserving BRL currency", () => {
@@ -51,17 +76,29 @@ describe("@ideliveryfood/ui-web — Language Selector, Accessibility States & St
       minOrderCents: 2500,
       prepTimeMinMinutes: 20,
       prepTimeMaxMinutes: 35,
-      supportedModalities: ["PLATFORM_DELIVERY" as const, "PICKUP" as const],
+      supportedModalities: [
+        "PLATFORM_DELIVERY" as const,
+        "MERCHANT_DELIVERY" as const,
+        "PICKUP" as const,
+      ],
     };
 
-    const cardEn = mapStoreToLocalizedCard(sampleStore, "en");
+    const cardEn = mapStoreToLocalizedCard(sampleStore);
     assert.equal(cardEn.description, sampleStore.descriptionEn);
     assert.match(cardEn.minOrderFormatted, /Min\. order: R\$\s?25\.00/);
-    assert.deepEqual(cardEn.modalityBadges, ["Platform Delivery", "Pickup at Store"]);
+    assert.deepEqual(cardEn.modalityBadges, [
+      "Platform Delivery",
+      "Store Delivery",
+      "Pickup at Store",
+    ]);
 
     const cardPt = mapStoreToLocalizedCard(sampleStore, "pt-BR");
     assert.equal(cardPt.description, sampleStore.descriptionPtBr);
     assert.match(cardPt.minOrderFormatted, /Pedido mín\.: R\$\s?25,00/);
-    assert.deepEqual(cardPt.modalityBadges, ["Entrega Parceira da Plataforma", "Retirada na Loja"]);
+    assert.deepEqual(cardPt.modalityBadges, [
+      "Entrega Parceira da Plataforma",
+      "Entrega Própria da Loja",
+      "Retirada na Loja",
+    ]);
   });
 });

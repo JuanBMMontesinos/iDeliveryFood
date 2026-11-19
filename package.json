@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "node scripts/secret-scan.mjs && pnpm -r lint",
     "test": "pnpm -r test",
+    "test:unit:coverage": "pnpm -r build && node scripts/unit-coverage-verify.mjs",
     "db:reset:local": "node scripts/db-reset-local.mjs",
     "db:migrate": "node scripts/db-apply-migrations.mjs",
     "bootstrap:first-admin": "node scripts/bootstrap-first-admin.mjs",

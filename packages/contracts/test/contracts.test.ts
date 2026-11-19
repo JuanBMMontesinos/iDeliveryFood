@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   CURRENCY_CODE,
   DEFAULT_LOCALE,
@@ -15,6 +16,9 @@ import {
   translateMessage,
   type I18nMessageKey,
 } from "../src/index.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = path.resolve(__dirname, "../..");
 
 describe("@ideliveryfood/contracts — i18n, Money, Timezone & OpenAPI Contract Tests", () => {
   it("enforces English ('en') as the default locale and supports 'pt-BR'", () => {
@@ -85,7 +89,7 @@ describe("@ideliveryfood/contracts — i18n, Money, Timezone & OpenAPI Contract 
   });
 
   it("verifies OpenAPI 3.1 specification exists and defines mandatory Fase A + Fase B /v1 endpoints", () => {
-    const specPath = path.resolve(process.cwd(), "openapi/v1.yaml");
+    const specPath = path.resolve(PACKAGE_ROOT, "openapi/v1.yaml");
     assert.equal(fs.existsSync(specPath), true, "openapi/v1.yaml must exist");
     const content = fs.readFileSync(specPath, "utf8");
     assert.match(content, /openapi:\s*3\.1\.0/);

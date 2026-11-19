@@ -276,6 +276,88 @@ describe("@ideliveryfood/customer-web — M05 Discovery, Single-Store Cart, Quot
       isOffline: true,
     });
     assert.equal(offlineScreen.banner?.kind, "offline");
+
+    const errorClient = new IDeliveryApiClient({
+      baseUrl: "http://localhost:4000/v1",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "UPSTREAM_UNAVAILABLE",
+              message: "Temporary outage",
+              correlationId: "corr_mkt_err_1",
+              timestamp: "2026-11-19T12:00:00Z",
+            },
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        ),
+    });
+    const errorScreen = await loadCustomerMarketplaceScreen({
+      apiClient: errorClient,
+      locale: "en",
+      search: "pizza",
+      cuisineCategory: "PIZZA",
+    });
+    assert.equal(errorScreen.banner?.kind, "error");
+    assert.match(errorScreen.banner?.message ?? "", /UPSTREAM_UNAVAILABLE/);
+
+    const cart = new CustomerCartController();
+    cart.addItem({
+      targetStoreId: "store_201",
+      targetStoreName: "Paulista",
+      item: { productId: "p1", quantity: 2, selectedOptions: [] },
+    });
+    cart.updateItemQuantity("p1", 0);
+    assert.equal(cart.getState().items.length, 0);
+    cart.addItem({
+      targetStoreId: "store_201",
+      targetStoreName: "Paulista",
+      item: { productId: "p1", quantity: 1, selectedOptions: [] },
+    });
+    cart.clear();
+    assert.equal(cart.getState().storeId, null);
+
+    const expiredCheckout = buildCustomerCheckoutScreenModel({
+      quote: {
+        id: "quote_exp",
+        customerId: "cust_001",
+        storeId: "store_201",
+        addressId: "addr_801",
+        fulfillmentModality: "PLATFORM_DELIVERY",
+        promotionCode: null,
+        currencyCode: "BRL",
+        subtotalCents: 3000,
+        addonsCents: 0,
+        serviceFeeCents: 150,
+        deliveryFeeCents: 500,
+        discountCents: 0,
+        totalCents: 3650,
+        distanceMeters: 1000,
+        estimatedPrepMinutes: 20,
+        estimatedDeliveryMinutes: 30,
+        itemsSnapshot: [],
+        addressSnapshot: null,
+        idempotencyKey: "idem_exp",
+        expiresAtIso: "2026-11-03T11:00:00Z",
+        consumedAtIso: null,
+        createdAtIso: "2026-11-03T10:45:00Z",
+      },
+      pspReadiness: {
+        providerCode: "stripe",
+        category: "PSP",
+        displayName: "Stripe Brazil",
+        isPrimary: true,
+        requiredEnvVars: [],
+        status: "SANDBOX_READY",
+        missingEnvVars: [],
+      },
+      locale: "pt-BR",
+      now: new Date("2026-11-03T12:00:00Z"),
+    });
+    assert.equal(expiredCheckout.isQuoteExpired, true);
+    assert.equal(expiredCheckout.canSubmitPayment, false);
+    assert.ok(expiredCheckout.quoteExpiredNotice);
+    assert.equal(expiredCheckout.pspBlockedNotice, null);
   });
 
   describe("Live End-to-End Customer Web Server + Supabase PostgreSQL Integration (All 11 Routes + PWA)", () => {

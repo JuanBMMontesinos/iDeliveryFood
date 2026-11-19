@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "../../../..");
 const COURIER_IOS_ROOT = path.join(REPO_ROOT, "apps/courier-ios");
 
 describe("Fase M — @ideliveryfood/courier-ios (M11 Native Swift + SwiftUI Verification)", () => {

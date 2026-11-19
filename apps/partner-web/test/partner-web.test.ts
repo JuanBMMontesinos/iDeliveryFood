@@ -298,6 +298,48 @@ describe("@ideliveryfood/partner-web — Multi-Tenant Scope, Partner Finance Seg
     assert.equal(rec1.appliedEventsCount, 1);
     const vmAfterReconnect = consoleCtrl.getConsoleViewModel(new Date("2026-11-03T15:10:00.000Z"));
     assert.equal(vmAfterReconnect.queue.columns.PREPARING.length, 1);
+
+    consoleCtrl.setLocale("en");
+    assert.throws(() => consoleCtrl.setStorePaused(true, "x"), /STORE_PAUSE_REASON_REQUIRED/);
+    consoleCtrl.setStorePaused(false);
+    assert.equal(consoleCtrl.getConsoleViewModel().pausedBanner, null);
+
+    // Unauthorized actor on kitchen command
+    assert.throws(
+      () =>
+        consoleCtrl.executeKitchenCommand({
+          actor: financeClara,
+          organizationId: "00000000-0000-4000-8000-000000000101",
+          orderId: sampleOrder.id,
+          command: "MARK_READY",
+          expectedVersion: 4,
+          idempotencyKey: "idem_unauth",
+        }),
+      /KITCHEN_COMMAND_FORBIDDEN/
+    );
+
+    // Order not found
+    assert.throws(
+      () =>
+        consoleCtrl.executeKitchenCommand({
+          actor: operatorLucas,
+          organizationId: "00000000-0000-4000-8000-000000000101",
+          orderId: "unknown_order_id",
+          command: "MARK_READY",
+          expectedVersion: 1,
+          idempotencyKey: "idem_missing_ord",
+        }),
+      /ORDER_NOT_FOUND/
+    );
+
+    // Portal screen model with MFA enforced at aal1 -> mfa_required banner
+    const mfaPartnerScreen = buildPartnerPortalScreenModel({
+      actor: { ...operatorLucas, mfaEnforced: true, aal: "aal1" },
+      organizationId: "00000000-0000-4000-8000-000000000101",
+      storeId: "00000000-0000-4000-8000-000000000201",
+    });
+    assert.equal(mfaPartnerScreen.canAccessStoreOperations, false);
+    assert.equal(mfaPartnerScreen.banner?.kind, "mfa_required");
   });
 });
 

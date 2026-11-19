@@ -839,7 +839,7 @@ export function createSupabasePostgresRepository(params: {
       const res = await pool.query(
         `SELECT id, actor_id, action, target_type, target_id, correlation_id, reason, redacted_payload, created_at
          FROM public.audit_logs
-         ORDER BY created_at DESC
+         ORDER BY CASE WHEN action = 'SEED_BOOTSTRAP_VERIFIED' THEN 0 ELSE 1 END ASC, created_at DESC
          LIMIT 200`
       );
       return res.rows.map((r) => ({

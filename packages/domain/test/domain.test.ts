@@ -57,6 +57,13 @@ import {
   evaluateItemSubstitutionProposal,
   finalizeOrderPickTaskFinancialAdjustment,
   resolveCustomerSubstitutionDecision,
+  buildKitchenOrderQueue,
+  createBankAccountChangeRequest,
+  evaluateAdminGovernanceDecision,
+  evaluateStaffScopeGrant,
+  mapOrderStatusToKitchenColumn,
+  reconcileKitchenOrderEventsOnReconnect,
+  validateStoreSettingsPatch,
 } from "../src/index.js";
 
 describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain Suite", () => {
@@ -1839,5 +1846,1832 @@ describe("@ideliveryfood/domain — Fase A & Fase B (M04, M05, M10, M12) Domain 
     assert.equal(finalized.refundLedgerJournal?.entries[0]?.amountCents, 251);
     assert.equal(finalized.refundLedgerJournal?.entries[1]?.direction, "CREDIT");
     assert.equal(finalized.refundLedgerJournal?.entries[1]?.amountCents, 251);
+  });
+
+  it("covers M07 store settings & bank account step-up, M08 kitchen queue & reconnect deduplication, and M16 admin scope grants & governance decisions", () => {
+    const now = new Date("2026-11-19T15:00:00.000Z");
+
+    // 1. M07 validateStoreSettingsPatch
+    const validPatch = validateStoreSettingsPatch({
+      minOrderCents: 3000,
+      prepTimeMinMinutes: 15,
+      prepTimeMaxMinutes: 35,
+      isPaused: true,
+      pauseReason: "Kitchen maintenance",
+    });
+    assert.equal(validPatch.minOrderCents, 3000);
+    assert.throws(
+      () => validateStoreSettingsPatch({ prepTimeMinMinutes: 0 }),
+      /STORE_SETTINGS_INVALID_PREP_TIME/
+    );
+    assert.throws(
+      () => validateStoreSettingsPatch({ prepTimeMinMinutes: 30, prepTimeMaxMinutes: 15 }),
+      /STORE_SETTINGS_INVALID_PREP_TIME/
+    );
+    assert.throws(
+      () => validateStoreSettingsPatch({ isPaused: true, pauseReason: "no" }),
+      /STORE_PAUSE_REASON_REQUIRED/
+    );
+
+    // 2. M07 createBankAccountChangeRequest
+    assert.throws(
+      () =>
+        createBankAccountChangeRequest({
+          id: "b1",
+          organizationId: "org_101",
+          storeId: "store_201",
+          requestedBy: "owner_1",
+          actorAal: "aal1",
+          bankCode: "341",
+          branchNumber: "0001",
+          accountLast4: "1234",
+          reason: "Valid reason text",
+        }),
+      /BANK_CHANGE_MFA_AAL2_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        createBankAccountChangeRequest({
+          id: "b1",
+          organizationId: "org_101",
+          storeId: "store_201",
+          requestedBy: "owner_1",
+          actorAal: "aal2",
+          bankCode: "12",
+          branchNumber: "0001",
+          accountLast4: "1234",
+          reason: "Valid reason text",
+        }),
+      /BANK_CHANGE_INVALID_BANK_CODE/
+    );
+    assert.throws(
+      () =>
+        createBankAccountChangeRequest({
+          id: "b1",
+          organizationId: "org_101",
+          storeId: "store_201",
+          requestedBy: "owner_1",
+          actorAal: "aal2",
+          bankCode: "341",
+          branchNumber: "0001",
+          accountLast4: "12",
+          reason: "Valid reason text",
+        }),
+      /BANK_CHANGE_INVALID_LAST4/
+    );
+    assert.throws(
+      () =>
+        createBankAccountChangeRequest({
+          id: "b1",
+          organizationId: "org_101",
+          storeId: "store_201",
+          requestedBy: "owner_1",
+          actorAal: "aal2",
+          bankCode: "341",
+          branchNumber: "0001",
+          accountLast4: "1234",
+          reason: "bad",
+        }),
+      /BANK_CHANGE_REASON_REQUIRED/
+    );
+    const validBankReq = createBankAccountChangeRequest({
+      id: "b1",
+      organizationId: "org_101",
+      storeId: "store_201",
+      requestedBy: "owner_1",
+      actorAal: "aal2",
+      bankCode: "341",
+      branchNumber: "0001",
+      accountLast4: "1234",
+      reason: "New settlement account",
+      now,
+    });
+    assert.equal(validBankReq.status, "PENDING");
+    assert.equal(validBankReq.accountLast4, "1234");
+
+    // 3. M08 mapOrderStatusToKitchenColumn, buildKitchenOrderQueue & reconcileKitchenOrderEventsOnReconnect
+    assert.equal(mapOrderStatusToKitchenColumn("CREATED"), "NEW");
+    assert.equal(mapOrderStatusToKitchenColumn("ACCEPTED"), "ACCEPTED");
+    assert.equal(mapOrderStatusToKitchenColumn("PREPARING"), "PREPARING");
+    assert.equal(mapOrderStatusToKitchenColumn("READY_FOR_PICKUP"), "READY");
+    assert.equal(mapOrderStatusToKitchenColumn("OUT_FOR_DELIVERY"), "IN_TRANSIT");
+    assert.equal(mapOrderStatusToKitchenColumn("DELIVERED"), "COMPLETED");
+    assert.equal(mapOrderStatusToKitchenColumn("CANCELLED"), "CANCELLED");
+
+    const baseOrder = {
+      id: "ord_k_1",
+      orderNumber: 101,
+      customerId: "c1",
+      organizationId: "org_101",
+      storeId: "store_201",
+      quoteId: "q1",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      orderStatus: "PENDING_MERCHANT_ACCEPTANCE",
+      paymentStatus: "CAPTURED",
+      deliveryStatus: "PENDING_DISPATCH",
+      currencyCode: "BRL" as const,
+      subtotalCents: 3000,
+      addonsCents: 0,
+      serviceFeeCents: 150,
+      deliveryFeeCents: 500,
+      discountCents: 0,
+      totalCents: 3650,
+      platformCommissionCents: 690,
+      merchantNetCents: 2310,
+      courierEarningsCents: 500,
+      deliveryAddressSnapshot: null,
+      itemsSnapshot: [],
+      customerNotes: null,
+      cancellationReason: null,
+      cancelledByRole: null,
+      version: 1,
+      idempotencyKey: "idem_k_1",
+      acceptedAtIso: null,
+      readyAtIso: null,
+      deliveredAtIso: null,
+      cancelledAtIso: null,
+      createdAtIso: "2026-11-19T14:40:00.000Z",
+      updatedAtIso: "2026-11-19T14:40:00.000Z",
+    };
+
+    const queue = buildKitchenOrderQueue({
+      storeId: "store_201",
+      isStorePaused: false,
+      orders: [
+        baseOrder,
+        { ...baseOrder, id: "ord_k_2", orderStatus: "DELIVERED" },
+        { ...baseOrder, id: "ord_other_store", storeId: "store_202" },
+      ],
+      now,
+      latestEventCursor: "cur_1",
+    });
+    assert.equal(queue.activeOrderCount, 1);
+    assert.equal(queue.columns.NEW.length, 1);
+    assert.equal(queue.columns.NEW[0]?.isSlaBreached, true);
+    assert.equal(queue.columns.COMPLETED.length, 1);
+
+    const evt1 = {
+      id: "evt_k_1",
+      orderId: "ord_k_1",
+      actorId: "p1",
+      actorRole: "PARTNER",
+      eventType: "ORDER_ACCEPT",
+      previousOrderStatus: "PENDING_MERCHANT_ACCEPTANCE",
+      newOrderStatus: "ACCEPTED",
+      previousPaymentStatus: "CAPTURED",
+      newPaymentStatus: "CAPTURED",
+      previousDeliveryStatus: "PENDING_DISPATCH",
+      newDeliveryStatus: "PENDING_DISPATCH",
+      idempotencyKey: "idem_evt_1",
+      payload: {},
+      createdAtIso: now.toISOString(),
+    };
+    const rec = reconcileKitchenOrderEventsOnReconnect({
+      seenEventIds: new Set(),
+      incomingEvents: [evt1, evt1],
+    });
+    assert.equal(rec.newEvents.length, 1);
+    assert.equal(rec.latestCursor, "evt_k_1");
+
+    // 4. M16 evaluateStaffScopeGrant & evaluateAdminGovernanceDecision
+    assert.equal(
+      evaluateStaffScopeGrant({
+        actorId: "admin_1",
+        actorAal: "aal2",
+        actorRoles: ["tech_admin"],
+        request: {
+          targetUserId: "admin_1",
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 1000,
+          justification: "Self grant",
+        },
+      }).reasonCode,
+      "DENIED_SELF_GRANT_FORBIDDEN"
+    );
+    assert.equal(
+      evaluateStaffScopeGrant({
+        actorId: "admin_1",
+        actorAal: "aal2",
+        actorRoles: ["support"],
+        request: {
+          targetUserId: "staff_2",
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 1000,
+          justification: "Valid justification",
+        },
+      }).reasonCode,
+      "DENIED_ROLE_INSUFFICIENT"
+    );
+    assert.equal(
+      evaluateStaffScopeGrant({
+        actorId: "admin_1",
+        actorAal: "aal1",
+        actorRoles: ["tech_admin"],
+        request: {
+          targetUserId: "staff_2",
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 1000,
+          justification: "Valid justification",
+        },
+      }).reasonCode,
+      "DENIED_MFA_AAL2_REQUIRED"
+    );
+    assert.equal(
+      evaluateStaffScopeGrant({
+        actorId: "admin_1",
+        actorAal: "aal2",
+        actorRoles: ["tech_admin"],
+        request: {
+          targetUserId: "staff_2",
+          role: "finance",
+          regionCode: null,
+          maxRefundApprovalCents: 1000,
+          justification: "no",
+        },
+      }).reasonCode,
+      "DENIED_JUSTIFICATION_REQUIRED"
+    );
+    assert.equal(
+      evaluateStaffScopeGrant({
+        actorId: "admin_1",
+        actorAal: "aal2",
+        actorRoles: ["tech_admin"],
+        request: {
+          targetUserId: "staff_2",
+          role: "finance",
+          regionCode: "BR-SP",
+          maxRefundApprovalCents: 50000,
+          justification: "Promoted to regional finance specialist",
+        },
+      }).allowed,
+      true
+    );
+
+    assert.throws(
+      () =>
+        evaluateAdminGovernanceDecision({
+          id: "g1",
+          actorId: "staff_1",
+          actorAal: "aal2",
+          actorRoles: ["support"],
+          targetType: "STORE",
+          targetId: "store_201",
+          decision: "APPROVED",
+          reason: "Valid reason",
+        }),
+      /ADMIN_GOVERNANCE_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        evaluateAdminGovernanceDecision({
+          id: "g1",
+          actorId: "staff_1",
+          actorAal: "aal1",
+          actorRoles: ["operations"],
+          targetType: "STORE",
+          targetId: "store_201",
+          decision: "APPROVED",
+          reason: "Valid reason",
+        }),
+      /ADMIN_GOVERNANCE_MFA_AAL2_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateAdminGovernanceDecision({
+          id: "g1",
+          actorId: "staff_1",
+          actorAal: "aal2",
+          actorRoles: ["operations"],
+          targetType: "USER",
+          targetId: "staff_1",
+          decision: "APPROVED",
+          reason: "Valid reason",
+        }),
+      /ADMIN_GOVERNANCE_SELF_TARGET_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        evaluateAdminGovernanceDecision({
+          id: "g1",
+          actorId: "staff_1",
+          actorAal: "aal2",
+          actorRoles: ["operations"],
+          targetType: "STORE",
+          targetId: "store_201",
+          decision: "APPROVED",
+          reason: "no",
+        }),
+      /ADMIN_GOVERNANCE_REASON_REQUIRED/
+    );
+    const govDecision = evaluateAdminGovernanceDecision({
+      id: "g1",
+      actorId: "staff_1",
+      actorAal: "aal2",
+      actorRoles: ["operations"],
+      targetType: "STORE",
+      targetId: "store_201",
+      decision: "APPROVED",
+      reason: "KYC documents verified",
+      now,
+    });
+    assert.equal(govDecision.decision, "APPROVED");
+  });
+
+  it("covers all remaining validation and state machine branches across M04, M05, M10, M12, M13, M14, M15, M17, M18, M19, M20, M21 & M22", () => {
+    const now = new Date("2026-11-03T15:00:00.000Z"); // Tuesday 12:00 America/Sao_Paulo
+
+    // 1. M04 availability branches: inactive, paused, custom exception hours (inside & outside), current-day overnight, closed
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: false,
+        isPaused: false,
+        weeklyHours: [],
+        evaluatedAt: now,
+      }).reasonCode,
+      "STORE_INACTIVE"
+    );
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: true,
+        isPaused: true,
+        weeklyHours: [],
+        evaluatedAt: now,
+      }).reasonCode,
+      "STORE_PAUSED"
+    );
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: true,
+        isPaused: false,
+        weeklyHours: [],
+        exceptions: [
+          {
+            exceptionDate: "2026-11-03",
+            opensAt: "10:00:00",
+            closesAt: "14:00:00",
+            isClosed: false,
+            reason: "Holiday half-day",
+          },
+        ],
+        evaluatedAt: now,
+      }).reasonCode,
+      "OPEN"
+    );
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: true,
+        isPaused: false,
+        weeklyHours: [],
+        exceptions: [
+          {
+            exceptionDate: "2026-11-03",
+            opensAt: "18:00:00",
+            closesAt: "22:00:00",
+            isClosed: false,
+            reason: "Dinner only",
+          },
+        ],
+        evaluatedAt: now,
+      }).reasonCode,
+      "OUTSIDE_OPERATING_HOURS"
+    );
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: true,
+        isPaused: false,
+        weeklyHours: [
+          { dayOfWeek: 2, opensAt: "11:00:00", closesAt: "02:00:00", isOvernight: true, isClosed: false },
+        ],
+        evaluatedAt: now,
+      }).reasonCode,
+      "OPEN"
+    );
+    assert.equal(
+      evaluateStoreAvailability({
+        storeId: "s1",
+        isPublished: true,
+        isPaused: false,
+        weeklyHours: [],
+        evaluatedAt: now,
+      }).reasonCode,
+      "OUTSIDE_OPERATING_HOURS"
+    );
+
+    // 2. M04 service area branches: PICKUP, NO_ACTIVE_SERVICE_AREA, freeDeliveryMinOrderCents
+    assert.equal(
+      evaluateServiceAreaEligibility({
+        storeId: "s1",
+        storeLatitude: -23.56,
+        storeLongitude: -46.65,
+        customerLatitude: -23.9,
+        customerLongitude: -46.9,
+        fulfillmentModality: "PICKUP",
+        grossMerchandiseCents: 3000,
+        serviceAreas: [],
+      }).reasonCode,
+      "PICKUP_NO_RADIUS_REQUIRED"
+    );
+    assert.equal(
+      evaluateServiceAreaEligibility({
+        storeId: "s1",
+        storeLatitude: -23.56,
+        storeLongitude: -46.65,
+        customerLatitude: -23.561,
+        customerLongitude: -46.651,
+        fulfillmentModality: "PLATFORM_DELIVERY",
+        grossMerchandiseCents: 3000,
+        serviceAreas: [],
+      }).reasonCode,
+      "NO_ACTIVE_SERVICE_AREA"
+    );
+    const freeDeliveryEval = evaluateServiceAreaEligibility({
+      storeId: "s1",
+      storeLatitude: -23.56,
+      storeLongitude: -46.65,
+      customerLatitude: -23.561,
+      customerLongitude: -46.651,
+      fulfillmentModality: "PLATFORM_DELIVERY",
+      grossMerchandiseCents: 15000,
+      serviceAreas: [
+        {
+          id: "a1",
+          storeId: "s1",
+          name: "Local",
+          radiusMeters: 5000,
+          baseFeeCents: 700,
+          perKmFeeCents: 150,
+          freeDeliveryMinOrderCents: 12000,
+          estimatedDeliveryMinutes: 30,
+          isActive: true,
+        },
+      ],
+    });
+    assert.equal(freeDeliveryEval.deliveryFeeCents, 0);
+
+    // 3. validateAndBuildQuoteItems & evaluateSingleStoreCartAddition error/merge branches
+    const prod = {
+      id: "p1",
+      storeId: "s1",
+      categoryId: "c1",
+      sku: "SKU-1",
+      nameEn: "Item",
+      namePtBr: "Item",
+      localizedName: "Item",
+      descriptionEn: "D",
+      descriptionPtBr: "D",
+      localizedDescription: "D",
+      priceCents: 2000,
+      isAvailable: true,
+      isPaused: false,
+      maxPerOrder: 2,
+      unitOfMeasure: "UNIT" as const,
+      optionGroups: [
+        {
+          id: "g1",
+          nameEn: "Extras",
+          namePtBr: "Extras",
+          localizedName: "Extras",
+          minSelections: 0,
+          maxSelections: 1,
+          sortOrder: 1,
+          options: [
+            {
+              id: "o1",
+              nameEn: "Cheese",
+              namePtBr: "Queijo",
+              localizedName: "Cheese",
+              additionalPriceCents: 300,
+              isAvailable: true,
+              sortOrder: 1,
+            },
+            {
+              id: "o_unavail",
+              nameEn: "Truffle",
+              namePtBr: "Trufa",
+              localizedName: "Truffle",
+              additionalPriceCents: 500,
+              isAvailable: false,
+              sortOrder: 2,
+            },
+          ],
+        },
+      ],
+    };
+
+    assert.throws(
+      () => validateAndBuildQuoteItems({ cartItems: [], catalogProducts: [prod] }),
+      /QUOTE_EMPTY_ITEMS/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [{ productId: "unknown", quantity: 1, selectedOptions: [] }],
+          catalogProducts: [prod],
+        }),
+      /CATALOG_PRODUCT_NOT_FOUND/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [{ productId: "p1", quantity: 1, selectedOptions: [] }],
+          catalogProducts: [{ ...prod, isPaused: true }],
+        }),
+      /CATALOG_PRODUCT_UNAVAILABLE/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [{ productId: "p1", quantity: 0, selectedOptions: [] }],
+          catalogProducts: [prod],
+        }),
+      /QUOTE_INVALID_QUANTITY/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [{ productId: "p1", quantity: 5, selectedOptions: [] }],
+          catalogProducts: [prod],
+        }),
+      /CATALOG_QUANTITY_EXCEEDED/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [
+            {
+              productId: "p1",
+              quantity: 1,
+              selectedOptions: [{ optionGroupId: "g1", optionId: "o1", quantity: 2 }],
+            },
+          ],
+          catalogProducts: [prod],
+        }),
+      /OPTION_GROUP_MAX_EXCEEDED/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [
+            {
+              productId: "p1",
+              quantity: 1,
+              selectedOptions: [{ optionGroupId: "g1", optionId: "o_missing", quantity: 1 }],
+            },
+          ],
+          catalogProducts: [prod],
+        }),
+      /OPTION_NOT_FOUND/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildQuoteItems({
+          cartItems: [
+            {
+              productId: "p1",
+              quantity: 1,
+              selectedOptions: [{ optionGroupId: "g1", optionId: "o_unavail", quantity: 1 }],
+            },
+          ],
+          catalogProducts: [prod],
+        }),
+      /OPTION_UNAVAILABLE/
+    );
+    const withNotes = validateAndBuildQuoteItems({
+      cartItems: [{ productId: "p1", quantity: 1, selectedOptions: [], notes: "No onions" }],
+      catalogProducts: [prod],
+    });
+    assert.equal(withNotes.snapshots[0]?.notes, "No onions");
+
+    // Merging identical item in single-store cart
+    const mergedCart = evaluateSingleStoreCartAddition({
+      currentStoreId: "s1",
+      currentItems: [{ productId: "p1", quantity: 1, selectedOptions: [] }],
+      targetStoreId: "s1",
+      itemToAdd: { productId: "p1", quantity: 2, selectedOptions: [] },
+    });
+    assert.equal(mergedCart.nextItems.length, 1);
+    assert.equal(mergedCart.nextItems[0]?.quantity, 3);
+
+    // 4. calculateServerQuoteAndSplit MERCHANT_DELIVERY & errors
+    assert.throws(
+      () =>
+        calculateServerQuoteAndSplit({
+          items: [],
+          fulfillmentModality: "PICKUP",
+          deliveryFeeCents: 0,
+          discountCents: 0,
+          discountFundedBy: "NONE",
+          minOrderCents: 0,
+        }),
+      /QUOTE_EMPTY_ITEMS/
+    );
+    assert.throws(
+      () =>
+        calculateServerQuoteAndSplit({
+          items: [{ productId: "p1", quantity: 0, unitPriceCents: 1000, addonsUnitPriceCents: 0 }],
+          fulfillmentModality: "PICKUP",
+          deliveryFeeCents: 0,
+          discountCents: 0,
+          discountFundedBy: "NONE",
+          minOrderCents: 0,
+        }),
+      /QUOTE_INVALID_QUANTITY/
+    );
+    const merchantDelivSplit = calculateServerQuoteAndSplit({
+      items: [{ productId: "p1", quantity: 1, unitPriceCents: 5000, addonsUnitPriceCents: 0 }],
+      fulfillmentModality: "MERCHANT_DELIVERY",
+      deliveryFeeCents: 600,
+      discountCents: 0,
+      discountFundedBy: "NONE",
+      minOrderCents: 1000,
+    });
+    assert.equal(merchantDelivSplit.courierEarningsCents, 0);
+    assert.equal(merchantDelivSplit.ledgerDebitsCents, merchantDelivSplit.ledgerCreditsCents);
+
+    // 5. createOrderFromServerQuote errors & executeOrderCommand full lifecycle (ACCEPT -> START_PREPARING -> MARK_READY -> DISPATCH -> PICK_UP -> DELIVER -> COMPLETE + REJECT)
+    const sampleQuote = {
+      id: "q_full",
+      customerId: "cust_1",
+      storeId: "s1",
+      addressId: null,
+      fulfillmentModality: "PICKUP" as const,
+      promotionCode: null,
+      currencyCode: "BRL" as const,
+      subtotalCents: 5000,
+      addonsCents: 0,
+      serviceFeeCents: 250,
+      deliveryFeeCents: 0,
+      discountCents: 0,
+      totalCents: 5250,
+      distanceMeters: 0,
+      estimatedPrepMinutes: 20,
+      estimatedDeliveryMinutes: 0,
+      itemsSnapshot: [
+        {
+          productId: "p1",
+          productNameEn: "Item",
+          productNamePtBr: "Item",
+          quantity: 1,
+          unitPriceCents: 5000,
+          addonsUnitPriceCents: 0,
+          totalLineCents: 5000,
+          selectedOptions: [],
+        },
+      ],
+      addressSnapshot: null,
+      idempotencyKey: "idem_qf",
+      expiresAtIso: "2026-11-03T15:30:00.000Z",
+      consumedAtIso: null,
+      createdAtIso: "2026-11-03T15:00:00.000Z",
+    };
+
+    assert.throws(
+      () =>
+        createOrderFromServerQuote({
+          orderId: "o1",
+          orderNumber: 1,
+          organizationId: "org_1",
+          quote: sampleQuote,
+          actorCustomerId: "other_cust",
+          isStoreCurrentlyOpen: true,
+          discountFundedBy: "NONE",
+          idempotencyKey: "k1",
+          now,
+        }),
+      /QUOTE_OWNERSHIP_MISMATCH/
+    );
+    assert.throws(
+      () =>
+        createOrderFromServerQuote({
+          orderId: "o1",
+          orderNumber: 1,
+          organizationId: "org_1",
+          quote: { ...sampleQuote, consumedAtIso: "2026-11-03T15:01:00.000Z" },
+          actorCustomerId: "cust_1",
+          isStoreCurrentlyOpen: true,
+          discountFundedBy: "NONE",
+          idempotencyKey: "k1",
+          now,
+        }),
+      /QUOTE_ALREADY_CONSUMED/
+    );
+    assert.throws(
+      () =>
+        createOrderFromServerQuote({
+          orderId: "o1",
+          orderNumber: 1,
+          organizationId: "org_1",
+          quote: { ...sampleQuote, expiresAtIso: "2026-11-03T14:00:00.000Z" },
+          actorCustomerId: "cust_1",
+          isStoreCurrentlyOpen: true,
+          discountFundedBy: "NONE",
+          idempotencyKey: "k1",
+          now,
+        }),
+      /QUOTE_EXPIRED/
+    );
+    assert.throws(
+      () =>
+        createOrderFromServerQuote({
+          orderId: "o1",
+          orderNumber: 1,
+          organizationId: "org_1",
+          quote: sampleQuote,
+          actorCustomerId: "cust_1",
+          isStoreCurrentlyOpen: false,
+          discountFundedBy: "NONE",
+          idempotencyKey: "k1",
+          now,
+        }),
+      /STORE_CLOSED_AT_CHECKOUT/
+    );
+
+    const createdPickup = createOrderFromServerQuote({
+      orderId: "o_lifecycle",
+      orderNumber: 200,
+      organizationId: "org_1",
+      quote: sampleQuote,
+      actorCustomerId: "cust_1",
+      isStoreCurrentlyOpen: true,
+      discountFundedBy: "NONE",
+      idempotencyKey: "k_life",
+      now,
+    });
+    assert.equal(createdPickup.order.deliveryStatus, "NOT_REQUIRED");
+
+    const paid = executeOrderCommand({
+      order: createdPickup.order,
+      command: "CONFIRM_PAYMENT",
+      expectedVersion: 1,
+      actorId: "sys",
+      actorRole: "SYSTEM",
+      idempotencyKey: "k_paid",
+      now,
+    });
+
+    // Reject command on a branch copy
+    assert.throws(
+      () =>
+        executeOrderCommand({
+          order: paid.updatedOrder,
+          command: "REJECT",
+          expectedVersion: 2,
+          actorId: "cust_1",
+          actorRole: "CUSTOMER",
+          idempotencyKey: "k_rej_forbid",
+          now,
+        }),
+      /ORDER_COMMAND_FORBIDDEN/
+    );
+    const rejected = executeOrderCommand({
+      order: paid.updatedOrder,
+      command: "REJECT",
+      expectedVersion: 2,
+      actorId: "partner_1",
+      actorRole: "PARTNER",
+      reason: "Out of ingredients",
+      idempotencyKey: "k_rej",
+      now,
+    });
+    assert.equal(rejected.updatedOrder.orderStatus, "REJECTED");
+
+    // Full forward path: ACCEPT -> START_PREPARING -> MARK_READY -> DISPATCH -> PICK_UP -> DELIVER -> COMPLETE
+    const accepted = executeOrderCommand({
+      order: paid.updatedOrder,
+      command: "ACCEPT",
+      expectedVersion: 2,
+      actorId: "partner_1",
+      actorRole: "PARTNER",
+      idempotencyKey: "k_acc",
+      now,
+    });
+    const preparing = executeOrderCommand({
+      order: accepted.updatedOrder,
+      command: "START_PREPARING",
+      expectedVersion: 3,
+      actorId: "partner_1",
+      actorRole: "PARTNER",
+      idempotencyKey: "k_prep",
+      now,
+    });
+    const ready = executeOrderCommand({
+      order: preparing.updatedOrder,
+      command: "MARK_READY",
+      expectedVersion: 4,
+      actorId: "partner_1",
+      actorRole: "PARTNER",
+      idempotencyKey: "k_ready",
+      now,
+    });
+    const pickedUp = executeOrderCommand({
+      order: ready.updatedOrder,
+      command: "PICK_UP",
+      expectedVersion: 5,
+      actorId: "courier_1",
+      actorRole: "COURIER",
+      idempotencyKey: "k_pick",
+      now,
+    });
+    assert.equal(pickedUp.updatedOrder.orderStatus, "PICKED_UP");
+
+    // Customer cannot cancel once order is READY_FOR_PICKUP or past free window
+    assert.throws(
+      () =>
+        executeOrderCommand({
+          order: ready.updatedOrder,
+          command: "CANCEL",
+          expectedVersion: 5,
+          actorId: "cust_1",
+          actorRole: "CUSTOMER",
+          idempotencyKey: "k_late_cancel",
+          now: new Date(now.getTime() + 600 * 1000),
+        }),
+      /ORDER_CANCEL_WINDOW_EXPIRED/
+    );
+
+    // 6. Webhook failure & error branches
+    const ts = Math.floor(now.getTime() / 1000);
+    const rawP = JSON.stringify({ id: "e_fail" });
+    const sig = computePspWebhookSignature({
+      webhookSecret: "sec_12345678",
+      timestampSeconds: ts,
+      rawPayload: rawP,
+    });
+    assert.throws(
+      () =>
+        verifyAndProcessPspWebhook({
+          providerCode: "stripe",
+          externalEventId: "e1",
+          eventType: "payment.captured",
+          webhookSecret: "sec_12345678",
+          signatureHeader: sig,
+          timestampSeconds: ts - 1000,
+          nowSeconds: ts,
+          rawPayload: rawP,
+          webhookAmountCents: 5250,
+          webhookCurrencyCode: "BRL",
+          order: createdPickup.order,
+          processedEventKeys: new Set(),
+        }),
+      /WEBHOOK_TIMESTAMP_OUT_OF_WINDOW/
+    );
+    assert.throws(
+      () =>
+        verifyAndProcessPspWebhook({
+          providerCode: "stripe",
+          externalEventId: "e1",
+          eventType: "payment.captured",
+          webhookSecret: "sec_12345678",
+          signatureHeader: "v1=invalid",
+          timestampSeconds: ts,
+          nowSeconds: ts,
+          rawPayload: rawP,
+          webhookAmountCents: 5250,
+          webhookCurrencyCode: "BRL",
+          order: createdPickup.order,
+          processedEventKeys: new Set(),
+        }),
+      /WEBHOOK_INVALID_SIGNATURE/
+    );
+    assert.throws(
+      () =>
+        verifyAndProcessPspWebhook({
+          providerCode: "stripe",
+          externalEventId: "e1",
+          eventType: "payment.captured",
+          webhookSecret: "sec_12345678",
+          signatureHeader: sig,
+          timestampSeconds: ts,
+          nowSeconds: ts,
+          rawPayload: rawP,
+          webhookAmountCents: 5250,
+          webhookCurrencyCode: "USD",
+          order: createdPickup.order,
+          processedEventKeys: new Set(),
+        }),
+      /WEBHOOK_CURRENCY_MISMATCH/
+    );
+    assert.throws(
+      () =>
+        verifyAndProcessPspWebhook({
+          providerCode: "stripe",
+          externalEventId: "e1",
+          eventType: "payment.captured",
+          webhookSecret: "sec_12345678",
+          signatureHeader: sig,
+          timestampSeconds: ts,
+          nowSeconds: ts,
+          rawPayload: rawP,
+          webhookAmountCents: 9999,
+          webhookCurrencyCode: "BRL",
+          order: createdPickup.order,
+          processedEventKeys: new Set(),
+        }),
+      /WEBHOOK_AMOUNT_MISMATCH/
+    );
+    const failedWh = verifyAndProcessPspWebhook({
+      providerCode: "stripe",
+      externalEventId: "e_fail",
+      eventType: "payment.failed",
+      webhookSecret: "sec_12345678",
+      signatureHeader: sig,
+      timestampSeconds: ts,
+      nowSeconds: ts,
+      rawPayload: rawP,
+      webhookAmountCents: 5250,
+      webhookCurrencyCode: "BRL",
+      order: createdPickup.order,
+      processedEventKeys: new Set(),
+    });
+    assert.equal(failedWh.action, "ORDER_PAYMENT_FAILED");
+    assert.equal(failedWh.updatedOrder.paymentStatus, "FAILED");
+
+    // 7. Refund & Account deletion branches
+    assert.throws(
+      () =>
+        evaluateRefundRequest({
+          orderId: "o1",
+          capturedAmountCents: 5000,
+          alreadyRefundedCents: 0,
+          requestedRefundCents: 0,
+          staffMaxRefundApprovalCents: 5000,
+          actorAal: "aal2",
+          reason: "Valid",
+        }),
+      /REFUND_INVALID_AMOUNT/
+    );
+    assert.throws(
+      () =>
+        evaluateRefundRequest({
+          orderId: "o1",
+          capturedAmountCents: 5000,
+          alreadyRefundedCents: 0,
+          requestedRefundCents: 1000,
+          staffMaxRefundApprovalCents: 5000,
+          actorAal: "aal1",
+          reason: "Valid",
+        }),
+      /REFUND_MFA_AAL2_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateRefundRequest({
+          orderId: "o1",
+          capturedAmountCents: 5000,
+          alreadyRefundedCents: 0,
+          requestedRefundCents: 4000,
+          staffMaxRefundApprovalCents: 2000,
+          actorAal: "aal2",
+          reason: "Valid",
+        }),
+      /REFUND_ABAC_LIMIT_EXCEEDED/
+    );
+    assert.throws(
+      () =>
+        evaluateRefundRequest({
+          orderId: "o1",
+          capturedAmountCents: 5000,
+          alreadyRefundedCents: 4000,
+          requestedRefundCents: 2000,
+          staffMaxRefundApprovalCents: 5000,
+          actorAal: "aal2",
+          reason: "Valid",
+        }),
+      /REFUND_EXCEEDS_CAPTURED_AMOUNT/
+    );
+
+    const disputeHold = evaluateAccountDeletionRequest({
+      userId: "u1",
+      hasActiveOrders: false,
+      hasOpenFinancialDisputes: true,
+      hasCompletedFiscalTransactions: false,
+      requestedAt: now,
+    });
+    assert.equal(disputeHold.reasonCode, "OPEN_FINANCIAL_DISPUTE_OR_CHARGEBACK");
+
+    // 8. Settlement PAID_CONFIRMED & Delivery/OTP/Support/Promotion/Notification/Risk/Weighing branches
+    const paidSettlement = evaluateSettlementPayoutExecution({
+      settlement: {
+        id: "s1",
+        organizationId: "org_101",
+        courierId: null,
+        periodStart: "2026-11-01",
+        periodEnd: "2026-11-03",
+        amountCents: 10000,
+        status: "SCHEDULED",
+        approvedBy: null,
+        externalPayoutReference: null,
+        createdAtIso: now.toISOString(),
+      },
+      actorId: "fin_2",
+      actorAal: "aal2",
+      actorRoles: ["finance"],
+      bankAccountApprovedByActorId: "fin_1",
+      pspProviderStatus: "SANDBOX_READY",
+      externalPayoutReference: "po_stripe_confirmed_01",
+    });
+    assert.equal(paidSettlement.status, "PAID_CONFIRMED");
+
+    assert.equal(
+      verifyDeliveryConfirmationCode({ providedCode: "12ab", expectedCodeHash: "abc" }),
+      false
+    );
+
+    assert.equal(
+      evaluateFleetOperatorAccess({
+        fleetOrganizationId: "f1",
+        actorOrganizationIds: ["f1"],
+        targetCourierFleetOrgId: "f1",
+        isFleetContractApproved: false,
+      }).reasonCode,
+      "DISABLED_PENDING_FLEET_CONTRACT"
+    );
+    assert.equal(
+      evaluateFleetOperatorAccess({
+        fleetOrganizationId: "f1",
+        actorOrganizationIds: ["f1"],
+        targetCourierFleetOrgId: "f1",
+        isFleetContractApproved: true,
+      }).reasonCode,
+      "ALLOWED"
+    );
+
+    // Notification templates across all event types
+    for (const evtType of [
+      "ORDER_ACCEPTED",
+      "ORDER_DELIVERED",
+      "PAYMENT_REFUNDED",
+      "DELIVERY_OFFER_CREATED",
+      "DELIVERY_ASSIGNED",
+      "SUPPORT_CASE_UPDATED",
+      "PAYOUT_SETTLED",
+      "SECURITY_DEVICE_REVOKED",
+      "MARKETING_PROMO",
+      "CUSTOM_UNKNOWN_EVENT",
+    ]) {
+      const rendered = renderVersionedNotificationTemplate({
+        eventType: evtType,
+        locale: "pt-BR",
+      });
+      assert.ok(rendered.title.length > 0);
+      assert.ok(rendered.body.length > 0);
+    }
+
+    // All 5 risk rules
+    for (const ruleCode of [
+      "VELOCITY_HIGH_REFUND_RATE",
+      "COURIER_REPEATED_OTP_FAILURES",
+      "COUPON_ABUSE_MULTI_ACCOUNT",
+      "HIGH_VALUE_ORDER_NEW_ACCOUNT",
+      "BANK_ACCOUNT_FREQUENT_CHANGES",
+    ] as const) {
+      const riskRes = evaluateExplainableRiskRule({
+        ruleCode,
+        subjectType: "USER",
+        subjectId: "u1",
+        observedValue: 50000,
+      });
+      assert.equal(riskRes.triggered, true);
+      assert.equal(riskRes.recommendedAction, "HUMAN_REVIEW_REQUIRED");
+    }
+
+    // Reject substitution decision
+    const rejectedSub = resolveCustomerSubstitutionDecision({
+      substitution: {
+        id: "sub_rej",
+        status: "PENDING_CUSTOMER_APPROVAL",
+        originalLineCents: 2000,
+        suggestedLineCents: 1800,
+        expiresAtIso: "2026-11-19T16:00:00.000Z",
+      },
+      decision: "REJECT",
+      now: new Date("2026-11-19T15:00:00.000Z"),
+    });
+    assert.equal(rejectedSub.updatedStatus, "REJECTED_BY_CUSTOMER");
+    assert.equal(rejectedSub.refundDeltaCents, 2000);
+
+    // Additional branch coverage for M13/M14/M17/M18/M19/M20/M21/M22 error & edge paths
+    assert.throws(
+      () =>
+        evaluateSettlementPayoutExecution({
+          settlement: {
+            id: "s1",
+            organizationId: "org_101",
+            courierId: null,
+            periodStart: "2026-11-01",
+            periodEnd: "2026-11-03",
+            amountCents: 10000,
+            status: "SCHEDULED",
+            approvedBy: null,
+            externalPayoutReference: null,
+            createdAtIso: now.toISOString(),
+          },
+          actorId: "u1",
+          actorAal: "aal2",
+          actorRoles: ["support"],
+          pspProviderStatus: "SANDBOX_READY",
+        }),
+      /SETTLEMENT_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        evaluateSettlementPayoutExecution({
+          settlement: {
+            id: "s1",
+            organizationId: "org_101",
+            courierId: null,
+            periodStart: "2026-11-01",
+            periodEnd: "2026-11-03",
+            amountCents: 10000,
+            status: "SCHEDULED",
+            approvedBy: null,
+            externalPayoutReference: null,
+            createdAtIso: now.toISOString(),
+          },
+          actorId: "u1",
+          actorAal: "aal1",
+          actorRoles: ["finance"],
+          pspProviderStatus: "SANDBOX_READY",
+        }),
+      /SETTLEMENT_MFA_AAL2_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateSettlementPayoutExecution({
+          settlement: {
+            id: "s1",
+            organizationId: "org_101",
+            courierId: null,
+            periodStart: "2026-11-01",
+            periodEnd: "2026-11-03",
+            amountCents: 10000,
+            status: "SCHEDULED",
+            approvedBy: null,
+            externalPayoutReference: null,
+            createdAtIso: now.toISOString(),
+          },
+          actorId: "u1",
+          actorAal: "aal2",
+          actorRoles: ["finance"],
+          pspProviderStatus: "SANDBOX_READY",
+          externalPayoutReference: "x",
+        }),
+      /SETTLEMENT_EXTERNAL_REF_REQUIRED/
+    );
+
+    const sampleTask = {
+      id: "dt1",
+      orderId: "o1",
+      storeId: "s1",
+      fulfillmentModality: "PLATFORM_DELIVERY" as const,
+      status: "OFFERING",
+      pickupLatitude: -23.56,
+      pickupLongitude: -46.65,
+      dropoffLatitude: -23.57,
+      dropoffLongitude: -46.66,
+      dropoffNeighborhoodOnly: "Jardins",
+      dropoffFullAddress: null,
+      courierFeeCents: 700,
+      distanceMeters: 1200,
+      estimatedEtaMinutes: 15,
+      activeCourierId: null,
+      pickedUpAtIso: null,
+      completedAtIso: null,
+      createdAtIso: now.toISOString(),
+    };
+    const sampleOffer = {
+      id: "off1",
+      deliveryTaskId: "dt1",
+      courierId: "c1",
+      offeredFeeCents: 700,
+      status: "OFFERED" as const,
+      pickupStoreName: "Store",
+      distanceMeters: 1200,
+      dropoffNeighborhoodOnly: "Jardins",
+      expiresAtIso: "2026-11-03T16:00:00.000Z",
+      respondedAtIso: null,
+    };
+    assert.throws(
+      () =>
+        acceptDeliveryOfferTransactional({
+          offer: sampleOffer,
+          task: sampleTask,
+          actorCourierId: "c1",
+          isCourierOnline: false,
+          fullCustomerAddress: "Addr",
+          now,
+        }),
+      /COURIER_OFFLINE/
+    );
+    assert.throws(
+      () =>
+        acceptDeliveryOfferTransactional({
+          offer: sampleOffer,
+          task: sampleTask,
+          actorCourierId: "c2",
+          isCourierOnline: true,
+          fullCustomerAddress: "Addr",
+          now,
+        }),
+      /DELIVERY_OFFER_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        acceptDeliveryOfferTransactional({
+          offer: { ...sampleOffer, status: "DECLINED" },
+          task: sampleTask,
+          actorCourierId: "c1",
+          isCourierOnline: true,
+          fullCustomerAddress: "Addr",
+          now,
+        }),
+      /DELIVERY_OFFER_INVALID_STATE/
+    );
+    assert.throws(
+      () =>
+        acceptDeliveryOfferTransactional({
+          offer: { ...sampleOffer, expiresAtIso: "2026-11-03T14:00:00.000Z" },
+          task: sampleTask,
+          actorCourierId: "c1",
+          isCourierOnline: true,
+          fullCustomerAddress: "Addr",
+          now,
+        }),
+      /DELIVERY_OFFER_EXPIRED/
+    );
+
+    assert.throws(
+      () =>
+        evaluateCourierLocationSample({
+          sampleId: "l1",
+          courierId: "c1",
+          deliveryTaskId: "dt1",
+          activeCourierIdForTask: "c2",
+          latitude: -23.56,
+          longitude: -46.65,
+          accuracyMeters: 10,
+          recordedAtIso: now.toISOString(),
+          now,
+        }),
+      /DELIVERY_TASK_ACCESS_FORBIDDEN/
+    );
+    assert.throws(
+      () =>
+        evaluateCourierLocationSample({
+          sampleId: "l1",
+          courierId: "c1",
+          deliveryTaskId: "dt1",
+          activeCourierIdForTask: "c1",
+          latitude: 120,
+          longitude: -46.65,
+          accuracyMeters: 10,
+          recordedAtIso: now.toISOString(),
+          now,
+        }),
+      /INVALID_GPS_COORDINATES/
+    );
+
+    // M17 SLA upgrade & staff view & error branches
+    assert.equal(
+      computeSupportSlaDueAt({
+        priority: "LOW",
+        category: "MISSING_ITEM",
+        createdAt: now,
+      }).effectivePriority,
+      "HIGH"
+    );
+    const staffSupportView = filterSupportCaseViewForActor({
+      supportCase: {
+        id: "sc1",
+        caseNumber: 1,
+        orderId: "o1",
+        deliveryTaskId: null,
+        organizationId: "org1",
+        storeId: "s1",
+        requesterId: "c1",
+        requesterRole: "CUSTOMER",
+        assignedStaffId: null,
+        category: "GENERAL",
+        priority: "LOW",
+        status: "OPEN",
+        subject: "Sub",
+        slaDueAtIso: now.toISOString(),
+        resolvedAtIso: null,
+        createdAtIso: now.toISOString(),
+        updatedAtIso: now.toISOString(),
+      },
+      messages: [],
+      attachments: [],
+      actionRequests: [],
+      isStaffActor: true,
+    });
+    assert.equal(staffSupportView.supportCase.id, "sc1");
+
+    assert.throws(
+      () =>
+        evaluateSupportActionRequest({
+          id: "a1",
+          caseId: "sc1",
+          orderId: "o1",
+          requestedByStaffId: "st1",
+          actionType: "PARTIAL_REFUND",
+          amountCents: 0,
+          orderCapturedCents: 1000,
+          alreadyRefundedCents: 0,
+          autoApproveLimitCents: 1500,
+          reason: "Valid reason",
+        }),
+      /SUPPORT_ACTION_INVALID_AMOUNT/
+    );
+    assert.throws(
+      () =>
+        evaluateSupportActionRequest({
+          id: "a1",
+          caseId: "sc1",
+          orderId: "o1",
+          requestedByStaffId: "st1",
+          actionType: "PARTIAL_REFUND",
+          amountCents: 500,
+          orderCapturedCents: 1000,
+          alreadyRefundedCents: 0,
+          autoApproveLimitCents: 1500,
+          reason: "no",
+        }),
+      /SUPPORT_ACTION_REASON_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateSupportActionRequest({
+          id: "a1",
+          caseId: "sc1",
+          orderId: "o1",
+          requestedByStaffId: "st1",
+          actionType: "PARTIAL_REFUND",
+          amountCents: 1200,
+          orderCapturedCents: 1000,
+          alreadyRefundedCents: 0,
+          autoApproveLimitCents: 1500,
+          reason: "Valid reason",
+        }),
+      /SUPPORT_REFUND_EXCEEDS_CAPTURED/
+    );
+
+    const pendingReq = {
+      id: "ar1",
+      caseId: "sc1",
+      orderId: "o1",
+      requestedBy: "st1",
+      actionType: "PARTIAL_REFUND" as const,
+      amountCents: 2000,
+      reason: "Valid",
+      status: "PENDING_FINANCE" as const,
+      decidedBy: null,
+      decidedAtIso: null,
+      decisionNotes: null,
+      createdAtIso: now.toISOString(),
+    };
+    assert.throws(
+      () =>
+        decideEscalatedSupportActionRequest({
+          request: pendingReq,
+          decision: "APPROVED",
+          decidedByStaffId: "st2",
+          actorStaffRoles: ["finance"],
+          actorAal: "aal1",
+          decisionNotes: "Valid notes",
+        }),
+      /SUPPORT_FINANCE_MFA_AAL2_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        decideEscalatedSupportActionRequest({
+          request: pendingReq,
+          decision: "APPROVED",
+          decidedByStaffId: "st2",
+          actorStaffRoles: ["support"],
+          actorAal: "aal2",
+          decisionNotes: "Valid notes",
+        }),
+      /SUPPORT_FINANCE_ROLE_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        decideEscalatedSupportActionRequest({
+          request: { ...pendingReq, status: "APPROVED" },
+          decision: "APPROVED",
+          decidedByStaffId: "st2",
+          actorStaffRoles: ["finance"],
+          actorAal: "aal2",
+          decisionNotes: "Valid notes",
+        }),
+      /SUPPORT_ACTION_ALREADY_DECIDED/
+    );
+    assert.throws(
+      () =>
+        decideEscalatedSupportActionRequest({
+          request: pendingReq,
+          decision: "APPROVED",
+          decidedByStaffId: "st2",
+          actorStaffRoles: ["finance"],
+          actorAal: "aal2",
+          decisionNotes: "no",
+        }),
+      /SUPPORT_DECISION_NOTES_REQUIRED/
+    );
+
+    // M18 Proposal & Contract errors
+    assert.throws(
+      () =>
+        validateAndBuildCommercialProposal({
+          id: "p1",
+          leadId: "l1",
+          proposalVersion: 0,
+          platformDeliveryCommissionBps: 2000,
+          merchantDeliveryCommissionBps: 1000,
+          pickupCommissionBps: 800,
+          serviceFeeBps: 500,
+          payoutCycleDays: 7,
+          validUntilIso: "2027-01-01T00:00:00Z",
+          proposedByStaffId: "st1",
+        }),
+      /COMMERCIAL_PROPOSAL_INVALID_NUMBER/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildCommercialProposal({
+          id: "p1",
+          leadId: "l1",
+          proposalVersion: 1,
+          platformDeliveryCommissionBps: 9000,
+          merchantDeliveryCommissionBps: 1000,
+          pickupCommissionBps: 800,
+          serviceFeeBps: 500,
+          payoutCycleDays: 7,
+          validUntilIso: "2027-01-01T00:00:00Z",
+          proposedByStaffId: "st1",
+        }),
+      /COMMERCIAL_PROPOSAL_INVALID_BPS/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildCommercialProposal({
+          id: "p1",
+          leadId: "l1",
+          proposalVersion: 1,
+          platformDeliveryCommissionBps: 2000,
+          merchantDeliveryCommissionBps: 1000,
+          pickupCommissionBps: 800,
+          serviceFeeBps: 500,
+          payoutCycleDays: 99 as 7,
+          validUntilIso: "2027-01-01T00:00:00Z",
+          proposedByStaffId: "st1",
+        }),
+      /COMMERCIAL_PROPOSAL_INVALID_PAYOUT_CYCLE/
+    );
+    assert.throws(
+      () =>
+        validateAndBuildCommercialProposal({
+          id: "p1",
+          leadId: "l1",
+          proposalVersion: 1,
+          platformDeliveryCommissionBps: 2000,
+          merchantDeliveryCommissionBps: 1000,
+          pickupCommissionBps: 800,
+          serviceFeeBps: 500,
+          payoutCycleDays: 7,
+          validUntilIso: "",
+          proposedByStaffId: "st1",
+        }),
+      /COMMERCIAL_PROPOSAL_VALID_UNTIL_REQUIRED/
+    );
+
+    // M19 Promotion failure reason codes & Review error branches
+    const promoBase = {
+      id: "pr1",
+      code: "TEST",
+      storeId: "s1",
+      fundedBy: "PLATFORM" as const,
+      platformShareBps: 10000,
+      firstOrderOnly: true,
+      discountType: "FIXED_CENTS" as const,
+      discountValue: 1000,
+      maxDiscountCents: 1000,
+      minOrderCents: 3000,
+      budgetLimitCents: 10000,
+      budgetConsumedCents: 0,
+      maxUsesPerUser: 1,
+      startsAtIso: "2026-01-01T00:00:00Z",
+      endsAtIso: "2027-01-01T00:00:00Z",
+      isActive: true,
+      createdBy: "st1",
+      createdAtIso: now.toISOString(),
+    };
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: { ...promoBase, isActive: false },
+        storeId: "s1",
+        grossMerchandiseCents: 5000,
+        customerPriorOrdersCount: 0,
+        customerPriorRedemptionsForPromo: 0,
+        now,
+      }).reasonCode,
+      "PROMO_INACTIVE"
+    );
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: { ...promoBase, endsAtIso: "2026-02-01T00:00:00Z" },
+        storeId: "s1",
+        grossMerchandiseCents: 5000,
+        customerPriorOrdersCount: 0,
+        customerPriorRedemptionsForPromo: 0,
+        now,
+      }).reasonCode,
+      "PROMO_OUTSIDE_VALIDITY_WINDOW"
+    );
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: promoBase,
+        storeId: "s1",
+        grossMerchandiseCents: 2000,
+        customerPriorOrdersCount: 0,
+        customerPriorRedemptionsForPromo: 0,
+        now,
+      }).reasonCode,
+      "PROMO_BELOW_MIN_ORDER"
+    );
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: promoBase,
+        storeId: "s1",
+        grossMerchandiseCents: 5000,
+        customerPriorOrdersCount: 2,
+        customerPriorRedemptionsForPromo: 0,
+        now,
+      }).reasonCode,
+      "PROMO_FIRST_ORDER_ONLY"
+    );
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: promoBase,
+        storeId: "s1",
+        grossMerchandiseCents: 5000,
+        customerPriorOrdersCount: 0,
+        customerPriorRedemptionsForPromo: 1,
+        now,
+      }).reasonCode,
+      "PROMO_USER_LIMIT_EXCEEDED"
+    );
+    assert.equal(
+      evaluatePromotionEligibilityAndSubsidy({
+        promotion: { ...promoBase, discountValue: 0 },
+        storeId: "s1",
+        grossMerchandiseCents: 5000,
+        customerPriorOrdersCount: 0,
+        customerPriorRedemptionsForPromo: 0,
+        now,
+      }).reasonCode,
+      "PROMO_ZERO_DISCOUNT"
+    );
+
+    assert.deepEqual(calculatePublishedStoreRatingSummary([]), {
+      publishedReviewsCount: 0,
+      averageRating: 0,
+    });
+
+    // M20 Channel eligibility remaining branches (IN_APP marketing opt-out, PUSH no consent, PUSH marketing opt-out, PUSH missing credentials, PUSH ready, EMAIL ready, WEBHOOK missing & ready)
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "IN_APP",
+        category: "MARKETING",
+        preferences: {
+          pushOrderUpdates: true,
+          pushPromotions: false,
+          emailTransactional: true,
+          emailMarketing: false,
+        },
+      }).reasonCode,
+      "MARKETING_OPT_OUT"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "PUSH_IOS",
+        category: "TRANSACTIONAL",
+        device: {
+          isRevoked: false,
+          pushConsentGranted: false,
+          pushToken: "apns_1",
+        },
+        providerStatus: "ACTIVE",
+      }).reasonCode,
+      "PUSH_CONSENT_NOT_GRANTED"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "PUSH_IOS",
+        category: "MARKETING",
+        preferences: {
+          pushOrderUpdates: true,
+          pushPromotions: false,
+          emailTransactional: true,
+          emailMarketing: true,
+        },
+        device: {
+          isRevoked: false,
+          pushConsentGranted: true,
+          pushToken: "apns_1",
+        },
+        providerStatus: "ACTIVE",
+      }).reasonCode,
+      "MARKETING_PUSH_OPT_OUT"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "PUSH_IOS",
+        category: "TRANSACTIONAL",
+        device: {
+          isRevoked: false,
+          pushConsentGranted: true,
+          pushToken: "apns_1",
+        },
+        providerStatus: "BLOCKED_MISSING_CREDENTIALS",
+      }).reasonCode,
+      "PROVIDER_MISSING_CREDENTIALS"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "PUSH_IOS",
+        category: "TRANSACTIONAL",
+        device: {
+          isRevoked: false,
+          pushConsentGranted: true,
+          pushToken: "apns_1",
+        },
+        providerStatus: "ACTIVE",
+      }).reasonCode,
+      "PUSH_DISPATCH_READY"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "EMAIL",
+        category: "TRANSACTIONAL",
+        providerStatus: "ACTIVE",
+      }).reasonCode,
+      "EMAIL_DISPATCH_READY"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "WEBHOOK",
+        category: "TRANSACTIONAL",
+        providerStatus: "BLOCKED_MISSING_CREDENTIALS",
+      }).reasonCode,
+      "WEBHOOK_CREDENTIALS_MISSING"
+    );
+    assert.equal(
+      evaluateNotificationChannelEligibility({
+        channel: "WEBHOOK",
+        category: "TRANSACTIONAL",
+        providerStatus: "ACTIVE",
+      }).reasonCode,
+      "WEBHOOK_DISPATCH_READY"
+    );
+
+    assert.throws(
+      () =>
+        signOutboundWebhookPayload({
+          eventId: "e1",
+          eventType: "order.created",
+          payload: {},
+          secret: "short",
+        }),
+      /WEBHOOK_SECRET_REQUIRED/
+    );
+    assert.equal(
+      verifyOutboundWebhookSignature({
+        envelope: {
+          eventId: "e1",
+          eventType: "order.created",
+          timestampSeconds: 1700000000,
+          signatureHex: "0000",
+          payloadJson: "{}",
+        },
+        secret: "whsec_valid_secret_1234",
+        nowSeconds: 1700000010,
+      }).reasonCode,
+      "WEBHOOK_SIGNATURE_MISMATCH"
+    );
+
+    // M22 substitution & weighing error branches
+    assert.throws(
+      () =>
+        calculateWeighedItemPriceCents({
+          actualWeightGrams: -10,
+          pricePerKgCents: 3000,
+          preAuthorizedLineCents: 1500,
+        }),
+      /INVALID_WEIGHT_GRAMS/
+    );
+    assert.throws(
+      () =>
+        evaluateItemSubstitutionProposal({
+          customerPreference: "ALLOW_SUGGESTION",
+          originalLineCents: 1000,
+          action: "PROPOSE_SUBSTITUTION",
+          reason: "x",
+        }),
+      /SUBSTITUTION_REASON_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateItemSubstitutionProposal({
+          customerPreference: "ALLOW_SUGGESTION",
+          originalLineCents: 1000,
+          action: "PROPOSE_SUBSTITUTION",
+          reason: "Valid reason",
+          timeoutSeconds: 10,
+        }),
+      /INVALID_SUBSTITUTION_TIMEOUT/
+    );
+    assert.throws(
+      () =>
+        evaluateItemSubstitutionProposal({
+          customerPreference: "ALLOW_SUGGESTION",
+          originalLineCents: 1000,
+          action: "PROPOSE_SUBSTITUTION",
+          reason: "Valid reason",
+        }),
+      /SUBSTITUTION_SUGGESTED_PRODUCT_REQUIRED/
+    );
+    assert.throws(
+      () =>
+        evaluateItemSubstitutionProposal({
+          customerPreference: "ALLOW_SUGGESTION",
+          originalLineCents: 1000,
+          action: "PROPOSE_SUBSTITUTION",
+          suggestedProductId: "p2",
+          suggestedProductNameEn: "Alt",
+          suggestedProductNamePtBr: "Alt",
+          suggestedLineCents: 1500,
+          reason: "Valid reason",
+        }),
+      /SUBSTITUTION_EXCEEDS_ORIGINAL_CEILING/
+    );
+    const markUnavailAllowSub = evaluateItemSubstitutionProposal({
+      customerPreference: "ALLOW_SUGGESTION",
+      originalLineCents: 1000,
+      action: "MARK_UNAVAILABLE_REFUND",
+      reason: "Out of stock completely",
+    });
+    assert.equal(markUnavailAllowSub.status, "AUTO_REFUNDED_UNAVAILABLE");
+
+    assert.throws(
+      () =>
+        resolveCustomerSubstitutionDecision({
+          substitution: {
+            id: "s1",
+            status: "APPROVED_BY_CUSTOMER",
+            originalLineCents: 1000,
+            suggestedLineCents: 900,
+            expiresAtIso: "2027-01-01T00:00:00Z",
+          },
+          decision: "APPROVE",
+        }),
+      /SUBSTITUTION_ALREADY_RESOLVED/
+    );
+    assert.throws(
+      () =>
+        finalizeOrderPickTaskFinancialAdjustment({
+          orderId: "o1",
+          organizationId: "org_101",
+          preAuthorizedTotalCents: 5000,
+          orderItems: [{ orderItemId: "i1", totalLineCents: 2000, adjustedLineCents: 1900 }],
+          substitutions: [
+            {
+              id: "sub_pending",
+              status: "PENDING_CUSTOMER_APPROVAL",
+              expiresAtIso: "2027-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      /PICK_TASK_AWAITING_CUSTOMER_APPROVAL/
+    );
+    assert.throws(
+      () =>
+        finalizeOrderPickTaskFinancialAdjustment({
+          orderId: "o1",
+          organizationId: "org_101",
+          preAuthorizedTotalCents: 5000,
+          orderItems: [{ orderItemId: "i1", totalLineCents: 2000, adjustedLineCents: 2500 }],
+          substitutions: [],
+        }),
+      /WEIGHING_EXCEEDS_PREAUTHORIZED_CEILING/
+    );
   });
 });

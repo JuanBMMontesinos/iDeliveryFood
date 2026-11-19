@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = path.resolve(process.cwd(), "../..");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "../../../..");
 
 function extractAndroidStringKeys(xmlPath: string): string[] {
   const xml = fs.readFileSync(xmlPath, "utf8");

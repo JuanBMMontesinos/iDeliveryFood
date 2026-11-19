@@ -156,6 +156,21 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  packages/i18n:
+    dependencies:
+      '@ideliveryfood/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/observability:
+    dependencies:
+      '@ideliveryfood/config':
+        specifier: workspace:*
+        version: link:../config
+      '@ideliveryfood/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/ui-web:
     dependencies:
       '@ideliveryfood/contracts':

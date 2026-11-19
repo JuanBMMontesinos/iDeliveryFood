@@ -19,12 +19,16 @@ import {
   buildAdminAuditTrailExplorerModel,
   buildAdminGovernanceScreenModel,
   buildAdminRoleNavigationModules,
+  buildCommercialBackofficeConsoleModel,
   buildFinancialBackofficeModel,
   buildFleetOperatorPortalModel,
   buildGovernanceAnalyticsConsoleModel,
+  buildGovernanceConsoleSnapshot,
   buildGovernancePrivacyQueueModel,
   buildGovernanceRiskQueueModel,
   buildLogisticsDispatchConsoleModel,
+  buildMarketingBackofficeConsoleModel,
+  buildSupportBackofficeConsoleModel,
   createAdminWebServer,
   executeAdminCadastreGovernanceAction,
   executeAdminStaffScopeGrant,
@@ -460,6 +464,111 @@ describe("@ideliveryfood/admin-web — Staff MFA aal2 Step-Up & Honest Provider 
     });
     assert.equal(privacyModel.authorized, true);
     assert.equal(privacyModel.blockedRetentionCount, 1);
+
+    // Additional unit coverage for navigation modules, support/commercial/marketing/governance console models, and unauthorized branches
+    assert.deepEqual(
+      buildAdminRoleNavigationModules({ ...staffAdminAal1, status: "SUSPENDED" }),
+      []
+    );
+    const techAdminModules = buildAdminRoleNavigationModules({
+      ...staffAdminAal1,
+      aal: "aal2",
+    });
+    assert.equal(techAdminModules.length, 8);
+
+    const aal1Grant = executeAdminStaffScopeGrant({
+      actor: staffAdminAal1,
+      request: {
+        targetUserId: "u_other",
+        role: "support",
+        regionCode: null,
+        maxRefundApprovalCents: 1000,
+        justification: "Valid justification",
+      },
+    });
+    assert.equal(aal1Grant.allowed, false);
+    assert.equal(aal1Grant.reasonCode, "DENIED_MFA_AAL2_REQUIRED");
+
+    const forbiddenFin = buildFinancialBackofficeModel({
+      actor: privacyAuditor,
+      orders: [],
+    });
+    assert.equal(forbiddenFin.authorized, false);
+    assert.equal(forbiddenFin.banner?.kind, "forbidden");
+
+    const forbiddenLog = buildLogisticsDispatchConsoleModel({
+      actor: privacyAuditor,
+      tasks: [],
+    });
+    assert.equal(forbiddenLog.authorized, false);
+
+    assert.equal(
+      buildFleetOperatorPortalModel({
+        fleetOrganizationId: "f1",
+        actorOrganizationIds: ["f1"],
+        isFleetContractApproved: false,
+        couriers: [],
+      }).portalStatus,
+      "DISABLED_PENDING_FLEET_CONTRACT"
+    );
+    assert.equal(
+      buildFleetOperatorPortalModel({
+        fleetOrganizationId: "f1",
+        actorOrganizationIds: ["f2"],
+        isFleetContractApproved: true,
+        couriers: [],
+      }).portalStatus,
+      "DENIED_CROSS_FLEET_OR_INDEPENDENT_COURIER"
+    );
+
+    const supportModel = buildSupportBackofficeConsoleModel({
+      actor: { ...staffAdminAal1, aal: "aal2" },
+      overview: {
+        autoRefundLimitCents: 1500,
+        cases: [],
+        messages: [],
+        attachments: [],
+        actionRequests: [],
+      },
+    });
+    assert.equal(supportModel.authorized, true);
+    assert.equal(supportModel.canApproveEscalatedFinance, true);
+
+    const commercialModel = buildCommercialBackofficeConsoleModel({
+      actor: { ...staffAdminAal1, aal: "aal2" },
+      overview: {
+        leads: [],
+        proposals: [],
+        contracts: [],
+        commissionRuleVersions: [],
+      },
+    });
+    assert.equal(commercialModel.authorized, true);
+
+    const marketingModel = buildMarketingBackofficeConsoleModel({
+      actor: { ...staffAdminAal1, aal: "aal2" },
+      overview: {
+        featureSponsoredAdsEnabled: false,
+        featureSubscriptionsEnabled: false,
+        promotions: [],
+        redemptions: [],
+        reviews: [],
+      },
+    });
+    assert.equal(marketingModel.authorized, true);
+
+    const govSnapshot = buildGovernanceConsoleSnapshot({
+      actor: privacyAuditor,
+      overview: {
+        kpis: sampleKpis,
+        riskAlerts: sampleAlerts,
+        privacyRequests: samplePrivacy,
+      },
+      locale: "pt-BR",
+    });
+    assert.equal(govSnapshot.analytics.authorized, true);
+    assert.equal(govSnapshot.risk.authorized, true);
+    assert.equal(govSnapshot.privacy.authorized, true);
   });
 });
 

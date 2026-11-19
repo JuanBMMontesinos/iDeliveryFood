@@ -37,6 +37,9 @@ jobs:
       - name: Run Typecheck & Lint across all packages and apps
         run: pnpm lint && pnpm typecheck
 
+      - name: Run Unit Test Coverage Gate (>= 80% Lines, Branches & Functions)
+        run: pnpm test:unit:coverage
+
       - name: Run Unit, Contract, i18n Parity & Integration Tests
         run: pnpm test
 

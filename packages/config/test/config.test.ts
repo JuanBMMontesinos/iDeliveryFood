@@ -276,5 +276,266 @@ describe("@ideliveryfood/config — Env Validation, Provider Readiness & Redacti
     });
     assert.equal(mimeMismatch.valid, false);
     assert.equal(mimeMismatch.reasonCode, "STORAGE_EXTENSION_MIME_MISMATCH");
+
+    const invalidFileName = validateStorageUploadSecurity({
+      fileName: "../traversal.png",
+      mimeType: "image/png",
+      fileSizeBytes: 2048,
+      maxSizeBytes: 5_242_880,
+      allowedMimeTypes: ["image/png"],
+    });
+    assert.equal(invalidFileName.valid, false);
+    assert.equal(invalidFileName.reasonCode, "STORAGE_INVALID_FILENAME");
+
+    const invalidMime = validateStorageUploadSecurity({
+      fileName: "photo.png",
+      mimeType: "application/zip",
+      fileSizeBytes: 2048,
+      maxSizeBytes: 5_242_880,
+      allowedMimeTypes: ["image/png"],
+    });
+    assert.equal(invalidMime.valid, false);
+    assert.equal(invalidMime.reasonCode, "STORAGE_INVALID_MIME_TYPE");
+
+    const tooLarge = validateStorageUploadSecurity({
+      fileName: "photo.png",
+      mimeType: "image/png",
+      fileSizeBytes: 10_000_000,
+      maxSizeBytes: 5_242_880,
+      allowedMimeTypes: ["image/png"],
+    });
+    assert.equal(tooLarge.valid, false);
+    assert.equal(tooLarge.reasonCode, "STORAGE_FILE_TOO_LARGE");
+
+    const validStorage = validateStorageUploadSecurity({
+      fileName: "photo.png",
+      mimeType: "image/png",
+      fileSizeBytes: 2048,
+      maxSizeBytes: 5_242_880,
+      allowedMimeTypes: ["image/png"],
+    });
+    assert.equal(validStorage.valid, true);
+    assert.equal(validStorage.reasonCode, "VALID");
+  });
+
+  it("covers all validation error branches in env, CORS, CSRF, rate limiter buckets, mass-assignment, and IPv4/IPv6 SSRF guards", () => {
+    // 1. validatePublicWebEnv & validateServerEnv errors
+    assert.throws(
+      () =>
+        validatePublicWebEnv({
+          NEXT_PUBLIC_SUPABASE_URL: "http://insecure.supabase.co",
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon_public_key_placeholder_12345",
+        }),
+      /NEXT_PUBLIC_SUPABASE_URL must be a valid https:\/\/ URL/
+    );
+    assert.throws(
+      () =>
+        validatePublicWebEnv({
+          NEXT_PUBLIC_SUPABASE_URL: "https://dwsoochnfxldfvcaijie.supabase.co",
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: "short",
+        }),
+      /NEXT_PUBLIC_SUPABASE_ANON_KEY is required/
+    );
+    assert.throws(
+      () =>
+        validateServerEnv({
+          SUPABASE_URL: "https://dwsoochnfxldfvcaijie.supabase.co",
+          SUPABASE_ANON_KEY: "anon_public_key_placeholder_12345",
+          API_PORT: "99999",
+        }),
+      /API_PORT must be a valid TCP port/
+    );
+    const prodServerCfg = validateServerEnv({
+      SUPABASE_URL: "https://dwsoochnfxldfvcaijie.supabase.co",
+      SUPABASE_ANON_KEY: "anon_public_key_placeholder_12345",
+      APP_ENV: "production",
+      SUPABASE_SERVICE_ROLE_KEY: "srv_key",
+      SUPABASE_JWT_SECRET: "jwt_sec",
+    });
+    assert.equal(prodServerCfg.appEnv, "production");
+    assert.equal(prodServerCfg.supabaseServiceRoleKey, "srv_key");
+
+    // 2. CORS edge branches (no origin, wildcard '*', null origin, malformed URL, non-preflight GET)
+    const noOriginCors = evaluateCorsRequest({ method: "GET" });
+    assert.equal(noOriginCors.allowed, true);
+    assert.equal(noOriginCors.isPreflight, false);
+
+    const starCors = evaluateCorsRequest({ originHeader: "*", method: "OPTIONS" });
+    assert.equal(starCors.allowed, false);
+    assert.equal(starCors.reasonCode, "CORS_ORIGIN_FORBIDDEN");
+
+    const malformedCors = evaluateCorsRequest({
+      originHeader: "not-a-valid-origin",
+      method: "GET",
+      rawEnv: { CORS_ALLOWED_ORIGINS: "*,null,invalid-url,https://app.ideliveryfood.com.br" },
+    });
+    assert.equal(malformedCors.allowed, false);
+
+    // 3. CSRF edge branches (SAFE_METHOD, STATELESS_AUTH, Referer fallback, origin mismatch, length mismatch)
+    assert.equal(
+      evaluateCsrfProtection({ method: "GET" }).reasonCode,
+      "SAFE_METHOD"
+    );
+    assert.equal(
+      evaluateCsrfProtection({
+        method: "POST",
+        authorizationHeader: "Bearer eyJ.token",
+        cookieHeader: "idelivery_access_token=abc",
+      }).reasonCode,
+      "STATELESS_AUTH"
+    );
+    assert.equal(
+      evaluateCsrfProtection({
+        method: "POST",
+        cookieHeader: "sb-access-token=abc; idelivery_csrf_token=csrf_secret_token_123456",
+        refererHeader: "https://evil.example.com/page",
+      }).reasonCode,
+      "CSRF_ORIGIN_MISMATCH"
+    );
+    assert.equal(
+      evaluateCsrfProtection({
+        method: "POST",
+        cookieHeader: "session_id=abc; idelivery_csrf_token=csrf_secret_token_123456",
+        refererHeader: "not-a-url",
+      }).reasonCode,
+      "CSRF_ORIGIN_MISMATCH"
+    );
+    assert.equal(
+      evaluateCsrfProtection({
+        method: "POST",
+        cookieHeader: "session_id=abc; idelivery_csrf_token=csrf_secret_token_123456",
+        refererHeader: "https://app.ideliveryfood.com.br/checkout",
+        csrfTokenHeader: "csrf_secret_token_999999",
+      }).reasonCode,
+      "CSRF_TOKEN_INVALID"
+    );
+
+    const laxCookie = buildSecureSessionCookieHeader({
+      name: "csrf",
+      value: "val",
+      maxAgeSeconds: 3600,
+      httpOnly: false,
+      secure: false,
+      sameSite: "Lax",
+    });
+    assert.match(laxCookie, /Max-Age=3600/);
+    assert.match(laxCookie, /SameSite=Lax/);
+
+    // 4. Rate limiter route buckets & global override
+    assert.equal(classifyRateLimitRouteBucket("GET", "/v1/analytics/export"), "DATA_EXPORT");
+    assert.equal(classifyRateLimitRouteBucket("POST", "/v1/auth/login"), "AUTH");
+    assert.equal(classifyRateLimitRouteBucket("POST", "/v1/quotes"), "QUOTES_ORDERS");
+    assert.equal(classifyRateLimitRouteBucket("POST", "/v1/webhooks/psp/stripe"), "PSP_WEBHOOKS");
+    assert.equal(classifyRateLimitRouteBucket("POST", "/v1/admin/staff-scopes"), "ADMIN_GOVERNANCE");
+    assert.equal(classifyRateLimitRouteBucket("GET", "/v1/stores"), "DEFAULT");
+
+    const globalLimiter = new SlidingWindowRateLimiter({
+      RATE_LIMIT_WINDOW_MS: "invalid",
+      RATE_LIMIT_MAX_REQUESTS: "5",
+    });
+    const anonConsume = globalLimiter.consume({
+      bucket: "DEFAULT",
+      clientIp: "198.51.100.1",
+    });
+    assert.equal(anonConsume.allowed, true);
+    assert.equal(anonConsume.limit, 5);
+
+    // 5. Mass assignment edge branches
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/stores",
+        method: "GET",
+        body: { is_admin: true },
+      }).valid,
+      true
+    );
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/orders",
+        method: "POST",
+        body: { quoteId: "q1", unknownExtraField: "forbidden" },
+      }).valid,
+      false
+    );
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/quotes",
+        method: "POST",
+        body: {
+          storeId: "s1",
+          fulfillmentModality: "PICKUP",
+          cartItems: [{ productId: "p1", quantity: 1, unexpectedItemProp: 123 }],
+        },
+      }).valid,
+      false
+    );
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/quotes",
+        method: "POST",
+        body: {
+          storeId: "s1",
+          fulfillmentModality: "PICKUP",
+          cartItems: [{ productId: "p1", quantity: 1, is_super_admin: true }],
+        },
+      }).valid,
+      false
+    );
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/admin/staff-scopes",
+        method: "POST",
+        body: { targetUserId: "u1", role: "support", organizationId: "org1" },
+      }).valid,
+      true
+    );
+    assert.equal(
+      validatePayloadAgainstMassAssignment({
+        pathname: "/v1/support/cases/c1/status",
+        method: "PATCH",
+        body: { status: "IN_PROGRESS", nested: { organization_id: "forbidden_here" } },
+      }).valid,
+      false
+    );
+
+    // 6. SSRF edge branches (invalid URL, embedded credentials, numeric IP, CGNAT, multicast, IPv6 mapped/unique-local/link-local/public)
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("not a url").reasonCode,
+      "SSRF_INVALID_URL"
+    );
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("https://user:pass@hooks.example.com/hook").reasonCode,
+      "SSRF_EMBEDDED_CREDENTIALS_FORBIDDEN"
+    );
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("https://metadata.google.internal/computeMetadata/v1/").reasonCode,
+      "SSRF_INTERNAL_HOST_FORBIDDEN"
+    );
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("https://2130706433/hook").reasonCode,
+      "SSRF_PRIVATE_OR_METADATA_IP_FORBIDDEN"
+    );
+    for (const privIp of [
+      "https://0.0.0.0/hook",
+      "https://100.64.10.20/hook",
+      "https://224.0.0.1/hook",
+      "https://[::ffff:127.0.0.1]/hook",
+      "https://[fc00::1]/hook",
+      "https://[fe80::1]/hook",
+    ]) {
+      assert.equal(
+        validateExternalWebhookUrlAgainstSsrf(privIp).allowed,
+        false,
+        `Expected SSRF block for ${privIp}`
+      );
+    }
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("https://93.184.216.34/webhook").allowed,
+      true
+    );
+    assert.equal(
+      validateExternalWebhookUrlAgainstSsrf("https://[2606:2800:220:1:248:1893:25c8:1946]/webhook").allowed,
+      true
+    );
   });
 });
