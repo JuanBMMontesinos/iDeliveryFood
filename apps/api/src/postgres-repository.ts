@@ -745,13 +745,14 @@ export function createSupabasePostgresRepository(params: {
         invitedBy?: string;
       }
     ): Promise<void> {
+      if (!record.organizationId || !record.invitedBy) {
+        throw new Error(
+          "INVITATION_SCOPE_REQUIRED: organizationId and invitedBy are required to persist an invitation."
+        );
+      }
       const invUuid = rememberLogicalId(record.id);
-      const orgUuid = toDeterministicUuid(
-        record.organizationId ?? "00000000-0000-4000-8000-000000000101"
-      );
-      const invitedByUuid = toDeterministicUuid(
-        record.invitedBy ?? "00000000-0000-4000-8000-000000000010"
-      );
+      const orgUuid = toDeterministicUuid(record.organizationId);
+      const invitedByUuid = toDeterministicUuid(record.invitedBy);
       await pool.query(
         `INSERT INTO public.invitations (
            id, organization_id, store_id, invited_email, role, token_hash, status, invited_by, expires_at, accepted_at, is_test_data

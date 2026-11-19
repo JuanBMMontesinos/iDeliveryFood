@@ -15,7 +15,8 @@
     "db:reset:local": "node scripts/db-reset-local.mjs",
     "db:migrate": "node scripts/db-apply-migrations.mjs",
     "bootstrap:first-admin": "node scripts/bootstrap-first-admin.mjs",
-    "security:scan": "node scripts/secret-scan.mjs"
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "security:scan": "node scripts/security-and-hardcode-scan.mjs && node scripts/secret-scan.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

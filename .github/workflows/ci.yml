@@ -31,8 +31,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile=false
 
-      - name: Run repository secret and .env leakage scan
-        run: pnpm security:scan
+      - name: Run repository secret, anti-hardcode, and .env leakage scan
+        run: pnpm security:scan && pnpm secret-scan
 
       - name: Run Typecheck & Lint across all packages and apps
         run: pnpm lint && pnpm typecheck

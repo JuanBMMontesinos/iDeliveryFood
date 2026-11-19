@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
@@ -74,5 +75,32 @@ describe("Operational Safety Scripts (db-reset-local, bootstrap-first-admin, sec
 
     const findings = scanMod.scanDirectoryForSecrets(repoRoot);
     assert.deepEqual(findings, []);
+  });
+
+  it("verifies Fase U (M23 Parte 2): security-and-hardcode-scan.mjs passes with 0 violations and all M23 security governance documents exist", async () => {
+    const secScanMod = (await import(
+      `file://${path.join(repoRoot, "scripts/security-and-hardcode-scan.mjs").replace(/\\/g, "/")}`
+    )) as {
+      scanRepositoryForSecurityAndHardcodes: (
+        dirPath: string
+      ) => Array<{ file: string; rule: string; detail: string }>;
+    };
+
+    const findings = secScanMod.scanRepositoryForSecurityAndHardcodes(repoRoot);
+    assert.deepEqual(findings, []);
+
+    const requiredDocs = [
+      "docs/security/threat-model.md",
+      "docs/security/asvs-matrix.md",
+      "docs/security/vulnerability-register.md",
+      "docs/security/incident-response-and-key-rotation.md",
+      "SECURITY.md",
+    ];
+    for (const relDoc of requiredDocs) {
+      const fullPath = path.join(repoRoot, relDoc);
+      assert.ok(fs.existsSync(fullPath), `Missing M23 security doc: ${relDoc}`);
+      const content = fs.readFileSync(fullPath, "utf8");
+      assert.ok(content.trim().length > 200, `Doc ${relDoc} is unexpectedly short`);
+    }
   });
 });
