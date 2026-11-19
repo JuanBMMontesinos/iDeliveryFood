@@ -2317,9 +2317,21 @@ export function createApiServer(deps: {
           );
           return;
         }
+        const isOrderPartner = authorizePartnerScope({
+          actor,
+          organizationId: order.organizationId,
+          storeId: order.storeId,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_finance",
+            "partner_support",
+          ],
+        }).allowed;
         if (
           order.customerId !== actor.id &&
-          actor.organizationMemberships.length === 0 &&
+          !isOrderPartner &&
           actor.staffScopes.length === 0
         ) {
           sendError(
@@ -2375,15 +2387,38 @@ export function createApiServer(deps: {
           return;
         }
 
+        const isOrderPartner = authorizePartnerScope({
+          actor,
+          organizationId: order.organizationId,
+          storeId: order.storeId,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_support",
+          ],
+        }).allowed;
+        const isOrderCustomer = order.customerId === actor.id;
+        const isPlatformStaff = actor.staffScopes.length > 0;
+        if (!isOrderCustomer && !isOrderPartner && !isPlatformStaff) {
+          sendError(
+            res,
+            403,
+            "ORDER_FORBIDDEN",
+            "Actor is not authorized to execute commands on this order.",
+            correlationId
+          );
+          return;
+        }
+
         const { json: body } = await readRawAndJsonBody(req);
         const command = String(body.command ?? "") as OrderCommandType;
         const expectedVersion = Number(body.expectedVersion ?? 0);
-        const actorRole =
-          actor.staffScopes.length > 0
-            ? "STAFF"
-            : actor.organizationMemberships.length > 0
-              ? "PARTNER"
-              : "CUSTOMER";
+        const actorRole = isPlatformStaff
+          ? "STAFF"
+          : isOrderPartner
+            ? "PARTNER"
+            : "CUSTOMER";
 
         try {
           const result = executeOrderCommand({
@@ -2432,6 +2467,43 @@ export function createApiServer(deps: {
           return;
         }
         const orderId = orderEventsMatch[1] ?? "";
+        const order = await deps.repository.getOrderById(orderId);
+        if (!order) {
+          sendError(
+            res,
+            404,
+            "ORDER_NOT_FOUND",
+            `Order ${orderId} not found.`,
+            correlationId
+          );
+          return;
+        }
+        const isOrderPartner = authorizePartnerScope({
+          actor,
+          organizationId: order.organizationId,
+          storeId: order.storeId,
+          allowedRoles: [
+            "partner_owner",
+            "partner_manager",
+            "partner_operator",
+            "partner_finance",
+            "partner_support",
+          ],
+        }).allowed;
+        if (
+          order.customerId !== actor.id &&
+          !isOrderPartner &&
+          actor.staffScopes.length === 0
+        ) {
+          sendError(
+            res,
+            403,
+            "ORDER_FORBIDDEN",
+            "Access to order events denied.",
+            correlationId
+          );
+          return;
+        }
         const evts = await deps.repository.listOrderEvents(orderId);
         sendJson(res, 200, correlationId, { data: evts });
         return;
