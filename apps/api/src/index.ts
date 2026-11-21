@@ -20,6 +20,12 @@ import {
   validateStorageUploadSecurity,
 } from "@ideliveryfood/config";
 import {
+  createOperationalMetricsCollector,
+  formatOperationalMetricsPrometheus,
+  resolveOrGenerateCorrelationId,
+  type DatabaseOperationalMetricsSnapshot,
+} from "@ideliveryfood/observability";
+import {
   assertIntegerCents,
   CURRENCY_CODE,
   DEFAULT_LOCALE,
@@ -671,6 +677,7 @@ export interface ApiDataRepository {
     refundAdjustmentCents: number;
     finalPickedTotalCents: number;
   }>;
+  getOperationalDatabaseMetrics?(): Promise<DatabaseOperationalMetricsSnapshot>;
 }
 
 /**
@@ -840,11 +847,21 @@ export function createApiServer(deps: {
   const env = deps.env ?? process.env;
   const apiSecurityHeaders = buildHttpSecurityHeaders({ surface: "api" });
   const rateLimiter = new SlidingWindowRateLimiter(env);
+  const metricsCollector = createOperationalMetricsCollector();
 
   return http.createServer(async (req, res) => {
-    const correlationId =
-      (req.headers["x-correlation-id"] as string | undefined) ??
-      `corr_${crypto.randomUUID()}`;
+    const reqStartNs = process.hrtime.bigint();
+    res.on("finish", () => {
+      const durationMs = Number(process.hrtime.bigint() - reqStartNs) / 1_000_000;
+      metricsCollector.recordHttpRequest({
+        statusCode: res.statusCode,
+        durationMs,
+      });
+    });
+
+    const correlationId = resolveOrGenerateCorrelationId(
+      req.headers["x-correlation-id"] as string | readonly string[] | undefined
+    );
     const locale = resolveSupportedLocale(
       (req.headers["accept-language"] as string | undefined) ?? DEFAULT_LOCALE
     );
@@ -1200,6 +1217,10 @@ export function createApiServer(deps: {
             }
           }
 
+          metricsCollector.recordPspWebhookOutcome(
+            effectiveDeduplicated ? "DUPLICATE" : "SUCCESS"
+          );
+
           sendJson(res, 200, correlationId, {
             data: {
               deduplicated: effectiveDeduplicated,
@@ -1211,6 +1232,7 @@ export function createApiServer(deps: {
           });
           return;
         } catch (webhookErr) {
+          metricsCollector.recordPspWebhookOutcome("FAILURE");
           const msg =
             webhookErr instanceof Error
               ? webhookErr.message
@@ -8719,6 +8741,70 @@ export function createApiServer(deps: {
             reasonCode: ssrf.reasonCode,
           },
         });
+        return;
+      }
+
+      // 26. M25: GET /v1/metrics (Operational Telemetry, HTTP Latency p50/p95/p99, Outbox Backlog, DEAD_LETTER, Ledger & Alerts)
+      if (method === "GET" && pathname === "/v1/metrics") {
+        if (!actor) {
+          sendError(
+            res,
+            401,
+            "AUTH_UNAUTHORIZED",
+            "Authentication required.",
+            correlationId
+          );
+          return;
+        }
+        const metricsAuthz = authorizeStaffAction({
+          actor,
+          allowedRoles: ["tech_admin", "operations"],
+          requireMfaAal2: true,
+        });
+        if (!metricsAuthz.allowed) {
+          sendError(
+            res,
+            403,
+            metricsAuthz.reasonCode,
+            "Operational metrics endpoint (/v1/metrics) requires tech_admin or operations role with MFA aal2.",
+            correlationId
+          );
+          return;
+        }
+
+        const databaseMetrics: DatabaseOperationalMetricsSnapshot =
+          deps.repository.getOperationalDatabaseMetrics
+            ? await deps.repository.getOperationalDatabaseMetrics()
+            : {
+                outboxPendingCount: 0,
+                outboxDeadLetterCount: 0,
+                outboxDeliveredCount: 0,
+                reconciliationDiscrepancyRunsCount: 0,
+                reconciliationDiscrepancyTotalCents: 0,
+                isLedgerBalanced: true,
+                totalDebitsCents: 0,
+                totalCreditsCents: 0,
+                openRiskAlertsCount: 0,
+                activeDeliveryTasksCount: 0,
+                processedWebhookEventsCount: 0,
+              };
+
+        const report = metricsCollector.buildReport({
+          service: "@ideliveryfood/api",
+          database: databaseMetrics,
+        });
+
+        if (parsedUrl.searchParams.get("format") === "prometheus") {
+          const promBody = formatOperationalMetricsPrometheus(report);
+          res.writeHead(200, {
+            "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+            "X-Correlation-Id": correlationId,
+          });
+          res.end(promBody);
+          return;
+        }
+
+        sendJson(res, 200, correlationId, { data: report });
         return;
       }
 

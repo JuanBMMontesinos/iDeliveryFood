@@ -7792,6 +7792,79 @@ export function createSupabasePostgresRepository(params: {
       return mapOrderPickTaskRow(res.rows[0] as Record<string, unknown>);
     }
 
+    async function getOperationalDatabaseMetrics() {
+      const [
+        outboxRes,
+        reconRes,
+        ledgerRes,
+        riskRes,
+        tasksRes,
+        webhookRes,
+      ] = await Promise.all([
+        pool.query(
+          `SELECT
+             count(*) FILTER (WHERE status IN ('PENDING', 'FAILED_RETRY'))::int AS pending_count,
+             count(*) FILTER (WHERE status = 'DEAD_LETTER')::int AS dead_letter_count,
+             count(*) FILTER (WHERE status = 'DELIVERED')::int AS delivered_count
+           FROM public.outbox_events`
+        ),
+        pool.query(
+          `SELECT
+             count(*) FILTER (WHERE discrepancy_count > 0)::int AS discrepancy_runs_count,
+             COALESCE(sum(discrepancy_total_cents), 0)::bigint AS discrepancy_total_cents
+           FROM public.reconciliation_runs`
+        ),
+        pool.query(
+          `SELECT
+             COALESCE(sum(CASE WHEN direction = 'DEBIT' THEN amount_cents ELSE 0 END), 0)::bigint AS total_debits_cents,
+             COALESCE(sum(CASE WHEN direction = 'CREDIT' THEN amount_cents ELSE 0 END), 0)::bigint AS total_credits_cents
+           FROM public.ledger_entries`
+        ),
+        pool.query(
+          `SELECT count(*)::int AS open_risk_alerts_count
+           FROM public.risk_alerts
+           WHERE status IN ('OPEN', 'UNDER_REVIEW')`
+        ),
+        pool.query(
+          `SELECT count(*)::int AS active_tasks_count
+           FROM public.delivery_tasks
+           WHERE status NOT IN ('DELIVERED', 'COMPLETED', 'CANCELLED', 'FAILED')`
+        ),
+        pool.query(
+          `SELECT count(*)::int AS processed_webhooks_count
+           FROM public.payment_provider_events`
+        ),
+      ]);
+
+      const obRow = (outboxRes.rows[0] ?? {}) as Record<string, unknown>;
+      const rcRow = (reconRes.rows[0] ?? {}) as Record<string, unknown>;
+      const ldRow = (ledgerRes.rows[0] ?? {}) as Record<string, unknown>;
+      const rkRow = (riskRes.rows[0] ?? {}) as Record<string, unknown>;
+      const tkRow = (tasksRes.rows[0] ?? {}) as Record<string, unknown>;
+      const whRow = (webhookRes.rows[0] ?? {}) as Record<string, unknown>;
+
+      const totalDebitsCents = Number(ldRow.total_debits_cents ?? 0);
+      const totalCreditsCents = Number(ldRow.total_credits_cents ?? 0);
+
+      return {
+        outboxPendingCount: Number(obRow.pending_count ?? 0),
+        outboxDeadLetterCount: Number(obRow.dead_letter_count ?? 0),
+        outboxDeliveredCount: Number(obRow.delivered_count ?? 0),
+        reconciliationDiscrepancyRunsCount: Number(
+          rcRow.discrepancy_runs_count ?? 0
+        ),
+        reconciliationDiscrepancyTotalCents: Number(
+          rcRow.discrepancy_total_cents ?? 0
+        ),
+        isLedgerBalanced: totalDebitsCents === totalCreditsCents,
+        totalDebitsCents,
+        totalCreditsCents,
+        openRiskAlertsCount: Number(rkRow.open_risk_alerts_count ?? 0),
+        activeDeliveryTasksCount: Number(tkRow.active_tasks_count ?? 0),
+        processedWebhookEventsCount: Number(whRow.processed_webhooks_count ?? 0),
+      };
+    }
+
     return {
       getAnalyticalKpiSummary,
       listRiskAlerts,
@@ -7813,6 +7886,7 @@ export function createSupabasePostgresRepository(params: {
       proposeOrRefundOrderItemSubstitution,
       respondToOrderItemSubstitution,
       completeOrderPickTask,
+      getOperationalDatabaseMetrics,
     };
   })(),
   };

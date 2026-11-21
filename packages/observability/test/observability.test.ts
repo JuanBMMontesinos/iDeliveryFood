@@ -3,7 +3,10 @@ import { describe, it } from "node:test";
 import {
   buildCorrelatedRequestHeaders,
   computeLatencyPercentiles,
+  createOperationalMetricsCollector,
   createStructuredLogEntry,
+  evaluateOperationalAlertRules,
+  formatOperationalMetricsPrometheus,
   redactSensitiveData,
   resolveOrGenerateCorrelationId,
 } from "../src/index.js";
@@ -127,5 +130,94 @@ describe("@ideliveryfood/observability — Recursive PII/Secret Redaction, Corre
     assert.equal(summary.p95Ms, 95);
     assert.equal(summary.p99Ms, 99);
     assert.equal(summary.maxMs, 100);
+  });
+
+  it("collects runtime HTTP & PSP webhook metrics, evaluates M25 SLI/SLO alert rules, and formats Prometheus output", () => {
+    const collector = createOperationalMetricsCollector(5);
+    collector.recordHttpRequest({ statusCode: 200, durationMs: 12.5 });
+    collector.recordHttpRequest({ statusCode: 201, durationMs: 25.0 });
+    collector.recordHttpRequest({ statusCode: 401, durationMs: 4.0 });
+    collector.recordHttpRequest({ statusCode: 403, durationMs: 6.0 });
+    collector.recordHttpRequest({ statusCode: 429, durationMs: 2.0 });
+    collector.recordHttpRequest({ statusCode: 500, durationMs: 1800.0 });
+
+    collector.recordPspWebhookOutcome("SUCCESS");
+    collector.recordPspWebhookOutcome("DUPLICATE");
+    collector.recordPspWebhookOutcome("FAILURE");
+
+    const snap = collector.getHttpSnapshot();
+    assert.equal(snap.totalRequests, 6);
+    assert.equal(snap.http2xxCount, 2);
+    assert.equal(snap.http4xxCount, 3);
+    assert.equal(snap.http401UnauthorizedCount, 1);
+    assert.equal(snap.http403ForbiddenCount, 1);
+    assert.equal(snap.http429RateLimitedCount, 1);
+    assert.equal(snap.http5xxCount, 1);
+    assert.equal(snap.pspWebhookSuccessCount, 1);
+    assert.equal(snap.pspWebhookDuplicateCount, 1);
+    assert.equal(snap.pspWebhookFailureCount, 1);
+    assert.equal(snap.latency.count, 5); // bounded ring buffer max 5
+
+    // Healthy database snapshot with relaxed thresholds -> only PSP failure & p95 latency alert
+    const healthyDb = {
+      outboxPendingCount: 2,
+      outboxDeadLetterCount: 0,
+      outboxDeliveredCount: 15,
+      reconciliationDiscrepancyRunsCount: 0,
+      reconciliationDiscrepancyTotalCents: 0,
+      isLedgerBalanced: true,
+      totalDebitsCents: 14135,
+      totalCreditsCents: 14135,
+      openRiskAlertsCount: 1,
+      activeDeliveryTasksCount: 1,
+      processedWebhookEventsCount: 4,
+    };
+
+    const report = collector.buildReport({
+      database: healthyDb,
+      thresholds: {
+        maxHttpP95LatencyMs: 500,
+        maxOutboxPendingBacklog: 10,
+        maxSecurityDenialSpikeCount: 10,
+      },
+    });
+    assert.equal(report.service, "@ideliveryfood/api");
+    assert.ok(
+      report.alerts.some((a) => a.ruleCode === "ALERT_PSP_WEBHOOK_FAILURES_DETECTED")
+    );
+    assert.ok(
+      report.alerts.some((a) => a.ruleCode === "ALERT_HTTP_P95_LATENCY_SLO_BREACH")
+    );
+
+    // Degraded database snapshot triggering all remaining alert rules
+    const degradedAlerts = evaluateOperationalAlertRules({
+      http: snap,
+      database: {
+        ...healthyDb,
+        isLedgerBalanced: false,
+        totalDebitsCents: 15000,
+        totalCreditsCents: 14135,
+        outboxDeadLetterCount: 2,
+        outboxPendingCount: 250,
+        reconciliationDiscrepancyRunsCount: 1,
+        reconciliationDiscrepancyTotalCents: 865,
+      },
+      thresholds: {
+        maxOutboxPendingBacklog: 100,
+        maxHttpP95LatencyMs: 500,
+        maxSecurityDenialSpikeCount: 2,
+      },
+    });
+    const codes = new Set(degradedAlerts.map((a) => a.ruleCode));
+    assert.equal(codes.has("ALERT_LEDGER_IMBALANCE_DETECTED"), true);
+    assert.equal(codes.has("ALERT_OUTBOX_DEAD_LETTER_DETECTED"), true);
+    assert.equal(codes.has("ALERT_OUTBOX_BACKLOG_HIGH"), true);
+    assert.equal(codes.has("ALERT_RECONCILIATION_DISCREPANCIES_DETECTED"), true);
+    assert.equal(codes.has("ALERT_SECURITY_FORBIDDEN_OR_RATE_LIMIT_SPIKE"), true);
+
+    const promText = formatOperationalMetricsPrometheus(report);
+    assert.match(promText, /ideliveryfood_http_requests_total\{status="all"\} 6/);
+    assert.match(promText, /ideliveryfood_outbox_events_count\{status="DEAD_LETTER"\} 0/);
+    assert.match(promText, /ideliveryfood_ledger_balanced 1/);
   });
 });

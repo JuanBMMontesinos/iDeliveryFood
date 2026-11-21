@@ -60,6 +60,9 @@ importers:
       '@ideliveryfood/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@ideliveryfood/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       pg:
         specifier: ^8.13.3
         version: 8.23.1

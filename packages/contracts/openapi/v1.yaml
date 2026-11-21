@@ -471,6 +471,13 @@ paths:
       responses:
         "201":
           description: Signed upload URL and upload intent created
+  /metrics:
+    get:
+      operationId: getOperationalMetrics
+      summary: Return HTTP latency percentiles (p50/p95/p99), PSP webhook failures, outbox backlog, DEAD_LETTER count, reconciliation status, and SLI/SLO alerts (M25, tech_admin/operations + MFA aal2)
+      responses:
+        "200":
+          description: Operational metrics and active alerts report
 components:
   schemas:
     ApiErrorEnvelope:
