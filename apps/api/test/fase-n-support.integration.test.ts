@@ -109,6 +109,33 @@ describe("Fase N (M17) — Live Supabase Support Cases, SLA, Internal Note Strip
       await repo.pool.query(`DELETE FROM public.refunds WHERE id = ANY($1::uuid[])`, [
         createdRefundIds,
       ]);
+      await repo.pool.query(
+        `ALTER TABLE public.ledger_entries DISABLE TRIGGER trg_ledger_entries_immutable`
+      );
+      try {
+        const jnlRes = await repo.pool.query(
+          `SELECT id FROM public.ledger_journals
+           WHERE reference_type = 'ORDER_REFUND'
+             AND reference_id = $1
+             AND idempotency_key LIKE 'jnl_refund_support_%'`,
+          [SEEDED_ORDER_ID]
+        );
+        const jnlIds = jnlRes.rows.map((r) => String(r.id));
+        if (jnlIds.length > 0) {
+          await repo.pool.query(
+            `DELETE FROM public.ledger_entries WHERE journal_id = ANY($1::uuid[])`,
+            [jnlIds]
+          );
+          await repo.pool.query(
+            `DELETE FROM public.ledger_journals WHERE id = ANY($1::uuid[])`,
+            [jnlIds]
+          );
+        }
+      } finally {
+        await repo.pool.query(
+          `ALTER TABLE public.ledger_entries ENABLE TRIGGER trg_ledger_entries_immutable`
+        );
+      }
     }
     if (createdActionRequestIds.length > 0) {
       await repo.pool.query(

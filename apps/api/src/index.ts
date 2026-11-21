@@ -302,7 +302,7 @@ export interface ApiDataRepository {
     paymentAttemptId: string | null;
     eventType: string;
     redactedPayload: Record<string, unknown>;
-  }): Promise<void>;
+  }): Promise<boolean | void>;
   savePaymentAttempt(attempt: PaymentAttemptContract): Promise<void>;
   listRefundsByOrder(orderId: string): Promise<RefundRecordContract[]>;
   saveRefundAndUpdateOrder(
@@ -1169,8 +1169,12 @@ export function createApiServer(deps: {
             processedEventKeys: processedSet,
           });
 
+          let effectiveDeduplicated = result.deduplicated;
+          let effectiveAction = result.action;
+          let effectiveOrder = result.updatedOrder;
+
           if (!result.deduplicated && result.event) {
-            await deps.repository.recordProcessedWebhookEvent({
+            const newlyInserted = await deps.repository.recordProcessedWebhookEvent({
               providerCode,
               externalEventId,
               paymentAttemptId: null,
@@ -1181,19 +1185,28 @@ export function createApiServer(deps: {
                 currencyCode,
               },
             });
-            await deps.repository.updateOrderWithEvent(
-              result.updatedOrder,
-              result.event
-            );
+            if (newlyInserted === false) {
+              effectiveDeduplicated = true;
+              effectiveAction = "NO_OP_DUPLICATE";
+              const latestOrder = await deps.repository.getOrderById(orderId);
+              if (latestOrder) {
+                effectiveOrder = latestOrder;
+              }
+            } else {
+              await deps.repository.updateOrderWithEvent(
+                result.updatedOrder,
+                result.event
+              );
+            }
           }
 
           sendJson(res, 200, correlationId, {
             data: {
-              deduplicated: result.deduplicated,
-              action: result.action,
-              orderStatus: result.updatedOrder.orderStatus,
-              paymentStatus: result.updatedOrder.paymentStatus,
-              version: result.updatedOrder.version,
+              deduplicated: effectiveDeduplicated,
+              action: effectiveAction,
+              orderStatus: effectiveOrder.orderStatus,
+              paymentStatus: effectiveOrder.paymentStatus,
+              version: effectiveOrder.version,
             },
           });
           return;
@@ -2271,12 +2284,21 @@ export function createApiServer(deps: {
           });
 
           const consumedAtIso = new Date().toISOString();
-          await deps.repository.markQuoteConsumed(quote.id, consumedAtIso);
           await deps.repository.saveOrder(created.order, created.initialEvent);
+          await deps.repository.markQuoteConsumed(quote.id, consumedAtIso);
 
           sendJson(res, 201, correlationId, { data: created.order });
           return;
         } catch (orderErr) {
+          const concurrentExisting =
+            await deps.repository.getOrderByCustomerIdempotencyKey(
+              actor.id,
+              idempotencyKey
+            );
+          if (concurrentExisting) {
+            sendJson(res, 200, correlationId, { data: concurrentExisting });
+            return;
+          }
           const msg =
             orderErr instanceof Error
               ? orderErr.message
@@ -8728,7 +8750,11 @@ export function createApiServer(deps: {
         res,
         500,
         "INTERNAL_SERVER_ERROR",
-        "An unexpected server error occurred.",
+        env.NODE_ENV === "production"
+          ? "An unexpected server error occurred."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected server error occurred.",
         correlationId
       );
     }

@@ -3,6 +3,15 @@
 -- 1. Extend public.order_status enum with domain state machine values
 ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'PENDING_MERCHANT_ACCEPTANCE';
 ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'DISPATCHED';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'DISPATCHING';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'COURIER_ASSIGNED';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'PICKED_UP';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'OUT_FOR_DELIVERY';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'ARRIVED_AT_DESTINATION';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'COMPLETED';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'REJECTED';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'DELIVERY_FAILED';
+ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'DISPUTED';
 ALTER TYPE public.order_status ADD VALUE IF NOT EXISTS 'REFUNDED';
 
 -- 2. Extend public.delivery_status enum with domain state machine values

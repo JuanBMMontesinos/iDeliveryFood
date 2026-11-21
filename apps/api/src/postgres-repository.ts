@@ -1026,6 +1026,26 @@ export function createSupabasePostgresRepository(params: {
       try {
         await client.query("BEGIN");
         await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext('idelivery_order_creation_serial'))"
+        );
+
+        const existingIdem = await client.query(
+          `SELECT id FROM public.orders WHERE customer_id = $1 AND idempotency_key = $2 LIMIT 1`,
+          [customerUuid, order.idempotencyKey]
+        );
+        if ((existingIdem.rowCount ?? 0) > 0) {
+          throw new Error("ORDER_IDEMPOTENT_DUPLICATE: Concurrent order with same idempotency key already committed.");
+        }
+
+        const nextNumRes = await client.query(
+          `SELECT COALESCE(MAX(order_number), 10010)::int + 1 AS next_num FROM public.orders`
+        );
+        const serializedOrderNumber = Math.max(
+          order.orderNumber,
+          Number((nextNumRes.rows[0] as { next_num: number }).next_num)
+        );
+
+        await client.query(
           `INSERT INTO public.orders (
              id, order_number, customer_id, organization_id, store_id, quote_id,
              fulfillment_modality, order_status, payment_status, delivery_status,
@@ -1047,7 +1067,7 @@ export function createSupabasePostgresRepository(params: {
            )`,
           [
             orderUuid,
-            order.orderNumber,
+            serializedOrderNumber,
             customerUuid,
             orgUuid,
             storeUuid,
@@ -1510,13 +1530,14 @@ export function createSupabasePostgresRepository(params: {
       paymentAttemptId: string | null;
       eventType: string;
       redactedPayload: Record<string, unknown>;
-    }): Promise<void> {
-      await pool.query(
+    }): Promise<boolean> {
+      const res = await pool.query(
         `INSERT INTO public.payment_provider_events (
            id, provider_code, external_event_id, payment_attempt_id, event_type,
            signature_verified, processed_at, redacted_payload, is_test_data
          ) VALUES ($1, $2, $3, $4, $5, true, timezone('utc', now()), $6::jsonb, $7)
-         ON CONFLICT (provider_code, external_event_id) DO NOTHING`,
+         ON CONFLICT (provider_code, external_event_id) DO NOTHING
+         RETURNING id`,
         [
           crypto.randomUUID(),
           params.providerCode,
@@ -1527,6 +1548,7 @@ export function createSupabasePostgresRepository(params: {
           isTestData,
         ]
       );
+      return (res.rowCount ?? 0) > 0;
     },
 
     async savePaymentAttempt(attempt: PaymentAttemptContract): Promise<void> {
@@ -1648,6 +1670,77 @@ export function createSupabasePostgresRepository(params: {
             updatedOrder.updatedAtIso,
           ]
         );
+
+        if (refund.amountCents > 0) {
+          const orgUuid = toDeterministicUuid(updatedOrder.organizationId);
+          const jnlUuid = crypto.randomUUID();
+          const jnlRes = await client.query(
+            `INSERT INTO public.ledger_journals (
+               id, reference_type, reference_id, description, idempotency_key, posted_by, is_test_data
+             ) VALUES ($1, 'ORDER_REFUND', $2, $3, $4, $5, $6)
+             ON CONFLICT (idempotency_key) DO NOTHING
+             RETURNING id`,
+            [
+              jnlUuid,
+              orderUuid,
+              `Proportional double-entry refund reversal for Order #${updatedOrder.orderNumber}: ${refund.reason}`,
+              `jnl_refund_${refund.idempotencyKey}`,
+              approvedByUuid ?? requestedByUuid,
+              isTestData,
+            ]
+          );
+          if ((jnlRes.rowCount ?? 0) > 0) {
+            const assetAccRes = await client.query(
+              `INSERT INTO public.ledger_accounts (id, code, name, account_type, currency_code, is_test_data)
+               VALUES ($1, 'ASSET_PSP_CLEARING', 'PSP Clearing Receivable (BRL)', 'ASSET', 'BRL', $2)
+               ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+               RETURNING id`,
+              [crypto.randomUUID(), isTestData]
+            );
+            const assetAccId = String(assetAccRes.rows[0]?.id);
+
+            const merchantExistingRes = await client.query(
+              `SELECT id FROM public.ledger_accounts
+               WHERE account_type = 'LIABILITY' AND organization_id = $1
+               ORDER BY created_at ASC LIMIT 1`,
+              [orgUuid]
+            );
+            let merchantAccId: string;
+            if ((merchantExistingRes.rowCount ?? 0) > 0) {
+              merchantAccId = String(merchantExistingRes.rows[0]?.id);
+            } else {
+              const createdMerchAcc = await client.query(
+                `INSERT INTO public.ledger_accounts (id, code, name, account_type, organization_id, currency_code, is_test_data)
+                 VALUES ($1, $2, $3, 'LIABILITY', $4, 'BRL', $5)
+                 ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                 RETURNING id`,
+                [
+                  crypto.randomUUID(),
+                  `LIABILITY_MERCHANT_ORG_${orgUuid.slice(0, 8)}`,
+                  `Merchant Payable - ${orgUuid.slice(0, 8)}`,
+                  orgUuid,
+                  isTestData,
+                ]
+              );
+              merchantAccId = String(createdMerchAcc.rows[0]?.id);
+            }
+
+            await client.query(
+              `INSERT INTO public.ledger_entries (id, journal_id, account_id, direction, amount_cents, is_test_data)
+               VALUES ($1, $2, $3, 'DEBIT', $4, $5),
+                      ($6, $2, $7, 'CREDIT', $4, $5)`,
+              [
+                crypto.randomUUID(),
+                jnlUuid,
+                merchantAccId,
+                refund.amountCents,
+                isTestData,
+                crypto.randomUUID(),
+                assetAccId,
+              ]
+            );
+          }
+        }
 
         await client.query("COMMIT");
       } catch (err) {
@@ -1840,8 +1933,8 @@ export function createSupabasePostgresRepository(params: {
         // Ensure courier record exists in public.couriers if courierUuid references a profile
         await client.query(
           `INSERT INTO public.couriers (id, approval_status, document_number_hash, active_region_code, vehicle_type, is_online, is_test_data)
-           SELECT $1, 'APPROVED', encode(digest($1::text, 'sha256'), 'hex'), 'SP-CAPITAL', 'MOTORCYCLE', true, true
-           WHERE EXISTS (SELECT 1 FROM public.profiles WHERE id = $1)
+           SELECT $1::uuid, 'APPROVED', 'sha256_' || md5($1::text), 'SP-CAPITAL', 'MOTORCYCLE', true, true
+           WHERE EXISTS (SELECT 1 FROM public.profiles WHERE id = $1::uuid)
            ON CONFLICT (id) DO NOTHING`,
           [courierUuid]
         );
@@ -2018,6 +2111,49 @@ export function createSupabasePostgresRepository(params: {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
+        const lockTaskRes = await client.query(
+          `SELECT active_courier_id
+           FROM public.delivery_tasks
+           WHERE id = $1
+           FOR UPDATE`,
+          [taskUuid]
+        );
+        if ((lockTaskRes.rowCount ?? 0) > 0) {
+          const existingCourier = lockTaskRes.rows[0]?.active_courier_id
+            ? String(lockTaskRes.rows[0].active_courier_id)
+            : null;
+          if (existingCourier && existingCourier !== courierUuid) {
+            throw new Error(
+              `DELIVERY_TASK_ALREADY_ASSIGNED: Task ${task.id} is already assigned to another active courier.`
+            );
+          }
+        }
+
+        const assignRes = await client.query(
+          `INSERT INTO public.delivery_assignments (
+             id, delivery_task_id, courier_id, offer_id, status, is_test_data
+           ) VALUES ($1, $2, $3, $4, 'ACTIVE', $5)
+           ON CONFLICT (delivery_task_id) WHERE status = 'ACTIVE' DO NOTHING
+           RETURNING courier_id`,
+          [crypto.randomUUID(), taskUuid, courierUuid, offerUuid, isTestData]
+        );
+        if ((assignRes.rowCount ?? 0) === 0) {
+          const activeCheck = await client.query(
+            `SELECT courier_id FROM public.delivery_assignments
+             WHERE delivery_task_id = $1 AND status = 'ACTIVE'
+             LIMIT 1`,
+            [taskUuid]
+          );
+          const currentWinner = activeCheck.rows[0]?.courier_id
+            ? String(activeCheck.rows[0].courier_id)
+            : null;
+          if (currentWinner && currentWinner !== courierUuid) {
+            throw new Error(
+              `DELIVERY_TASK_ALREADY_ASSIGNED: Task ${task.id} already has an active assignment for another courier.`
+            );
+          }
+        }
+
         await client.query(
           `UPDATE public.delivery_offers
            SET status = $2, responded_at = $3
@@ -2042,13 +2178,6 @@ export function createSupabasePostgresRepository(params: {
             task.completedAtIso,
           ]
         );
-        await client.query(
-          `INSERT INTO public.delivery_assignments (
-             id, delivery_task_id, courier_id, offer_id, status, is_test_data
-           ) VALUES ($1, $2, $3, $4, 'ACTIVE', $5)
-           ON CONFLICT (delivery_task_id) WHERE status = 'ACTIVE' DO NOTHING`,
-          [crypto.randomUUID(), taskUuid, courierUuid, offerUuid, isTestData]
-        );
         await client.query("COMMIT");
       } catch (err) {
         await client.query("ROLLBACK");
@@ -2060,6 +2189,7 @@ export function createSupabasePostgresRepository(params: {
 
     async completeDeliveryTask(task: DeliveryTaskContract): Promise<void> {
       const taskUuid = toDeterministicUuid(task.id);
+      const orderUuid = toDeterministicUuid(task.orderId);
       await pool.query(
         `UPDATE public.delivery_tasks
          SET status = $2,
@@ -2073,6 +2203,16 @@ export function createSupabasePostgresRepository(params: {
          SET status = 'COMPLETED', ended_at = $2
          WHERE delivery_task_id = $1 AND status = 'ACTIVE'`,
         [taskUuid, task.completedAtIso]
+      );
+      await pool.query(
+        `UPDATE public.orders
+         SET order_status = 'DELIVERED',
+             delivery_status = 'DELIVERED',
+             delivered_at = COALESCE(delivered_at, $2),
+             updated_at = timezone('utc', now())
+         WHERE id = $1
+           AND order_status NOT IN ('CANCELLED', 'REFUNDED', 'COMPLETED')`,
+        [orderUuid, task.completedAtIso]
       );
     },
 

@@ -41,7 +41,10 @@ jobs:
         run: pnpm test:unit:coverage
 
       - name: Run Unit, Contract, i18n Parity & Integration Tests
-        run: pnpm test
+        run: pnpm -r test
+
+      - name: Run End-to-End (E2E), Concurrency & WCAG Accessibility Suite
+        run: pnpm test:e2e
 
       - name: Build all packages and applications
         run: pnpm build
