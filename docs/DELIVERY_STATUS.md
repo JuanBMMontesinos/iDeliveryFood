@@ -46,3 +46,55 @@
 | **`M24`** | Qualidade (QA): Cobertura >= 80%, 27 Invariantes RLS e E2E/WCAG | **CONCLUÍDO** | [M24.md](file:///h:/IAProjects/iDeliveryFood/docs/modules/M24.md) · `docs/qa/test-matrix.md` · `tests/e2e/*.e2e.test.mjs` |
 | **`M25`** | DevOps, CI/CD 6 Jobs, `/v1/metrics`, Alertas e Runbooks RPO/RTO | **CONCLUÍDO** | [M25.md](file:///h:/IAProjects/iDeliveryFood/docs/modules/M25.md) · `docs/ops/*` · `fase-y-observability.integration.test.ts` |
 | **`M26`** | Documentação Completa, OpenAPI 3.1, Manuais e Release GitHub | **CONCLUÍDO** | [M26.md](file:///h:/IAProjects/iDeliveryFood/docs/modules/M26.md) · `docs/manuals/*` · `docs/RELEASE_CHECKLIST.md` |
+
+---
+
+## 3. Evidência da Fase $\beta$ — Auditoria de Dupla Execução Idempotente de `supabase/seed.sql` e 27 Invariantes RLS (`dwsoochnfxldfvcaijie`)
+
+Executado via [`node scripts/verify-double-seed-idempotency.mjs`](file:///h:/IAProjects/iDeliveryFood/scripts/verify-double-seed-idempotency.mjs) contra o cluster PostgreSQL 17 real (`db.dwsoochnfxldfvcaijie.supabase.co:5432/postgres`):
+
+- **Tabelas Públicas com RLS Ativo (`rowsecurity = true`):** `59 / 59` (`0` tabelas desprotegidas).
+- **Tabelas Públicas Populadas (`>= 1` registro):** `59 / 59` (`0` tabelas vazias).
+- **Equilíbrio do Ledger de Partidas Dobradas (`M13`):** `Run #1 Debits = 70532c / Credits = 70532c` | `Run #2 Debits = 70532c / Credits = 70532c` (`isBalanced = true`, `Drift = 0`).
+- **Invariantes SQL/RLS (`supabase/tests/rls_and_constraints_test.sql`):** `27 / 27` aprovados (`ALL_27_SECURITY_RLS_STORAGE_AND_M00_TO_M22_INVARIANTS_PASSED`).
+
+| Tabela-Chave (`public.*`) | Linhas após `seed.sql` (1ª Execução) | Linhas após `seed.sql` (2ª Execução Consecutiva) | Registros `is_test_data = true` | Drift (Duplicação) |
+| :--- | :---: | :---: | :---: | :---: |
+| `organizations` | 2 | 2 | 2 | **0** |
+| `stores` | 3 | 3 | 3 | **0** |
+| `catalog_categories` | 4 | 4 | 4 | **0** |
+| `catalog_products` | 3 | 3 | 3 | **0** |
+| `catalog_option_groups` | 1 | 1 | 1 | **0** |
+| `catalog_options` | 2 | 2 | 2 | **0** |
+| `quotes` | 46 | 46 | 46 | **0** |
+| `orders` | 31 | 31 | 31 | **0** |
+| `order_items` | 2 | 2 | 2 | **0** |
+| `order_events` | 44 | 44 | 44 | **0** |
+| `delivery_tasks` | 1 | 1 | 1 | **0** |
+| `delivery_offers` | 1 | 1 | 1 | **0** |
+| `delivery_assignments` | 1 | 1 | 1 | **0** |
+| `payment_attempts` | 2 | 2 | 2 | **0** |
+| `refunds` | 1 | 1 | 1 | **0** |
+| `ledger_accounts` | 7 | 7 | 7 | **0** |
+| `ledger_journals` | 14 | 14 | 14 | **0** |
+| `ledger_entries` | 71 | 71 | 71 | **0** |
+| `settlements` | 1 | 1 | 1 | **0** |
+| `reconciliation_runs` | 1 | 1 | 1 | **0** |
+| `support_cases` | 3 | 3 | 3 | **0** |
+| `support_messages` | 3 | 3 | 3 | **0** |
+| `support_attachments` | 2 | 2 | 2 | **0** |
+| `support_action_requests` | 2 | 2 | 2 | **0** |
+| `commercial_leads` | 1 | 1 | 1 | **0** |
+| `commercial_proposals` | 1 | 1 | 1 | **0** |
+| `merchant_contracts` | 1 | 1 | 1 | **0** |
+| `commission_rule_versions` | 1 | 1 | 1 | **0** |
+| `promotions` | 2 | 2 | 2 | **0** |
+| `promotion_redemptions` | 1 | 1 | 1 | **0** |
+| `order_reviews` | 1 | 1 | 1 | **0** |
+| `outbox_events` | 126 | 126 | 126 | **0** |
+| `notification_deliveries` | 3 | 3 | 3 | **0** |
+| `risk_alerts` | 2 | 2 | 2 | **0** |
+| `risk_decisions` | 1 | 1 | 1 | **0** |
+| `privacy_requests` | 1 | 1 | 1 | **0** |
+| `order_pick_tasks` | 1 | 1 | 1 | **0** |
+| `order_item_substitutions` | 1 | 1 | 1 | **0** |
