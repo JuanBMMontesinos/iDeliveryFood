@@ -593,21 +593,21 @@ paths:
       responses:
         "201":
           description: Order pick task created
-  /picking/tasks/{pickTaskId}/items/{orderItemId}/weigh:
+  /partner/pick-tasks/{pickTaskId}/items/{orderItemId}/weigh:
     post:
       operationId: weighOrderPickingItem
       summary: Record actual scale weight in grams and recalculate line total in integer BRL cents using HALF_UP rounding (M22)
       responses:
         "200":
           description: Weighed item and updated pick task totals
-  /picking/tasks/{pickTaskId}/items/{orderItemId}/substitute:
+  /partner/pick-tasks/{pickTaskId}/substitutions:
     post:
       operationId: proposeOrRefundOrderItemSubstitution
       summary: Propose a customer-consented item substitution or mark unavailable for automatic partial refund (M22)
       responses:
         "201":
           description: Substitution proposal or unavailable refund adjustment recorded
-  /picking/tasks/{pickTaskId}/complete:
+  /partner/pick-tasks/{pickTaskId}/complete:
     post:
       operationId: completeOrderPickTask
       summary: Finalize a grocery picking task and reconcile any negative price/weight delta as an M12 refund and M13 ledger journal (M22)
