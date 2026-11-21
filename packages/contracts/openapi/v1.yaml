@@ -1,40 +1,64 @@
 openapi: 3.1.0
 info:
   title: iDeliveryFood Platform API
-  version: 1.1.0
+  version: 1.2.0
   description: >
-    Versioned HTTP API (/v1) for the iDeliveryFood multi-tenant food delivery marketplace.
-    Enforces integer cents (BRL), America/Sao_Paulo operational timezone, i18n (en default, pt-BR),
-    strict RBAC/ABAC/RLS, and MFA aal2 step-up for sensitive mutations.
+    Complete versioned HTTP API (/v1) specification for the iDeliveryFood multi-tenant food & grocery delivery marketplace (M00–M26).
+    Enforces integer cents in Brazilian Real (BRL), America/Sao_Paulo operational timezone, bilingual localization (en default, pt-BR),
+    strict RBAC/ABAC/RLS multi-tenant isolation, idempotency (X-Idempotency-Key), end-to-end correlation (X-Correlation-Id),
+    and MFA step-up (aal2) with 4-eyes Segregation of Duties for sensitive financial and governance mutations.
 servers:
   - url: http://localhost:4000/v1
-    description: Local Development API
+    description: Local & Integration API Server (/v1)
+security:
+  - bearerAuth: []
 paths:
   /health/live:
     get:
       operationId: getLiveness
-      summary: Liveness probe
+      summary: Liveness probe (M01/M25)
+      security: []
       responses:
         "200":
           description: Process is alive
   /health/ready:
     get:
       operationId: getReadiness
-      summary: Readiness probe including Supabase connectivity and external provider status
+      summary: Readiness probe including Supabase project ref, timezone, currency, and external provider readiness (M01/M25)
+      security: []
       responses:
         "200":
           description: Service readiness report
   /system/providers:
     get:
       operationId: listProviderStatuses
-      summary: Honest readiness status for pre-configured external providers (PSP, Maps, Push, Email)
+      summary: Honest readiness status for pre-configured external providers (PSP, Maps, Push, Email, SMS, KYC) (M01/M12/M20)
+      security: []
       responses:
         "200":
           description: Provider readiness list
+  /metrics:
+    get:
+      operationId: getOperationalMetrics
+      summary: Return HTTP latency percentiles (p50/p95/p99), PSP webhook failures, outbox backlog, DEAD_LETTER count, reconciliation status, and SLI/SLO alerts in JSON or Prometheus format (M25, tech_admin/operations + MFA aal2)
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, prometheus]
+      responses:
+        "200":
+          description: Operational metrics and active alerts report
+        "401":
+          description: Unauthenticated
+        "403":
+          description: Missing tech_admin/operations role or MFA aal2 step-up
   /me:
     get:
       operationId: getCurrentProfile
-      summary: Get authenticated actor profile, active tenant memberships, and staff scopes
+      summary: Get authenticated actor profile, active tenant memberships, and staff scopes (M03)
       responses:
         "200":
           description: Authenticated profile envelope
@@ -43,41 +67,88 @@ paths:
   /me/preferences:
     patch:
       operationId: updateMyPreferences
-      summary: Update user locale (en or pt-BR) and notification preferences in Supabase
+      summary: Update user locale (en or pt-BR) and notification opt-in preferences in Supabase (M01/M03/M20)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
           description: Updated preferences
   /me/addresses:
     get:
       operationId: listCustomerAddresses
-      summary: List saved customer delivery addresses
+      summary: List saved customer delivery addresses (M05)
       responses:
         "200":
           description: List of addresses
     post:
       operationId: createCustomerAddress
-      summary: Save a new customer delivery address with coordinates
+      summary: Save a new customer delivery address with coordinates (M05)
       responses:
         "201":
           description: Address created
+  /me/devices:
+    get:
+      operationId: listMyDevices
+      summary: List registered mobile/web devices and push consent status for the authenticated user (M03/M20)
+      responses:
+        "200":
+          description: List of user devices
   /me/devices/revoke:
     post:
       operationId: revokeUserDevice
-      summary: Revoke a registered device session and push token
+      summary: Immediately revoke a registered device session, clear push_token, and enqueue security.device_revoked outbox event (M03/M20)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
-          description: Device revoked
+          description: Device revoked and push token cleared
+  /me/notifications:
+    get:
+      operationId: listMyNotifications
+      summary: List in-app/push/email notification deliveries for the authenticated user with Realtime cursor recovery (?sinceCursor=) (M20)
+      parameters:
+        - name: sinceCursor
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: unreadOnly
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Scoped notifications and latestCursorSeq
+  /me/notifications/{notificationId}/read:
+    post:
+      operationId: markMyNotificationRead
+      summary: Mark a notification delivery as READ for the authenticated recipient (M20)
+      responses:
+        "200":
+          description: Notification marked as read
+        "404":
+          description: Notification not found for actor
   /me/privacy-requests:
     post:
       operationId: createPrivacyRequest
-      summary: Submit LGPD export, anonymization, or account deletion request (checks legal hold)
+      summary: Submit LGPD Art. 18 data portability export, anonymization, or account deletion request with legal retention hold check (M03/M21)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Privacy request recorded
+  /me/lgpd-export:
+    get:
+      operationId: getMyLgpdPortabilityPackage
+      summary: Generate structured JSON LGPD Art. 18 V data portability package for the authenticated user (M21)
+      responses:
+        "200":
+          description: Structured LGPD portability package
   /organizations/{orgId}/members:
     get:
       operationId: listOrganizationMembers
-      summary: List members scoped to a merchant organization
+      summary: List members scoped to a merchant organization (M03/M07)
       parameters:
         - name: orgId
           in: path
@@ -101,41 +172,82 @@ paths:
     post:
       operationId: applyMultiUnitCatalogBatch
       summary: Apply batch product availability or price update across multiple units with partial status report (M09)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
           description: Per-unit batch execution results
+  /organizations/{orgId}/catalog/batch:
+    post:
+      operationId: executeMultiUnitCatalogBatchV2
+      summary: Execute or preview (dryRun) a multi-unit catalog batch update persisted in PostgreSQL (M09)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Batch catalog update results per target store
+  /organizations/{orgId}/contract:
+    get:
+      operationId: getOrganizationMerchantContract
+      summary: Retrieve active versioned merchant contract and commission rules for an organization (M07/M18)
+      responses:
+        "200":
+          description: Merchant contract record
+  /organizations/{orgId}/commission-rules:
+    get:
+      operationId: listOrganizationCommissionRuleVersions
+      summary: List versioned commission rules history (platform delivery, merchant delivery, pickup, service fee in bps) for an organization (M18)
+      responses:
+        "200":
+          description: Versioned commission rules list
   /invitations:
     post:
       operationId: createInvitation
-      summary: Issue a single-use expiring invitation for partner or staff membership
+      summary: Issue a single-use expiring invitation for partner or staff membership (M03/M07)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Invitation created
   /invitations/accept:
     post:
       operationId: acceptInvitation
-      summary: Consume a valid single-use invitation token
+      summary: Consume a valid single-use invitation token (M03/M07)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
           description: Invitation accepted
   /onboarding/approvals:
     post:
       operationId: recordOnboardingApproval
-      summary: Approve, reject, or suspend a merchant store or courier (requires staff MFA aal2)
+      summary: Approve, reject, or suspend a merchant store or courier (requires staff MFA aal2) (M03/M16)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
           description: Approval decision recorded and audited
   /stores:
     get:
       operationId: listPublishedStores
-      summary: List active published stores from Supabase with search, cuisine filter, and coverage evaluation (M04)
+      summary: List active published stores from Supabase with search, cuisine filter, and coverage evaluation (M04/M05)
+      security: []
       responses:
         "200":
           description: Paginated published stores
+  /stores/{storeId}:
+    get:
+      operationId: getStoreDetail
+      summary: Retrieve published store detail by ID or slug along with active catalog, availability, hours, exceptions, and service areas (M04/M05)
+      security: []
+      responses:
+        "200":
+          description: Published store detail and catalog
   /stores/{storeId}/catalog:
     get:
       operationId: getStoreCatalog
       summary: Get store details, operating availability, categories, products, and option groups (M04/M05)
+      security: []
       responses:
         "200":
           description: Store catalog and availability
@@ -143,13 +255,49 @@ paths:
     get:
       operationId: evaluateStoreAvailabilityAndCoverage
       summary: Evaluate store operating schedule in America/Sao_Paulo and Haversine radius coverage (M04)
+      security: []
       responses:
         "200":
           description: Store availability and service area eligibility
+  /stores/{storeId}/reviews:
+    get:
+      operationId: listPublicStoreReviews
+      summary: List published verified customer reviews for a store (M05/M19)
+      security: []
+      responses:
+        "200":
+          description: Published store reviews
+  /stores/{storeId}/settings:
+    patch:
+      operationId: updateStoreSettings
+      summary: Update store pause status, prep time bounds, and minimum order in BRL cents (M07)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Store settings updated
+  /stores/{storeId}/bank-account-change-request:
+    post:
+      operationId: requestBankAccountChange
+      summary: Submit a PENDING bank account change request requiring partner_owner + MFA aal2 (M07/M13)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Pending bank account approval request recorded
+  /stores/{storeId}/orders-queue:
+    get:
+      operationId: getStoreOrdersQueue
+      summary: Retrieve live kitchen order console (KDS) queue with SLA countdowns and pause resilience (M08)
+      responses:
+        "200":
+          description: Kitchen order queue grouped by operational column
   /quotes:
     post:
       operationId: calculateQuote
       summary: Calculate and persist an authoritative server-side quote in integer BRL cents with TTL (M04/M10)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Immutable quote snapshot
@@ -157,6 +305,8 @@ paths:
     post:
       operationId: createOrderFromQuote
       summary: Create an idempotent order from an unexpired, unconsumed server quote (M10)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Order created
@@ -167,10 +317,14 @@ paths:
       responses:
         "200":
           description: Order record
+        "403":
+          description: Cross-customer or cross-tenant access denied
   /orders/{orderId}/commands:
     post:
       operationId: executeOrderStateCommand
-      summary: Execute a state transition command (ACCEPT, REJECT, START_PREPARING, MARK_READY, CANCEL) with expectedVersion optimistic locking (M10)
+      summary: Execute a state transition command (ACCEPT, REJECT, START_PREPARING, MARK_READY, PICK_UP, DELIVER, COMPLETE, CANCEL) with expectedVersion optimistic locking (M10)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
           description: Updated order state and appended event
@@ -183,10 +337,40 @@ paths:
       responses:
         "200":
           description: Ordered list of order events
+  /orders/{orderId}/reviews:
+    post:
+      operationId: createVerifiedOrderReview
+      summary: Submit a verified post-order review (requires order owner and DELIVERED/COMPLETED order status) (M05/M19)
+      responses:
+        "201":
+          description: Verified order review created
+  /orders/{orderId}/support-cases:
+    post:
+      operationId: createOrderSupportCase
+      summary: Open a support ticket linked to an order with automatic category-based SLA calculation (M05/M17)
+      responses:
+        "201":
+          description: Support case opened
+  /orders/{orderId}/picking:
+    get:
+      operationId: getOrderGroceryPickingDetail
+      summary: Retrieve variable-weight picking items, scale weights, and pending substitutions for an order (M22)
+      responses:
+        "200":
+          description: Order grocery picking detail
+  /orders/{orderId}/substitutions/{substitutionId}/respond:
+    post:
+      operationId: respondToOrderItemSubstitution
+      summary: Customer approves or rejects a proposed grocery item substitution before timeout expiration (M22)
+      responses:
+        "200":
+          description: Substitution decision recorded
   /payments/attempts:
     post:
       operationId: createPaymentAttempt
       summary: Create an idempotent payment attempt or return honest BLOCKED_MISSING_CREDENTIALS error when PSP is unconfigured (M12)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Payment attempt recorded
@@ -195,7 +379,8 @@ paths:
   /webhooks/psp/{providerCode}:
     post:
       operationId: handlePspWebhook
-      summary: Verify HMAC signature, timestamp replay window, deduplicate event, and reconcile order payment state (M12)
+      summary: Verify HMAC-SHA256 signature, 300s timestamp replay window, deduplicate event atomically, and reconcile order payment state & double-entry ledger journal (M12/M13)
+      security: []
       responses:
         "200":
           description: Webhook processed or deduplicated
@@ -204,107 +389,12 @@ paths:
   /refunds:
     post:
       operationId: createRefund
-      summary: Request or approve a partial/full refund with ABAC ceiling and MFA aal2 verification (M12)
+      summary: Request or approve a partial/full refund with ABAC ceiling, MFA aal2 verification, and proportional ORDER_REFUND ledger reversal (M12/M13)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "201":
           description: Refund recorded and reversal ledger entries generated
-  /stores/{storeId}/settings:
-    patch:
-      operationId: updateStoreSettings
-      summary: Update store pause status, prep time bounds, and minimum order in BRL cents (M07)
-      responses:
-        "200":
-          description: Store settings updated
-  /stores/{storeId}/bank-account-change-request:
-    post:
-      operationId: requestBankAccountChange
-      summary: Submit a PENDING bank account change request requiring partner_owner + MFA aal2 (M07)
-      responses:
-        "201":
-          description: Pending bank account approval request recorded
-  /stores/{storeId}/orders-queue:
-    get:
-      operationId: getStoreOrdersQueue
-      summary: Retrieve live kitchen order console queue with SLA countdowns and pause resilience (M08)
-      responses:
-        "200":
-          description: Kitchen order queue grouped by operational column
-  /admin/staff-scopes:
-    post:
-      operationId: grantStaffScope
-      summary: Grant a staff role scope (requires tech_admin + MFA aal2 + justification; blocks self-grant) (M16)
-      responses:
-        "201":
-          description: Staff scope granted and audited
-  /admin/governance-actions:
-    post:
-      operationId: executeAdminGovernanceAction
-      summary: Execute approval, rejection, suspension, or reactivation decision with MFA aal2 (M16)
-      responses:
-        "201":
-          description: Governance decision recorded in immutable audit trail
-  /admin/audit-logs:
-    get:
-      operationId: listAdminAuditLogs
-      summary: Retrieve read-only immutable audit logs for authorized compliance/admin roles (M16)
-      responses:
-        "200":
-          description: List of audit log records
-  /finance/reconciliation-runs:
-    post:
-      operationId: runPspReconciliation
-      summary: Execute PSP vs internal ledger reconciliation run in BRL integer cents (M13)
-      responses:
-        "201":
-          description: Reconciliation run completed with matched and discrepancy counts
-  /finance/settlements/{settlementId}/execute:
-    post:
-      operationId: executeSettlementPayout
-      summary: Execute merchant or courier settlement payout enforcing MFA aal2, segregation of duties, and honest BLOCKED_NO_PSP status (M13)
-      responses:
-        "200":
-          description: Settlement status updated (PAID_CONFIRMED or BLOCKED_NO_PSP)
-        "403":
-          description: Segregation of duties violation or missing MFA aal2
-  /logistics/offers:
-    post:
-      operationId: createDeliveryOffer
-      summary: Create a delivery task and courier offer hiding exact street until accepted (M14)
-      responses:
-        "201":
-          description: Delivery offer created
-  /logistics/offers/{offerId}/accept:
-    post:
-      operationId: acceptDeliveryOffer
-      summary: Accept a delivery offer transactionally enforcing single active courier and revealing full customer address (M14/M11)
-      responses:
-        "200":
-          description: Offer accepted and full dropoff address revealed
-        "409":
-          description: Offer expired, courier offline, or task already assigned to another courier
-  /logistics/location-samples:
-    post:
-      operationId: submitCourierLocationSample
-      summary: Record courier GPS location sample with staleness and accuracy validation (M14/M11)
-      responses:
-        "201":
-          description: Location sample recorded with isStaleOrLowAccuracy flag
-  /logistics/tasks/{taskId}/complete:
-    post:
-      operationId: completeDeliveryTaskWithOtp
-      summary: Complete a delivery task by verifying the 4-digit customer OTP proof-of-delivery code (M14/M11)
-      responses:
-        "200":
-          description: Delivery task marked DELIVERED
-        "409":
-          description: Invalid 4-digit OTP code
-  /stores/{storeId}:
-    get:
-      operationId: getStoreDetail
-      summary: Retrieve published store detail by ID or slug along with active catalog, availability, hours, exceptions, and service areas (M04)
-      responses:
-        "200":
-          description: Published store detail and catalog
   /partner/stores/{storeId}:
     patch:
       operationId: updatePartnerStore
@@ -457,28 +547,435 @@ paths:
       responses:
         "200":
           description: Option deleted
-  /organizations/{orgId}/catalog/batch:
-    post:
-      operationId: executeMultiUnitCatalogBatchV2
-      summary: Execute or preview (dryRun) a multi-unit catalog batch update persisted in PostgreSQL (M09)
+  /partner/stores/{storeId}/finance:
+    get:
+      operationId: getPartnerStoreFinanceLedger
+      summary: Retrieve store financial statement, commission split, and payouts (restricted to partner_owner and partner_finance) (M07/M13)
       responses:
         "200":
-          description: Batch catalog update results per target store
+          description: Store financial statement
+        "403":
+          description: Denied for partner_operator/partner_catalog (role segregation)
+  /partner/stores/{storeId}/reviews:
+    get:
+      operationId: listPartnerStoreReviews
+      summary: List store customer reviews for partner management (M07/M19)
+      responses:
+        "200":
+          description: Store reviews list
+  /partner/stores/{storeId}/reviews/{reviewId}/reply:
+    post:
+      operationId: replyToStoreReview
+      summary: Publish an official merchant reply to a verified customer review (M07/M19)
+      responses:
+        "200":
+          description: Review updated with partner reply
+  /partner/stores/{storeId}/support-cases:
+    get:
+      operationId: listPartnerStoreSupportCases
+      summary: List support cases associated with a store (internal staff notes stripped) (M07/M17)
+      responses:
+        "200":
+          description: Scoped support cases
+  /partner/stores/{storeId}/picking:
+    get:
+      operationId: getStoreGroceryPickingOverview
+      summary: List grocery picking tasks and substitutions for a store (requires feature_grocery_picking_enabled) (M22)
+      responses:
+        "200":
+          description: Store grocery picking overview
+        "403":
+          description: FEATURE_DISABLED_BY_POLICY or cross-tenant store access
+  /partner/stores/{storeId}/picking/tasks:
+    post:
+      operationId: startStoreOrderPickTask
+      summary: Start a grocery picking task for an order in a store (M22)
+      responses:
+        "201":
+          description: Order pick task created
+  /picking/tasks/{pickTaskId}/items/{orderItemId}/weigh:
+    post:
+      operationId: weighOrderPickingItem
+      summary: Record actual scale weight in grams and recalculate line total in integer BRL cents using HALF_UP rounding (M22)
+      responses:
+        "200":
+          description: Weighed item and updated pick task totals
+  /picking/tasks/{pickTaskId}/items/{orderItemId}/substitute:
+    post:
+      operationId: proposeOrRefundOrderItemSubstitution
+      summary: Propose a customer-consented item substitution or mark unavailable for automatic partial refund (M22)
+      responses:
+        "201":
+          description: Substitution proposal or unavailable refund adjustment recorded
+  /picking/tasks/{pickTaskId}/complete:
+    post:
+      operationId: completeOrderPickTask
+      summary: Finalize a grocery picking task and reconcile any negative price/weight delta as an M12 refund and M13 ledger journal (M22)
+      responses:
+        "200":
+          description: Pick task completed and financial adjustment reconciled
+  /admin/overview:
+    get:
+      operationId: getAdminBackofficeOverview
+      summary: Retrieve Central Admin Backoffice overview (requires staff role + MFA aal2) (M16)
+      responses:
+        "200":
+          description: Admin overview payload
+  /admin/staff-scopes:
+    post:
+      operationId: grantStaffScope
+      summary: Grant a staff role scope (requires tech_admin + MFA aal2 + justification; blocks self-grant) (M16)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Staff scope granted and audited
+  /admin/governance-actions:
+    post:
+      operationId: executeAdminGovernanceAction
+      summary: Execute approval, rejection, suspension, or reactivation decision with MFA aal2 (M16)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Governance decision recorded in immutable audit trail
+  /admin/audit-logs:
+    get:
+      operationId: listAdminAuditLogs
+      summary: Retrieve read-only immutable audit logs for authorized compliance/admin roles with MFA aal2 (M16)
+      responses:
+        "200":
+          description: List of audit log records
+  /finance/overview:
+    get:
+      operationId: getFinanceBackofficeOverview
+      summary: Retrieve Financial Backoffice overview including double-entry ledger balance, settlements, refunds, and reconciliation runs (requires finance/tech_admin + MFA aal2) (M13)
+      responses:
+        "200":
+          description: Finance backoffice overview
+  /finance/reconciliation-runs:
+    post:
+      operationId: runPspReconciliation
+      summary: Execute PSP vs internal ledger reconciliation run in BRL integer cents (M13)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Reconciliation run completed with matched and discrepancy counts
+  /finance/settlements/{settlementId}/execute:
+    post:
+      operationId: executeSettlementPayout
+      summary: Execute merchant or courier settlement payout enforcing MFA aal2, segregation of duties, and honest BLOCKED_NO_PSP status (M13)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Settlement status updated (PAID_CONFIRMED or BLOCKED_NO_PSP)
+        "403":
+          description: Segregation of duties violation or missing MFA aal2
+  /logistics/overview:
+    get:
+      operationId: getLogisticsBackofficeOverview
+      summary: Retrieve Logistics & Dispatch Backoffice overview including active delivery tasks, offers, couriers, and GPS telemetry (M14)
+      responses:
+        "200":
+          description: Logistics backoffice overview
+  /logistics/offers:
+    post:
+      operationId: createDeliveryOffer
+      summary: Create a delivery task and courier offer hiding exact street until accepted (M14)
+      responses:
+        "201":
+          description: Delivery offer created
+  /logistics/offers/{offerId}/accept:
+    post:
+      operationId: acceptDeliveryOffer
+      summary: Accept a delivery offer transactionally enforcing single active courier and revealing full customer address (M14/M11)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Offer accepted and full dropoff address revealed
+        "409":
+          description: Offer expired, courier offline, or task already assigned to another courier
+  /logistics/location-samples:
+    post:
+      operationId: submitCourierLocationSample
+      summary: Record courier GPS location sample with staleness and accuracy validation (M14/M11)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Location sample recorded with isStaleOrLowAccuracy flag
+  /logistics/tasks/{taskId}/complete:
+    post:
+      operationId: completeDeliveryTaskWithOtp
+      summary: Complete a delivery task by verifying the 4-digit customer OTP proof-of-delivery code (M14/M11)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Delivery task and order marked DELIVERED
+        "409":
+          description: Invalid 4-digit OTP code
+  /fleets/overview:
+    get:
+      operationId: getFleetsGovernanceOverview
+      summary: Retrieve Third-Party Fleet Operators governance overview and feature_fleet_operators_enabled policy status (M15)
+      responses:
+        "200":
+          description: Fleet operators governance overview
+  /support/overview:
+    get:
+      operationId: getSupportBackofficeOverview
+      summary: Retrieve Support & Disputes Backoffice overview with SLA breach counters, internal notes, attachments, and finance escalations (M17)
+      responses:
+        "200":
+          description: Support backoffice overview
+  /support/cases:
+    get:
+      operationId: listSupportCases
+      summary: List support cases scoped to the authenticated actor or support staff queue (M17)
+      responses:
+        "200":
+          description: Support cases list
+    post:
+      operationId: createSupportCase
+      summary: Open a new support case with deterministic category-based SLA and priority (M17)
+      responses:
+        "201":
+          description: Support case created
+  /support/cases/{caseId}:
+    get:
+      operationId: getSupportCaseDetail
+      summary: Retrieve support case detail, messages, attachments, and action requests (strips internal notes for non-staff) (M17)
+      responses:
+        "200":
+          description: Support case detail
+  /support/cases/{caseId}/messages:
+    post:
+      operationId: appendSupportCaseMessage
+      summary: Append a message or staff-only internal note (isInternalNote) to a support case (M17)
+      responses:
+        "201":
+          description: Support message created
+  /support/cases/{caseId}/attachments:
+    post:
+      operationId: attachSupportCaseEvidence
+      summary: Register a SHA-256 verified attachment on a support case in bucket support-attachments (M17)
+      responses:
+        "201":
+          description: Support attachment recorded
+  /support/cases/{caseId}/status:
+    patch:
+      operationId: transitionSupportCaseStatus
+      summary: Transition support case status (IN_PROGRESS, AWAITING_CUSTOMER, ESCALATED_FINANCE, RESOLVED, CLOSED) (M17)
+      responses:
+        "200":
+          description: Updated support case
+  /support/cases/{caseId}/action-requests:
+    post:
+      operationId: createSupportActionRequest
+      summary: Request a partial/full refund or courier compensation from a support case (auto-approves <= threshold; escalates > threshold to PENDING_FINANCE) (M17/M12)
+      responses:
+        "201":
+          description: Support action request evaluated
+  /support/action-requests/{requestId}/decide:
+    post:
+      operationId: decideEscalatedSupportActionRequest
+      summary: Approve or reject a PENDING_FINANCE support refund request enforcing Finance MFA aal2 and 4-eyes Segregation of Duties (M17/M12/M13)
+      responses:
+        "200":
+          description: Escalated support action request decided and refund/ledger reversal posted
+  /commercial/overview:
+    get:
+      operationId: getCommercialBackofficeOverview
+      summary: Retrieve B2B Commercial Backoffice overview (leads, proposals, versioned contracts, and commission rule versions) (M18)
+      responses:
+        "200":
+          description: Commercial backoffice overview
+  /commercial/leads:
+    get:
+      operationId: listCommercialLeads
+      summary: List B2B merchant acquisition leads (M18)
+      responses:
+        "200":
+          description: Commercial leads list
+    post:
+      operationId: createCommercialLead
+      summary: Register a new B2B merchant acquisition lead with CNPJ/taxId and legal basis (M18)
+      responses:
+        "201":
+          description: Commercial lead created
+  /commercial/leads/{leadId}/status:
+    patch:
+      operationId: updateCommercialLeadStatus
+      summary: Transition B2B commercial lead pipeline status (NEW, QUALIFYING, PROPOSAL_SENT, NEGOTIATING, CONVERTED, LOST) (M18)
+      responses:
+        "200":
+          description: Commercial lead updated
+  /commercial/leads/{leadId}/proposals:
+    post:
+      operationId: createCommercialProposal
+      summary: Create a commercial proposal with commission rates in basis points (bps) and payout cycle days (M18)
+      responses:
+        "201":
+          description: Commercial proposal created
+  /commercial/proposals/{proposalId}/convert:
+    post:
+      operationId: convertCommercialProposalToOnboarding
+      summary: Convert an accepted commercial proposal into a tenant organization, draft store, versioned merchant contract, and commission rule version (M18)
+      responses:
+        "201":
+          description: Proposal converted into tenant onboarding entities
+  /commercial/contracts/{contractId}/accept:
+    post:
+      operationId: acceptMerchantContract
+      summary: Formally accept a versioned merchant contract (restricted to organization partner_owner) (M18)
+      responses:
+        "200":
+          description: Contract accepted by partner_owner
+  /marketing/overview:
+    get:
+      operationId: getMarketingBackofficeOverview
+      summary: Retrieve Marketing, Promotions & Reviews Moderation Backoffice overview (M19)
+      responses:
+        "200":
+          description: Marketing backoffice overview
+  /promotions:
+    get:
+      operationId: listPromotions
+      summary: List promotional coupon campaigns (M19)
+      responses:
+        "200":
+          description: Promotions list
+    post:
+      operationId: createPromotionCampaign
+      summary: Create a platform-funded, store-funded, or shared-subsidy coupon campaign with integer BRL centavo budget ceiling (M19)
+      responses:
+        "201":
+          description: Promotion campaign created
+  /promotions/redeem:
+    post:
+      operationId: redeemPromotionAtomically
+      summary: Atomically validate and consume coupon budget in PostgreSQL preventing race conditions and enforcing maxUsesPerUser (M19)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "201":
+          description: Coupon redeemed with platform/merchant subsidy split
+        "409":
+          description: PROMO_BUDGET_EXHAUSTED or PROMO_USER_LIMIT_REACHED
+  /marketing/reviews/{reviewId}/moderate:
+    post:
+      operationId: moderateOrderReview
+      summary: Moderate a customer order review (PUBLISHED or HIDDEN_BY_MODERATION) with mandatory reason and audit log (M19)
+      responses:
+        "200":
+          description: Review moderation status updated
+  /governance/overview:
+    get:
+      operationId: getGovernanceBackofficeOverview
+      summary: Retrieve Analytics KPIs, Explainable Risk Alerts, and LGPD Privacy Requests Backoffice overview (requires MFA aal2) (M21)
+      responses:
+        "200":
+          description: Governance backoffice overview
+  /governance/analytics/kpis:
+    get:
+      operationId: getAnalyticalKpiSummary
+      summary: Compute reproducible GMV, Net Platform Revenue, Merchant/Courier Payables reconciled with double-entry ledger, and SLA metrics (M21)
+      responses:
+        "200":
+          description: Analytical KPI summary
+  /governance/analytics/export:
+    post:
+      operationId: exportAnalyticalKpis
+      summary: Generate an audited, paginated CSV or JSON analytical export (requires authorized staff role + MFA aal2) (M21)
+      responses:
+        "200":
+          description: Audited analytical export payload
+  /governance/risk/alerts:
+    get:
+      operationId: listRiskAlerts
+      summary: List explainable fraud and operational risk alerts (M21)
+      responses:
+        "200":
+          description: Explainable risk alerts list
+    post:
+      operationId: evaluateAndCreateRiskAlert
+      summary: Evaluate deterministic explainable risk rules and open an alert in OPEN_AWAITING_HUMAN_REVIEW without opaque auto-ban (M21)
+      responses:
+        "201":
+          description: Explainable risk alert created
+  /governance/risk/alerts/{alertId}/review:
+    post:
+      operationId: reviewRiskAlertHumanDecision
+      summary: Record mandatory human review decision (CONFIRM_RISK_RESTRICT, APPROVE_OVERRIDE, DISMISS_FALSE_POSITIVE) requiring risk_compliance/tech_admin + MFA aal2 (M21)
+      responses:
+        "200":
+          description: Risk alert reviewed and immutable risk_decision recorded
+  /governance/privacy/requests:
+    get:
+      operationId: listPrivacyRequests
+      summary: List LGPD privacy requests (EXPORT_DATA, ANONYMIZE_ACCOUNT, DELETE_ACCOUNT) (M21)
+      responses:
+        "200":
+          description: Privacy requests list
+  /governance/privacy/requests/{requestId}/process:
+    post:
+      operationId: processPrivacyRequest
+      summary: Process an LGPD privacy request (generates JSON portability package or executes PII anonymization / 5-year fiscal retention hold) (M21)
+      responses:
+        "200":
+          description: Privacy request processed
   /storage/signed-upload-url:
     post:
       operationId: createSignedUploadUrl
-      summary: Generate a signed upload URL validating bucket, MIME type, file size limit, and tenant scope (M02/M07)
+      summary: Generate a signed upload URL validating bucket, MIME type, file size limit, anti-path-traversal, and tenant scope (M02/M07/M23)
       responses:
         "201":
           description: Signed upload URL and upload intent created
-  /metrics:
-    get:
-      operationId: getOperationalMetrics
-      summary: Return HTTP latency percentiles (p50/p95/p99), PSP webhook failures, outbox backlog, DEAD_LETTER count, reconciliation status, and SLI/SLO alerts (M25, tech_admin/operations + MFA aal2)
+  /security/webhooks/validate-target:
+    post:
+      operationId: validateExternalWebhookTargetAgainstSsrf
+      summary: Validate an outbound webhook URL against SSRF (blocks non-HTTPS, loopback, RFC 1918 private IPs, link-local 169.254.169.254 metadata, and internal hosts) (M23)
       responses:
         "200":
-          description: Operational metrics and active alerts report
+          description: Target URL passed SSRF validation
+        "400":
+          description: Target URL blocked by SSRF policy
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase Auth HS256 JWT containing sub, email, and aal ('aal1' | 'aal2').
+  parameters:
+    IdempotencyKeyHeader:
+      name: X-Idempotency-Key
+      in: header
+      required: true
+      description: Unique idempotency key (minimum 8 characters) preventing duplicate mutations on retry.
+      schema:
+        type: string
+        minLength: 8
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: End-to-end request correlation identifier (validated against CRLF injection).
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9._:-]{6,128}$"
+    AcceptLanguageHeader:
+      name: Accept-Language
+      in: header
+      required: false
+      description: Supported locale ('en' default, 'pt-BR' selectable).
+      schema:
+        type: string
+        enum: [en, pt-BR]
   schemas:
     ApiErrorEnvelope:
       type: object
@@ -502,5 +999,3 @@ components:
             timestamp:
               type: string
               format: date-time
-            details:
-              type: object
